@@ -24,7 +24,8 @@ theorem easy_or_elim (P Q R : Prop) : (P → R) → (Q → R) → P ∨ Q → R 
 
 -- E4: Contrapositive
 theorem easy_contrapositive (P Q : Prop) : (P → Q) → ¬Q → ¬P := by
-  sorry
+  intro h h' p
+  exact h' (h p)
 
 -- E5: Nat inequality
 theorem easy_nat_le : ∀ n : Nat, n ≤ n + 1 := by
