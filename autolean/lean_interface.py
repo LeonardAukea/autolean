@@ -1,0 +1,249 @@
+"""Interface to Lean 4 — build, diagnostics, and file manipulation."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+from rich.console import Console
+
+console = Console()
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+Severity = Literal["error", "warning", "info"]
+
+
+@dataclass
+class Diagnostic:
+    """A single Lean compiler diagnostic."""
+
+    file: str
+    line: int
+    col: int
+    severity: Severity
+    message: str
+
+    def __str__(self) -> str:
+        return f"{self.file}:{self.line}:{self.col}: {self.severity}: {self.message}"
+
+
+@dataclass
+class BuildResult:
+    """Result of a `lake build` invocation."""
+
+    success: bool
+    diagnostics: list[Diagnostic] = field(default_factory=list)
+    stdout: str = ""
+    stderr: str = ""
+    duration_seconds: float = 0.0
+
+    @property
+    def errors(self) -> list[Diagnostic]:
+        return [d for d in self.diagnostics if d.severity == "error"]
+
+    @property
+    def warnings(self) -> list[Diagnostic]:
+        return [d for d in self.diagnostics if d.severity == "warning"]
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic parser
+# ---------------------------------------------------------------------------
+
+# Lean outputs diagnostics like:
+# ./AutoLean/Sandbox.lean:10:4: error: unsolved goals ...
+_DIAG_RE = re.compile(
+    r"^(.+?):(\d+):(\d+):\s*(error|warning|info):\s*(.*)",
+    re.MULTILINE,
+)
+
+
+def _parse_diagnostics(output: str) -> list[Diagnostic]:
+    """Parse Lean compiler output into structured diagnostics."""
+    diags: list[Diagnostic] = []
+    # Lean sometimes emits multi-line diagnostics; collect them
+    lines = output.split("\n")
+    i = 0
+    while i < len(lines):
+        m = _DIAG_RE.match(lines[i])
+        if m:
+            file, line_s, col_s, sev, msg = m.groups()
+            # Collect continuation lines (indented or non-matching)
+            msg_lines = [msg]
+            j = i + 1
+            while j < len(lines) and not _DIAG_RE.match(lines[j]):
+                msg_lines.append(lines[j])
+                j += 1
+            diags.append(
+                Diagnostic(
+                    file=file,
+                    line=int(line_s),
+                    col=int(col_s),
+                    severity=sev,  # type: ignore[arg-type]
+                    message="\n".join(msg_lines).strip(),
+                )
+            )
+            i = j
+        else:
+            i += 1
+    return diags
+
+
+# ---------------------------------------------------------------------------
+# Lean Project
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LeanProject:
+    """Interface to a Lean 4 project on disk."""
+
+    root: Path
+
+    def __post_init__(self) -> None:
+        self.root = Path(self.root).resolve()
+        if not (self.root / "lakefile.lean").exists():
+            # Also check for lakefile.toml
+            if not (self.root / "lakefile.toml").exists():
+                raise FileNotFoundError(
+                    f"No lakefile.lean or lakefile.toml in {self.root}"
+                )
+
+    # -- Build --------------------------------------------------------------
+
+    def build(self, target: str | None = None, timeout: int = 300) -> BuildResult:
+        """Run `lake build` and return structured results."""
+        cmd = ["lake", "build"]
+        if target:
+            cmd.append(target)
+
+        t0 = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return BuildResult(
+                success=False,
+                stdout="",
+                stderr=f"Build timed out after {timeout}s",
+                duration_seconds=timeout,
+            )
+
+        duration = time.monotonic() - t0
+        combined = result.stdout + "\n" + result.stderr
+        diags = _parse_diagnostics(combined)
+
+        return BuildResult(
+            success=result.returncode == 0,
+            diagnostics=diags,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_seconds=duration,
+        )
+
+    def check_file(self, lean_file: Path, timeout: int = 120) -> BuildResult:
+        """Build a single Lean file by its module name."""
+        # Convert file path to module name: AutoLean/Sandbox.lean -> AutoLean.Sandbox
+        rel = lean_file.resolve().relative_to(self.root)
+        module = str(rel).replace("/", ".").removesuffix(".lean")
+        return self.build(target=module, timeout=timeout)
+
+    # -- File operations ----------------------------------------------------
+
+    def lean_files(self) -> list[Path]:
+        """Find all .lean files in the project (excluding .lake/)."""
+        files = []
+        for p in self.root.rglob("*.lean"):
+            # Skip lake build cache and lakefile itself
+            parts = p.relative_to(self.root).parts
+            if ".lake" in parts or "lake-packages" in parts or "build" in parts:
+                continue
+            if p.name == "lakefile.lean":
+                continue
+            files.append(p)
+        return sorted(files)
+
+    def read_file(self, path: Path) -> str:
+        """Read a Lean file."""
+        return path.read_text(encoding="utf-8")
+
+    def write_file(self, path: Path, content: str) -> None:
+        """Write content to a Lean file."""
+        path.write_text(content, encoding="utf-8")
+
+    # -- Goal extraction (via lake env lean) --------------------------------
+
+    def get_goal_at(
+        self, lean_file: Path, line: int, col: int, timeout: int = 60
+    ) -> str | None:
+        """
+        Get the proof goal at a position using `lake env lean` with a
+        temporary file containing `#check @sorry` trick.
+
+        For a more robust implementation, use the Lean LSP server.
+        This is a lightweight fallback.
+        """
+        # We rely on the build diagnostics for goal state info.
+        # When sorry is present, Lean emits "unsolved goals" in the error.
+        result = self.check_file(lean_file, timeout=timeout)
+        for diag in result.diagnostics:
+            if diag.line == line and "unsolved goals" in diag.message.lower():
+                # Extract the goal state from the diagnostic
+                return diag.message
+        # Also check for "declaration uses 'sorry'" which means the sorry
+        # is there but Lean doesn't always show the goal
+        return None
+
+    # -- Sorry replacement --------------------------------------------------
+
+    def replace_sorry_at(
+        self, path: Path, line: int, replacement: str, original_content: str | None = None
+    ) -> str:
+        """
+        Replace a `sorry` at the given line with the replacement tactic block.
+
+        Returns the new file content.
+        """
+        content = original_content or self.read_file(path)
+        lines = content.split("\n")
+
+        if line < 1 or line > len(lines):
+            raise ValueError(f"Line {line} out of range (1..{len(lines)})")
+
+        target_line = lines[line - 1]
+
+        # Find the sorry token and its indentation
+        sorry_match = re.search(r"\bsorry\b", target_line)
+        if not sorry_match:
+            raise ValueError(f"No 'sorry' found at line {line}: {target_line!r}")
+
+        indent = " " * sorry_match.start()
+
+        # Indent the replacement to match
+        replacement_lines = replacement.strip().split("\n")
+        indented = []
+        for i, rline in enumerate(replacement_lines):
+            if i == 0:
+                indented.append(rline)
+            else:
+                indented.append(indent + "  " + rline if rline.strip() else "")
+
+        replacement_block = "\n".join(indented)
+
+        # Replace sorry with the block
+        new_line = target_line[: sorry_match.start()] + replacement_block + target_line[sorry_match.end() :]
+        lines[line - 1] = new_line
+
+        return "\n".join(lines)
