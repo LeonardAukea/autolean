@@ -12,7 +12,8 @@ theorem easy_mp (P Q : Prop) : P → (P → Q) → Q := by
 
 -- E2: Symmetry of And
 theorem easy_and_comm (P Q : Prop) : P ∧ Q → Q ∧ P := by
-  sorry
+  intro ⟨hP, hQ⟩
+  exact ⟨hQ, hP⟩
 
 -- E3: Disjunction elimination
 theorem easy_or_elim (P Q R : Prop) : (P → R) → (Q → R) → P ∨ Q → R := by
