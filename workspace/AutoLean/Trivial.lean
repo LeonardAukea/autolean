@@ -27,7 +27,7 @@ theorem trivial_true : True := by
 
 -- T6: Natural number equality
 theorem trivial_nat_eq : 2 + 3 = 5 := by
-  sorry
+  rfl
 
 -- T7: Boolean decide
 theorem trivial_bool : (true && false) = false := by
