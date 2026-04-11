@@ -136,6 +136,7 @@ _TACTIC_KEYWORDS = {
     "ext", "funext", "use", "exists", "obtain", "refine", "by_contra",
     "by_cases", "split", "left", "right", "next", "case", "first",
     "try", "repeat", "all_goals", "any_goals", "focus",
+    "by", "do", "return", "match", "if", "then", "else", "where",
     "|", "·", ".", "<;>",
 }
 
@@ -431,7 +432,7 @@ class AutoLeanAgent:
             if record.outcome == Outcome.SUCCESS:
                 targets = [t for t in targets if t.id != target.id]
 
-            # Status line
+            # -- Rich status output --
             summary = self.tracker.summary()
             proved = summary.get("success", 0)
             remaining = len([
@@ -442,14 +443,39 @@ class AutoLeanAgent:
             rate = proved / (elapsed / 3600) if elapsed > 0 else 0
             coverage = proved / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
 
+            # Outcome with color
+            if record.outcome == Outcome.SUCCESS:
+                icon, style = "✓", "bold green"
+            elif record.outcome == Outcome.SKIPPED:
+                icon, style = "→", "yellow"
+            else:
+                icon, style = "✗", "red"
+
             console.print(
-                f"  -> [{'green' if record.outcome == Outcome.SUCCESS else 'red'}]"
-                f"{record.outcome.value}[/]"
-                f"{f' ({record.error_category})' if record.error_category else ''} "
-                f"({record.duration_seconds:.1f}s, {record.llm_tokens} tok) | "
-                f"Proved: {proved}/{self._initial_sorry_count} ({coverage:.0f}%) | "
-                f"Remaining: {remaining} | "
-                f"Rate: {rate:.1f}/hr"
+                f"  [{style}]{icon} {record.outcome.value}[/{style}]"
+                f"{f' [dim]({record.error_category})[/dim]' if record.error_category else ''}"
+                f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
+            )
+
+            # Show build error details (DX improvement)
+            if record.error_summary and record.outcome != Outcome.SUCCESS:
+                err_lines = record.error_summary.strip().split("\n")
+                for eline in err_lines[:4]:
+                    console.print(f"    [dim red]{eline[:120]}[/dim red]")
+                if len(err_lines) > 4:
+                    console.print(f"    [dim]... ({len(err_lines) - 4} more lines)[/dim]")
+
+            # Progress bar
+            bar_width = 30
+            filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
+            bar = "█" * filled + "░" * (bar_width - filled)
+            console.print(
+                f"  [{bar}] "
+                f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
+                f"({coverage:.0f}%) | "
+                f"{remaining} left | "
+                f"{rate:.1f}/hr | "
+                f"{elapsed / 60:.0f}m elapsed"
             )
 
         # -- Session complete -----------------------------------------------
@@ -573,10 +599,16 @@ class AutoLeanAgent:
                 proof_length=proof_lines,
             )
 
-        if self.verbose:
-            console.print(f"  [dim]Generated proof ({proof_lines} lines):[/]")
-            for line in proof.splitlines()[:10]:
-                console.print(f"    [cyan]{line}[/]")
+        # Always show the generated proof (key DX: see what the LLM produces)
+        if proof_lines <= 5 or self.verbose:
+            console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
+            for pline in proof.splitlines()[:12]:
+                console.print(f"    [cyan]{pline}[/]")
+            if proof_lines > 12:
+                console.print(f"    [dim]... ({proof_lines - 12} more lines)[/]")
+        else:
+            first = proof.splitlines()[0].strip()
+            console.print(f"  [bold]Proof[/] ({proof_lines} lines): [cyan]{first}[/] ...")
 
         if self.dry_run:
             console.print(f"  [yellow]DRY RUN -- skipping file write and build[/]")
@@ -626,7 +658,12 @@ class AutoLeanAgent:
             else:
                 sorry_gone = True  # line shifted, original sorry is gone
         if sorry_gone:
-            # SUCCESS -- sorry is gone and file builds clean
+            # SUCCESS -- sorry is gone and file builds clean!
+            console.print(
+                f"  [bold green]PROVED![/bold green] "
+                f"[green]{target.decl_name}[/green] "
+                f"[dim]({build.duration_seconds:.1f}s build)[/dim]"
+            )
             rel_path = str(file_path.relative_to(self.project.root))
             record = ExperimentRecord(
                 cycle=cycle,

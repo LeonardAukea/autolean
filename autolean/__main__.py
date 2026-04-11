@@ -149,8 +149,8 @@ def run(
     help="Output as JSON.",
 )
 def scan(project: Path, as_json: bool) -> None:
-    """Scan a Lean project for sorry targets."""
-    from autolean.scanner import prioritize_targets, scan_project
+    """Scan a Lean project for sorry targets (ordered by difficulty)."""
+    from autolean.scanner import _difficulty_score, prioritize_targets, scan_project
 
     project = project.resolve()
     targets = scan_project(project)
@@ -166,21 +166,37 @@ def scan(project: Path, as_json: bool) -> None:
                 "col": t.col,
                 "decl_name": t.decl_name,
                 "id": t.id,
+                "tactic_mode": t.tactic_mode,
+                "difficulty": _difficulty_score(t),
             }
             for t in targets
         ]
         click.echo(json.dumps(data, indent=2))
     else:
+        _DIFF_LABELS = {0: "trivial", 1: "basic", 2: "easy", 5: "medium", 6: "hard", 9: "research"}
         console.print(f"[bold]Found {len(targets)} sorry target(s) in {project}[/]\n")
+
+        current_diff = -1
         for t in targets:
+            diff = _difficulty_score(t)
+            # Group header when difficulty changes
+            if diff != current_diff:
+                label = _DIFF_LABELS.get(diff, f"level-{diff}")
+                style = {"trivial": "green", "basic": "green", "easy": "cyan",
+                         "medium": "yellow", "hard": "red", "research": "magenta"}.get(label, "white")
+                console.print(f"\n  [{style}]--- {label.upper()} ---[/{style}]")
+                current_diff = diff
+
             try:
                 rel = t.file.relative_to(project)
             except ValueError:
                 rel = t.file
-            console.print(f"  {rel}:{t.line} — [cyan]{t.decl_name}[/]")
+            mode = "tactic" if t.tactic_mode else "term"
+            console.print(f"    {rel}:{t.line} — [cyan]{t.decl_name}[/] [{mode}]")
 
         if not targets:
             console.print("  [green]No sorries found![/]")
+        console.print()
 
 
 # ---------------------------------------------------------------------------

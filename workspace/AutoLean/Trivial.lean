@@ -7,7 +7,7 @@ Good warmup for the agent — expect 100% success rate.
 
 -- T1: Reflexivity
 theorem trivial_rfl : 1 + 1 = 2 := by
-  sorry
+  rfl
 
 -- T2: Propositional identity
 theorem trivial_id (P : Prop) (h : P) : P := by

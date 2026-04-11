@@ -230,13 +230,47 @@ def scan_project(project_root: Path) -> list[SorryTarget]:
     return targets
 
 
-def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
-    """Sort targets by priority — files with fewer sorries first (low-hanging fruit).
+# Difficulty hints embedded in file/directory names (lower = easier = first)
+_DIFFICULTY_KEYWORDS: dict[str, int] = {
+    "trivial": 0,
+    "basic": 1,
+    "easy": 2,
+    "simple": 3,
+    "medium": 5,
+    "hard": 7,
+    "advanced": 8,
+    "gromov": 9,     # open-problem territory
+    "conjecture": 10,
+    "veil": 6,       # distributed systems (medium-hard)
+}
 
-    Within a file, sort by line number (top-to-bottom).
+
+def _difficulty_score(t: SorryTarget) -> int:
+    """Estimate difficulty from path/name heuristics. Lower = easier."""
+    name = (t.rel_path + t.decl_name).lower()
+    for keyword, score in _DIFFICULTY_KEYWORDS.items():
+        if keyword in name:
+            return score
+    return 5  # default: medium
+
+
+def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
+    """Sort targets by estimated difficulty — easy wins first.
+
+    Priority order:
+    1. Difficulty score (from file/name heuristics) — easiest first
+    2. File sorry count (fewer sorries = more likely to succeed)
+    3. Line number within file (top-to-bottom)
+
+    This ensures the agent gets quick wins on Trivial targets before
+    spending cycles on Gromov conjectures.
     """
     file_counts: dict[Path, int] = {}
     for t in targets:
         file_counts[t.file] = file_counts.get(t.file, 0) + 1
 
-    return sorted(targets, key=lambda t: (file_counts[t.file], t.line))
+    return sorted(targets, key=lambda t: (
+        _difficulty_score(t),
+        file_counts[t.file],
+        t.line,
+    ))
