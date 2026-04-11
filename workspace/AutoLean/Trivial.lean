@@ -23,7 +23,7 @@ theorem trivial_or_left (h : True) : True ∨ False := by
 
 -- T5: True is true
 theorem trivial_true : True := by
-  sorry
+  trivial
 
 -- T6: Natural number equality
 theorem trivial_nat_eq : 2 + 3 = 5 := by
