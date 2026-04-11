@@ -29,7 +29,8 @@ theorem easy_contrapositive (P Q : Prop) : (P → Q) → ¬Q → ¬P := by
 
 -- E5: Nat inequality
 theorem easy_nat_le : ∀ n : Nat, n ≤ n + 1 := by
-  sorry
+  intro n
+  apply Nat.le_succ
 
 -- E6: List append nil
 theorem easy_append_nil (α : Type) (l : List α) : l ++ [] = l := by
