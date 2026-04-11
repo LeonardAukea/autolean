@@ -31,7 +31,8 @@ theorem medium_add_zero (n : Nat) : n + 0 = n ∧ 0 + n = n := by
 
 -- M5: Transitivity of ≤
 theorem medium_le_trans (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
-  sorry
+  intro h1 h2
+  exact Nat.le_trans h1 h2
 
 -- M6: If-then-else simplification
 theorem medium_ite_same (P : Prop) [Decidable P] (a : Nat) :
