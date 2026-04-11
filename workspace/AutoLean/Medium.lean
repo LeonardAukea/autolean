@@ -17,7 +17,9 @@ theorem medium_length_reverse (α : Type) (l : List α) :
 -- M3: Map preserves length
 theorem medium_map_length (α β : Type) (f : α → β) (l : List α) :
     (l.map f).length = l.length := by
-  sorry
+  induction l with
+  | nil => rfl
+  | cons x xs ih => simp [List.map, List.length, ih]
 
 -- M4: Zero is identity for addition (both sides)
 theorem medium_add_zero (n : Nat) : n + 0 = n ∧ 0 + n = n := by
