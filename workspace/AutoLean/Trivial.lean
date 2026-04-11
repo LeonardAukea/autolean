@@ -31,7 +31,7 @@ theorem trivial_nat_eq : 2 + 3 = 5 := by
 
 -- T7: Boolean decide
 theorem trivial_bool : (true && false) = false := by
-  sorry
+  rfl
 
 -- T8: Implication
 theorem trivial_impl (P Q : Prop) (h : P) (hpq : P → Q) : Q := by
