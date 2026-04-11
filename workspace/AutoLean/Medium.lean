@@ -43,7 +43,7 @@ theorem medium_ite_same (P : Prop) [Decidable P] (a : Nat) :
 
 -- M7: Distributivity
 theorem medium_mul_add (a b c : Nat) : a * (b + c) = a * b + a * c := by
-  sorry
+  rw [Nat.mul_add]
 
 -- M8: Sum of first n naturals
 theorem medium_sum_formula (n : Nat) :
