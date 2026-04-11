@@ -17,7 +17,10 @@ theorem easy_and_comm (P Q : Prop) : P ∧ Q → Q ∧ P := by
 
 -- E3: Disjunction elimination
 theorem easy_or_elim (P Q R : Prop) : (P → R) → (Q → R) → P ∨ Q → R := by
-  sorry
+  intro hP hQ hOr
+  cases hOr with
+  | inl p => exact hP p
+  | inr q => exact hQ q
 
 -- E4: Contrapositive
 theorem easy_contrapositive (P Q : Prop) : (P → Q) → ¬Q → ¬P := by
