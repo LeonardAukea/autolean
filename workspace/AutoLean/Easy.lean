@@ -44,4 +44,5 @@ theorem easy_comp_assoc (α β γ δ : Type)
 
 -- E8: Double negation introduction
 theorem easy_dne_intro (P : Prop) : P → ¬¬P := by
-  sorry
+  intro h h'
+  exact h' h
