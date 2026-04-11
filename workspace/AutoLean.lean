@@ -5,3 +5,4 @@
 import AutoLean.Trivial
 import AutoLean.Easy
 import AutoLean.Medium
+import AutoLean.Gromov

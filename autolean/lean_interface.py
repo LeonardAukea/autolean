@@ -183,28 +183,60 @@ class LeanProject:
         """Write content to a Lean file."""
         path.write_text(content, encoding="utf-8")
 
-    # -- Goal extraction (via lake env lean) --------------------------------
+    # -- Goal extraction (hole-punch method) --------------------------------
 
-    def get_goal_at(
+    def get_goal_via_hole_punch(
         self, lean_file: Path, line: int, col: int, timeout: int = 60
     ) -> str | None:
-        """
-        Get the proof goal at a position using `lake env lean` with a
-        temporary file containing `#check @sorry` trick.
+        """Extract proof goal state by temporarily replacing sorry with a typed hole.
 
-        For a more robust implementation, use the Lean LSP server.
-        This is a lightweight fallback.
+        The "hole-punch" method:
+        1. Replace `sorry` with `?_` (a typed hole)
+        2. Build — Lean emits "unsolved goals" diagnostic for `?_`
+        3. Parse the goal state from the diagnostic
+        4. Revert the file to original content (always, via try/finally)
+
+        This works because bare `sorry` only produces "declaration uses 'sorry'"
+        warnings (no goal state), while `?_` triggers the full goal display.
         """
-        # We rely on the build diagnostics for goal state info.
-        # When sorry is present, Lean emits "unsolved goals" in the error.
-        result = self.check_file(lean_file, timeout=timeout)
-        for diag in result.diagnostics:
-            if diag.line == line and "unsolved goals" in diag.message.lower():
-                # Extract the goal state from the diagnostic
-                return diag.message
-        # Also check for "declaration uses 'sorry'" which means the sorry
-        # is there but Lean doesn't always show the goal
-        return None
+        original = self.read_file(lean_file)
+        lines = original.split("\n")
+
+        if line < 1 or line > len(lines):
+            return None
+
+        target_line = lines[line - 1]
+        sorry_match = re.search(r"\bsorry\b", target_line)
+        if not sorry_match:
+            return None
+
+        # Punch: replace sorry with ?_ (typed hole)
+        punched_line = (
+            target_line[: sorry_match.start()]
+            + "?_"
+            + target_line[sorry_match.end() :]
+        )
+        lines[line - 1] = punched_line
+        punched_content = "\n".join(lines)
+
+        try:
+            self.write_file(lean_file, punched_content)
+            result = self.check_file(lean_file, timeout=timeout)
+
+            # Look for "unsolved goals" diagnostic (Lean's response to ?_)
+            for diag in result.diagnostics:
+                if "unsolved goals" in diag.message.lower():
+                    return diag.message
+
+            # Fallback: any error diagnostic near the hole
+            for diag in result.diagnostics:
+                if abs(diag.line - line) <= 3 and diag.severity == "error":
+                    return diag.message
+
+            return None
+        finally:
+            # ALWAYS revert — even if build crashes or times out
+            self.write_file(lean_file, original)
 
     # -- Sorry replacement --------------------------------------------------
 

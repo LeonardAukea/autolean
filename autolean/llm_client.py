@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 
@@ -147,60 +146,6 @@ class OllamaClient:
             eval_count=data.get("eval_count", 0),
             eval_duration_ns=data.get("eval_duration", 0),
             prompt_eval_count=data.get("prompt_eval_count", 0),
-            total_duration_ns=int(wall_time * 1e9),
-        )
-
-    # -- streaming (for progress display) -----------------------------------
-
-    def generate_stream(
-        self,
-        system: str,
-        user: str,
-        *,
-        temperature: float | None = None,
-    ) -> LLMResponse:
-        """Generate with streaming — shows tokens in real time."""
-        client = self._ensure_client()
-
-        payload: dict = {
-            "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "stream": True,
-            "options": {
-                "temperature": temperature or self.config.temperature,
-                "num_predict": self.config.num_predict,
-            },
-        }
-
-        t0 = time.monotonic()
-        chunks: list[str] = []
-        eval_count = 0
-
-        with client.stream("POST", "/api/chat", json=payload) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
-                msg = data.get("message", {})
-                token = msg.get("content", "")
-                if token:
-                    chunks.append(token)
-                if data.get("done"):
-                    eval_count = data.get("eval_count", len(chunks))
-
-        wall_time = time.monotonic() - t0
-        text = "".join(chunks).strip()
-
-        return LLMResponse(
-            text=text,
-            model=self.config.model,
-            eval_count=eval_count,
-            eval_duration_ns=0,
-            prompt_eval_count=0,
             total_duration_ns=int(wall_time * 1e9),
         )
 

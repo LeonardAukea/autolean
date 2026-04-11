@@ -46,7 +46,9 @@ class ExperimentRecord:
     llm_tokens: int
     llm_tok_per_sec: float
     error_summary: str = ""
+    error_category: str = ""  # from ErrorCategory enum
     proof_length: int = 0  # lines in the generated proof
+    build_duration_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, str | int | float]:
         return {
@@ -62,6 +64,8 @@ class ExperimentRecord:
             "llm_tokens": self.llm_tokens,
             "llm_tok_s": round(self.llm_tok_per_sec, 1),
             "proof_lines": self.proof_length,
+            "error_category": self.error_category,
+            "build_s": round(self.build_duration_seconds, 1),
             "error": self.error_summary[:200],  # truncate long errors
         }
 
@@ -69,7 +73,7 @@ class ExperimentRecord:
 TSV_FIELDS = [
     "cycle", "timestamp", "target_id", "decl_name", "file", "line",
     "outcome", "attempt", "duration_s", "llm_tokens", "llm_tok_s",
-    "proof_lines", "error",
+    "proof_lines", "error_category", "build_s", "error",
 ]
 
 
@@ -207,8 +211,8 @@ class ExperimentTracker:
             counts[key] = counts.get(key, 0) + 1
         return counts
 
-    def print_summary(self) -> None:
-        """Print a rich summary table."""
+    def print_summary(self, initial_count: int = 0) -> None:
+        """Print a rich summary table with detailed metrics."""
         table = Table(title="AutoLean Session Summary")
         table.add_column("Metric", style="bold")
         table.add_column("Value", justify="right")
@@ -217,17 +221,63 @@ class ExperimentTracker:
         successes = sum(1 for r in self.records if r.outcome == Outcome.SUCCESS)
         failures = total - successes
 
+        # Core metrics
         table.add_row("Total cycles", str(self._cycle))
         table.add_row("Total attempts", str(total))
         table.add_row("Proofs found", f"[green]{successes}[/]")
         table.add_row("Failed attempts", f"[red]{failures}[/]")
+
         if total > 0:
-            table.add_row("Success rate", f"{successes / total * 100:.1f}%")
+            table.add_row("Overall success rate", f"{successes / total * 100:.1f}%")
+
+            # First-attempt success rate (measures prompt quality)
+            first_attempts = [r for r in self.records if r.attempt == 1]
+            first_successes = sum(1 for r in first_attempts if r.outcome == Outcome.SUCCESS)
+            if first_attempts:
+                table.add_row(
+                    "First-attempt success",
+                    f"{first_successes / len(first_attempts) * 100:.1f}%",
+                )
+
+            # Coverage metric (most important!)
+            if initial_count > 0:
+                coverage = successes / initial_count * 100
+                table.add_row(
+                    "Sorry coverage",
+                    f"[{'green' if coverage > 50 else 'yellow'}]"
+                    f"{successes}/{initial_count} ({coverage:.1f}%)[/]",
+                )
+
+            # Token efficiency
+            total_tokens = sum(r.llm_tokens for r in self.records)
+            if total_tokens > 0 and successes > 0:
+                tokens_per_proof = total_tokens / successes
+                table.add_row("Tokens per proof", f"{tokens_per_proof:.0f}")
+            table.add_row("Total tokens", f"{total_tokens:,}")
+
+            # Timing
             avg_dur = sum(r.duration_seconds for r in self.records) / total
             table.add_row("Avg cycle time", f"{avg_dur:.1f}s")
+            avg_build = sum(r.build_duration_seconds for r in self.records) / total
+            if avg_build > 0:
+                table.add_row("Avg build time", f"{avg_build:.1f}s")
 
-        for outcome, count in sorted(self.summary().items()):
-            if outcome != "success":
-                table.add_row(f"  {outcome}", str(count))
+        # Error category breakdown
+        error_counts: dict[str, int] = {}
+        for r in self.records:
+            if r.error_category:
+                error_counts[r.error_category] = error_counts.get(r.error_category, 0) + 1
+        if error_counts:
+            table.add_section()
+            table.add_row("[bold]Error Categories[/]", "")
+            for cat, count in sorted(error_counts.items(), key=lambda x: -x[1]):
+                table.add_row(f"  {cat}", str(count))
+
+        # Outcome breakdown
+        table.add_section()
+        table.add_row("[bold]Outcomes[/]", "")
+        for outcome, count in sorted(self.summary().items(), key=lambda x: -x[1]):
+            style = "green" if outcome == "success" else "red"
+            table.add_row(f"  {outcome}", f"[{style}]{count}[/{style}]")
 
         console.print(table)

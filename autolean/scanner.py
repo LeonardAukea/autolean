@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -23,15 +23,69 @@ class SorryTarget:
     decl_line: int  # where the declaration starts
     context_before: str  # lines above for LLM context
     context_after: str  # lines below for LLM context
+    tactic_mode: bool = True  # True if sorry is inside a `by` block
+    rel_path: str = ""  # relative path from project root (set by scan_project)
 
     @property
     def id(self) -> str:
-        """Unique identifier for this sorry target."""
-        rel = self.file.name
-        return f"{rel}:{self.line}:{self.decl_name}"
+        """Unique identifier for this sorry target.
+
+        Uses rel_path (if set by scan_project) to avoid collisions
+        when two directories contain files with the same name.
+        """
+        path_part = self.rel_path or self.file.name
+        return f"{path_part}:{self.line}:{self.decl_name}"
 
     def __str__(self) -> str:
         return f"{self.id} (col {self.col})"
+
+
+# ---------------------------------------------------------------------------
+# Tactic mode detection
+# ---------------------------------------------------------------------------
+
+
+def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
+    """Determine if a sorry at `sorry_line` (1-indexed) is in tactic mode.
+
+    Walk backward from the sorry line looking for `by` keyword.
+    If we find `by` before hitting the declaration keyword or file start,
+    the sorry is in tactic mode. If we find `:=` without a subsequent `by`,
+    it is in term mode.
+    """
+    # Check the sorry line itself — `sorry` might follow `by` on the same line
+    target = lines[sorry_line - 1]
+    # Check for `by sorry` or `by\n  sorry` pattern
+    stripped = target.strip()
+    if stripped == "sorry":
+        # sorry is on its own line — look backward for `by`
+        for j in range(sorry_line - 2, max(sorry_line - 20, -1), -1):
+            if j < 0:
+                break
+            prev = lines[j].rstrip()
+            # Check if this line ends with `by` or contains `by` followed by nothing meaningful
+            if re.search(r"\bby\s*$", prev):
+                return True
+            if re.search(r":=\s*$", prev):
+                # Found `:=` without `by` — term mode
+                return False
+            # If we hit a declaration keyword, stop searching
+            if re.match(r"\s*(theorem|lemma|def|instance|example|abbrev)\b", prev):
+                return False
+        return True  # default to tactic mode (most common)
+
+    # Check if `by` appears before `sorry` on the same line
+    sorry_idx = target.find("sorry")
+    before_sorry = target[:sorry_idx] if sorry_idx >= 0 else ""
+    if re.search(r"\bby\b", before_sorry):
+        return True
+
+    # Check for `:= sorry` pattern (term mode)
+    if re.search(r":=\s*sorry", target):
+        return False
+
+    # Default: tactic mode (by far the most common case)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -40,20 +94,26 @@ class SorryTarget:
 
 # Matches theorem/lemma/def/instance/example declarations
 _DECL_RE = re.compile(
-    r"^(private\s+|protected\s+|noncomputable\s+|unsafe\s+)*"
+    r"^((?:private|protected|noncomputable|unsafe)\s+)*"
     r"(theorem|lemma|def|instance|example|abbrev)\s+(\S+)?",
     re.MULTILINE,
 )
 
 
 def _find_enclosing_decl(lines: list[str], sorry_line: int) -> tuple[str, int]:
-    """Find the declaration that encloses a sorry at the given line (1-indexed)."""
+    """Find the declaration that encloses a sorry at the given line (1-indexed).
+
+    Returns (declaration_name, declaration_line_number).
+    """
     best_name = "<unknown>"
     best_line = 1
 
-    for m in _DECL_RE.finditer("\n".join(lines)):
+    # Build the full text once for finditer
+    full_text = "\n".join(lines)
+
+    for m in _DECL_RE.finditer(full_text):
         # Convert character offset to line number
-        line_num = "\n".join(lines)[: m.start()].count("\n") + 1
+        line_num = full_text[: m.start()].count("\n") + 1
         if line_num <= sorry_line:
             name = m.group(3) or m.group(2)  # example has no name
             best_name = name.split(":")[0].split("(")[0].strip()  # clean up
@@ -78,9 +138,7 @@ _COMMENT_RE = re.compile(r"--.*$")
 def _is_in_comment(line: str, col: int) -> bool:
     """Check if position is inside a single-line comment."""
     m = _COMMENT_RE.search(line)
-    if m and m.start() < col:
-        return True
-    return False
+    return bool(m and m.start() < col)
 
 
 def _is_in_string(line: str, col: int) -> bool:
@@ -94,23 +152,30 @@ def _is_in_string(line: str, col: int) -> bool:
     return in_string
 
 
-def _is_in_block_comment(lines: list[str], line_idx: int, col: int) -> bool:
-    """Rough check for /- -/ block comments."""
-    text = "\n".join(lines[: line_idx + 1])
-    # Count open /- and close -/ before this position
-    opens = len(re.findall(r"/-", text[:col + sum(len(l) + 1 for l in lines[:line_idx])]))
-    closes = len(re.findall(r"-/", text[:col + sum(len(l) + 1 for l in lines[:line_idx])]))
-    return opens > closes
-
-
 CONTEXT_WINDOW = 40  # lines of context above/below sorry
 
 
-def scan_file(path: Path, context_lines: int = CONTEXT_WINDOW) -> list[SorryTarget]:
-    """Scan a single Lean file for sorry targets."""
+def scan_file(
+    path: Path,
+    context_lines: int = CONTEXT_WINDOW,
+    project_root: Path | None = None,
+) -> list[SorryTarget]:
+    """Scan a single Lean file for sorry targets.
+
+    If project_root is provided, SorryTarget.rel_path is populated
+    for collision-safe IDs.
+    """
     content = path.read_text(encoding="utf-8")
     lines = content.split("\n")
     targets: list[SorryTarget] = []
+
+    # Compute relative path once
+    rel_path = ""
+    if project_root:
+        try:
+            rel_path = str(path.relative_to(project_root))
+        except ValueError:
+            rel_path = path.name
 
     for i, line in enumerate(lines):
         for m in _SORRY_RE.finditer(line):
@@ -124,6 +189,9 @@ def scan_file(path: Path, context_lines: int = CONTEXT_WINDOW) -> list[SorryTarg
 
             line_num = i + 1  # 1-indexed
             decl_name, decl_line = _find_enclosing_decl(lines, line_num)
+
+            # Determine if sorry is in tactic mode or term mode
+            tactic = _is_tactic_mode(lines, line_num)
 
             # Extract context window
             ctx_start = max(0, decl_line - 1)  # from declaration start
@@ -141,6 +209,8 @@ def scan_file(path: Path, context_lines: int = CONTEXT_WINDOW) -> list[SorryTarg
                     decl_line=decl_line,
                     context_before=context_before,
                     context_after=context_after,
+                    tactic_mode=tactic,
+                    rel_path=rel_path,
                 )
             )
 
@@ -156,16 +226,15 @@ def scan_project(project_root: Path) -> list[SorryTarget]:
             continue
         if path.name == "lakefile.lean":
             continue
-        targets.extend(scan_file(path))
+        targets.extend(scan_file(path, project_root=project_root))
     return targets
 
 
 def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
-    """
-    Sort targets by priority — files with fewer sorries first (low-hanging fruit).
+    """Sort targets by priority — files with fewer sorries first (low-hanging fruit).
+
     Within a file, sort by line number (top-to-bottom).
     """
-    # Count sorries per file
     file_counts: dict[Path, int] = {}
     for t in targets:
         file_counts[t.file] = file_counts.get(t.file, 0) + 1
