@@ -23,7 +23,11 @@ theorem medium_map_length (α β : Type) (f : α → β) (l : List α) :
 
 -- M4: Zero is identity for addition (both sides)
 theorem medium_add_zero (n : Nat) : n + 0 = n ∧ 0 + n = n := by
-  sorry
+  constructor
+  · rfl
+  · induction n with
+  | zero => rfl
+  | succ n ih => simp [ih]
 
 -- M5: Transitivity of ≤
 theorem medium_le_trans (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
