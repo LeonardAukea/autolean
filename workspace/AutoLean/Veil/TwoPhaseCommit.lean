@@ -100,7 +100,7 @@ theorem noSplitDecision_init (n : Nat) : NoSplitDecision (TwoPC.init n) := by
 theorem noSplitDecision_castNo {n : Nat} (s : TwoPC n) (i : Fin n)
     (h : NoSplitDecision s) :
     NoSplitDecision (s.castNo i) := by
-  sorry
+  exact h
 
 /-- V2 is preserved by decide. -/
 theorem noSplitDecision_decide {n : Nat} (s : TwoPC n)
