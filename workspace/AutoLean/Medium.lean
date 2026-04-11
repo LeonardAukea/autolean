@@ -37,7 +37,9 @@ theorem medium_le_trans (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
 -- M6: If-then-else simplification
 theorem medium_ite_same (P : Prop) [Decidable P] (a : Nat) :
     (if P then a else a) = a := by
-  sorry
+  split
+  · rfl
+  · rfl
 
 -- M7: Distributivity
 theorem medium_mul_add (a b c : Nat) : a * (b + c) = a * b + a * c := by
