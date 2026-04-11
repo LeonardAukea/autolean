@@ -89,7 +89,8 @@ def NoVoteRespected {n : Nat} (s : TwoPC n) : Prop :=
 
 /-- V1 holds in the initial state. -/
 theorem noFalseCommit_init (n : Nat) : NoFalseCommit (TwoPC.init n) := by
-  sorry
+  intro h
+  contradiction
 
 /-- V2 holds in the initial state. -/
 theorem noSplitDecision_init (n : Nat) : NoSplitDecision (TwoPC.init n) := by
