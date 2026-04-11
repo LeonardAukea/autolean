@@ -40,7 +40,7 @@ theorem easy_append_nil (α : Type) (l : List α) : l ++ [] = l := by
 theorem easy_comp_assoc (α β γ δ : Type)
     (f : α → β) (g : β → γ) (h : γ → δ) (x : α) :
     h (g (f x)) = (h ∘ g ∘ f) x := by
-  sorry
+  rfl
 
 -- E8: Double negation introduction
 theorem easy_dne_intro (P : Prop) : P → ¬¬P := by
