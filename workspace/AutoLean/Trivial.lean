@@ -15,7 +15,7 @@ theorem trivial_id (P : Prop) (h : P) : P := by
 
 -- T3: And introduction
 theorem trivial_and (h1 : True) (h2 : True) : True ∧ True := by
-  sorry
+  exact ⟨h1, h2⟩
 
 -- T4: Or introduction left
 theorem trivial_or_left (h : True) : True ∨ False := by
