@@ -58,10 +58,12 @@ def main(ctx: click.Context) -> None:
 @click.option("--resume", "-r", is_flag=True, help="Resume from previous session.")
 @click.option("--backend", "-b", type=click.Choice(["ollama", "openai_compat"]),
               default=None, help="LLM backend override.")
+@click.option("--overnight", is_flag=True,
+              help="Run all night (unlimited cycles, robust error recovery).")
 def run(
     program: Path, dry_run: bool, verbose: bool,
     model: str | None, max_cycles: int | None,
-    resume: bool, backend: str | None,
+    resume: bool, backend: str | None, overnight: bool,
 ) -> None:
     """Start the autonomous proof agent loop.
 
@@ -74,6 +76,11 @@ def run(
       5. Run `lake build` to verify
       6. Keep (git commit) or revert
       7. Log to results.tsv, repeat
+
+    \b
+    Overnight mode (--overnight):
+      Runs with unlimited cycles, auto-resume if results.tsv exists,
+      and robust error recovery. Designed to run unattended for 8+ hours.
 
     Press Ctrl+C once to stop gracefully. Twice to force quit.
     """
@@ -110,7 +117,13 @@ def run(
         from autolean.llm_client import create_llm_client as _create
         agent.llm = _create(agent.llm.config)
 
-    if max_cycles is not None:
+    if overnight:
+        # Overnight mode: unlimited cycles, auto-resume, robust recovery
+        agent.config.max_cycles = 0
+        agent.config.max_retries_per_sorry = 8  # more attempts per target
+        agent.resume = True  # always resume in overnight mode
+        console.print("[bold magenta]OVERNIGHT MODE[/] — unlimited cycles, auto-resume, Ctrl+C to stop")
+    elif max_cycles is not None:
         agent.config.max_cycles = max_cycles
 
     agent.run()
@@ -363,7 +376,9 @@ def verify_paper(
         else:
             llm_cfg = LLMConfig(model=model)
     else:
-        llm_cfg = LLMConfig(model=cfg.model, temperature=cfg.temperature)
+        # Paper extraction needs more tokens than proof generation (long prompts
+        # cause thinking models to exhaust budget before producing content)
+        llm_cfg = LLMConfig(model=cfg.model, temperature=cfg.temperature, num_predict=16384)
 
     llm = create_llm_client(llm_cfg)
     if not llm.ping():

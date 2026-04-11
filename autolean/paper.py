@@ -179,13 +179,56 @@ def extract_claims(
     response = llm_generate(system, prompt)  # type: ignore
     raw = response.text
 
-    # Parse numbered list
+    # Parse numbered list — flexible format
     claims = []
-    for m in re.finditer(r"(\d+)\.\s*((?:Theorem|Lemma|Proposition|Corollary|Claim)\s*[\d.]*):?\s*(.*?)(?=\n\d+\.|$)", raw, re.DOTALL):
+
+    # Strategy 1: Look for "N. Label: statement" pattern
+    for m in re.finditer(
+        r"(\d+)\.\s*"
+        r"((?:Theorem|Lemma|Proposition|Corollary|Claim|Definition|Conjecture|Property|Fact)"
+        r"(?:\s*[\d.()]+)?)"
+        r":?\s*(.*?)(?=\n\d+\.\s*(?:Theorem|Lemma|Prop|Cor|Claim|Def|Conj)|$)",
+        raw, re.DOTALL | re.IGNORECASE,
+    ):
         label = m.group(2).strip()
         statement = m.group(3).strip()
         lean_name = _to_lean_name(label)
-        claims.append(Claim(label=label, statement=statement, lean_name=lean_name))
+        if statement:  # skip empty matches
+            claims.append(Claim(label=label, statement=statement, lean_name=lean_name))
+
+    # Strategy 2: Flexible line-by-line parsing
+    if not claims:
+        # Split on "N. " at start of line
+        entries = re.split(r"\n(\d+)\.\s+", "\n" + raw.strip())
+        # entries = ['', '1', 'content1', '2', 'content2', ...]
+        i = 1
+        while i + 1 < len(entries):
+            num = entries[i]
+            content = entries[i + 1].strip()
+            # Extract label from **Label**: or Label: prefix
+            label_match = re.match(
+                r"\*{0,2}([\w\s.()-]+?)\*{0,2}\s*[:.]?\s*(.*)",
+                content, re.DOTALL,
+            )
+            if label_match:
+                label = label_match.group(1).strip().strip("*")
+                statement = label_match.group(2).strip()
+                if len(label) > 50:
+                    # Label too long — treat whole thing as statement
+                    label = f"Claim {num}"
+                    statement = content
+            else:
+                label = f"Claim {num}"
+                statement = content
+
+            lean_name = _to_lean_name(label)
+            # Truncate very long statements
+            statement = statement[:500]
+            if statement:
+                claims.append(Claim(
+                    label=label, statement=statement, lean_name=lean_name,
+                ))
+            i += 2
 
     return claims
 

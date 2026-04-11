@@ -177,13 +177,6 @@ class OllamaClient:
         message = data.get("message", {})
         text = message.get("content", "").strip()
 
-        # Gemma 4 and other thinking models put reasoning in "thinking" field
-        # and the answer in "content". If content is empty, extract from thinking.
-        if not text:
-            thinking = message.get("thinking", "")
-            if thinking:
-                text = thinking.strip()
-
         return LLMResponse(
             text=text,
             model=data.get("model", self.config.model),
