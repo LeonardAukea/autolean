@@ -7,7 +7,8 @@ These need small tactic chains: `intro` + `exact`, `cases`, `simp`,
 
 -- E1: Modus ponens
 theorem easy_mp (P Q : Prop) : P → (P → Q) → Q := by
-  sorry
+  intro hP hPQ
+  exact hPQ hP
 
 -- E2: Symmetry of And
 theorem easy_and_comm (P Q : Prop) : P ∧ Q → Q ∧ P := by
