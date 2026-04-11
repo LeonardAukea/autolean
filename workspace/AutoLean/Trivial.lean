@@ -19,7 +19,8 @@ theorem trivial_and (h1 : True) (h2 : True) : True ∧ True := by
 
 -- T4: Or introduction left
 theorem trivial_or_left (h : True) : True ∨ False := by
-  sorry
+  left
+  exact h
 
 -- T5: True is true
 theorem trivial_true : True := by

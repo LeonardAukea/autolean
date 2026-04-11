@@ -1,131 +1,249 @@
 # AutoLean
 
-Autonomous Lean 4 proof agent — overnight sorry elimination, autoformalization,
-and proof golf.
+Autonomous Lean 4 proof agent. Point it at a project, let it run overnight,
+wake up to machine-verified proofs.
 
 Inspired by [autoresearch](https://github.com/karpathy/autoresearch) and
 [autokernel](https://github.com/RightNow-AI/autokernel).
 
-## Concept
-
-Point AutoLean at a Lean 4 project, edit `program.md` to describe your goals,
-and let it run overnight. The agent enters a tight loop:
-
 ```
-edit .lean file → lake build → evaluate → keep (git commit) / revert → log → repeat
+edit .lean file -> lake build -> evaluate -> keep/revert -> log -> repeat
 ```
-
-Each cycle takes ~30-120 seconds, yielding 30-120+ experiments overnight.
-
-## Prerequisites
-
-- **Nix** (recommended): `nix develop` activates the full environment
-- **Lean 4**: via elan (`elan default stable`)
-- **Ollama**: with a model pulled (`ollama pull gemma4:26b`)
-- **uv**: Python package manager (`pip install uv` or via Nix)
 
 ## Quick Start
 
 ```bash
-# Enter the Nix dev shell (provides lean, ollama, uv, git)
+# 1. Enter the Nix dev shell (or install lean, ollama, uv manually)
 nix develop
 
-# Install Python deps
+# 2. Install Python dependencies
 uv sync
 
-# Start Ollama (if not already running)
+# 3. Start Ollama and verify
 ollama serve &
-
-# Check connectivity
 uv run autolean check
 
-# Scan for sorry targets
-uv run autolean scan
-
-# Run the agent (Ctrl+C to stop gracefully)
+# 4. Run the agent
 uv run autolean run
-
-# Run with options
-uv run autolean run --verbose --model gemma4:31b --max-cycles 50
-uv run autolean run --dry-run  # preview without modifying files
 ```
 
-## How It Works
+## What It Does
 
-### The Loop
+AutoLean scans your Lean 4 project for `sorry` placeholders, queries a local
+LLM for proofs, applies them, verifies with `lake build`, and commits
+successes to git. Each cycle takes 5-30 seconds.
 
-1. **Scan** — Find all `sorry` placeholders in `.lean` files
-2. **Prioritize** — Files with fewer sorries first (low-hanging fruit)
-3. **Query** — Send goal state + context to Gemma 4 via Ollama
-4. **Apply** — Replace `sorry` with the generated proof
-5. **Build** — Run `lake build` to verify
-6. **Keep/Revert** — Git commit on success, revert on failure
-7. **Log** — Append to `results.tsv`
-8. **Repeat** — Until interrupted or budget exhausted
+```
+Cycle 1 | trivial_rfl | attempt 1/5
+  Proof (1 lines): rfl
+  PROVED! trivial_rfl (0.9s build)
+  [████░░░░░░░] 6/36 (17%) | 30 left | 136.9/hr
+```
 
-### Steering via `program.md`
+## Models
 
-Edit `program.md` to control the agent — just like autoresearch:
+AutoLean ships with profiles for Lean 4 specialized models. List them:
+
+```bash
+uv run autolean models
+```
+
+| Profile | Model | Size | Best For |
+|---------|-------|------|----------|
+| `gemma4` | Gemma 4 26B | 17 GB | General-purpose (default) |
+| `gemma4-31b` | Gemma 4 31B | 19 GB | Harder reasoning |
+| `deepseek-prover` | DeepSeek Prover V2 7B | 14 GB | Lean 4 proofs (88.9% miniF2F) |
+| `bfs-prover` | BFS-Prover V2 7B | 8 GB | Single-tactic prediction |
+| `ntpctx` | LeanDojo NTP-ctx 8B | 8.5 GB | Tactic prediction with retrieval |
+| `leanstral` | Mistral Leanstral 119B | 68 GB | SOTA Lean 4 (requires vLLM) |
+
+Install a model and use it:
+
+```bash
+ollama pull yinyaowenhua1314/deepseek-prover-v2-7b
+uv run autolean run --model deepseek-prover
+```
+
+Or use any OpenAI-compatible server (vLLM, llama.cpp, LM Studio):
+
+```bash
+vllm serve deepseek-ai/DeepSeek-Prover-V2-7B --port 8000
+uv run autolean run --backend openai_compat --model deepseek-prover
+```
+
+## Use Cases
+
+### Sorry Elimination (core)
+
+The default mode. Scans for `sorry`, fills proofs, verifies, commits.
+
+```bash
+uv run autolean scan              # see what needs proving
+uv run autolean run               # start the agent
+uv run autolean run --resume      # continue previous session
+uv run autolean results           # view experiment log
+uv run autolean diff              # see what was proved
+```
+
+### Paper Verification
+
+Extract theorems from a math paper and try to formalize them:
+
+```bash
+# From a local PDF
+uv run autolean verify-paper paper.pdf
+
+# From arXiv (downloads automatically)
+uv run autolean verify-paper https://arxiv.org/abs/2404.12534
+uv run autolean verify-paper 2404.12534 --pages 3-7
+
+# Just extract claims without formalizing
+uv run autolean verify-paper paper.pdf --extract-only
+```
+
+This creates a `.lean` file with sorry'd theorem statements, then you run
+the agent to attempt proofs.
+
+### Distributed Systems Verification
+
+The workspace includes a Veil-inspired Two-Phase Commit formalization:
+
+```bash
+uv run autolean scan   # shows 6 protocol invariant targets
+uv run autolean run    # agent attempts safety proofs
+```
+
+### Open Problem Research
+
+The Gromov workspace formalizes sub-results of the Polynomial Growth Gap
+Conjecture. The agent attempts ALL targets, including the open problem:
+
+```bash
+uv run autolean scan   # shows RESEARCH targets
+uv run autolean run --model deepseek-prover --max-cycles 50
+```
+
+### New Project Setup
+
+```bash
+uv run autolean init my_project --mathlib
+cd my_project && lake update
+uv run autolean run
+```
+
+## Configuration
+
+Edit `program.md` to steer the agent:
 
 ```markdown
 ## Mode
 sorry-elimination
 
+## Lean Project Path
+workspace
+
+## Strategy Hints
+- Try simp, omega, ring first
+- For inductive types, try cases or induction
+
 ## LLM Configuration
 model: gemma4:26b
 temperature: 0.4
 max_retries_per_sorry: 5
-
-## Strategy Hints
-- Try `simp`, `omega`, `ring` first
-- For inductive types, try `cases` or `induction`
+cycle_timeout_seconds: 120
+max_cycles: 0
 ```
 
-### Modes
+## CLI Reference
 
-| Mode | What It Does |
+| Command | Description |
+|---------|-------------|
+| `autolean run` | Start the autonomous proof loop |
+| `autolean scan` | List sorry targets (grouped by difficulty) |
+| `autolean check` | Verify Ollama + Lean connectivity |
+| `autolean models` | List model profiles and installation status |
+| `autolean results` | Display experiment log |
+| `autolean diff` | Show what the agent proved (git diff) |
+| `autolean verify-paper` | Extract and formalize paper claims |
+| `autolean init` | Scaffold a new AutoLean project |
+
+### `autolean run` Options
+
+| Flag | Description |
 |------|-------------|
-| `sorry-elimination` | Fill in `sorry` placeholders with valid proofs |
-| `autoformalize` | Translate informal math to Lean 4 (planned) |
-| `proof-golf` | Shorten existing proofs (planned) |
+| `--model`, `-m` | Model profile name or raw model string |
+| `--max-cycles` | Limit experiment cycles (0 = unlimited) |
+| `--resume`, `-r` | Continue from previous session |
+| `--dry-run`, `-n` | Query LLM but don't modify files |
+| `--verbose`, `-v` | Show detailed output |
+| `--backend`, `-b` | `ollama` or `openai_compat` |
+
+## Architecture
+
+```
+program.md (goals, model, constraints)
+       |
+       v
+ ┌─────────────────────┐
+ │   Agent Loop (LLM)  │
+ │                      │
+ │ 1. Scan for sorry    │
+ │ 2. Extract goal (?_) │
+ │ 3. Query LLM         │  <-- Gemma4 / DeepSeek / BFS-Prover / Leanstral
+ │ 4. Apply proof        │
+ │ 5. lake build         │  <-- Lean 4 kernel verification
+ │ 6. Keep or revert     │
+ │ 7. Log to results.tsv │
+ └─────────────────────┘
+       |
+  ┌────┼─────┐
+  v    v     v
+ git  TSV  progress
+```
+
+## Metrics
+
+The agent tracks:
+- **Sorry coverage**: proved / total (the goal metric)
+- **First-attempt success rate**: measures prompt quality
+- **Tokens per proof**: efficiency
+- **Error category breakdown**: guides tuning
+- **Proofs per hour**: throughput
 
 ## Project Structure
 
 ```
 autolean/
-├── program.md           # Agent instructions (you edit this)
-├── flake.nix            # Nix dev environment
-├── pyproject.toml       # Python project (uv-managed)
+├── program.md              # Agent configuration (you edit this)
+├── flake.nix               # Nix dev shell
+├── pyproject.toml           # Python project (uv-managed)
 ├── autolean/
-│   ├── agent.py         # The autonomous loop
-│   ├── lean_interface.py # Lean 4 build + file ops
-│   ├── llm_client.py    # Ollama/Gemma client
-│   ├── scanner.py       # Sorry target scanner
-│   ├── tracker.py       # Git + TSV experiment tracking
-│   ├── prompts.py       # LLM system prompts
-│   └── __main__.py      # CLI entry point
-└── workspace/           # Example Lean project with sorry targets
-    ├── lakefile.lean
-    ├── lean-toolchain
-    └── AutoLean/
-        ├── Trivial.lean # Single-tactic targets
-        ├── Easy.lean    # 2-3 step proofs
-        └── Medium.lean  # Induction, case analysis
+│   ├── agent.py            # Core autonomous loop
+│   ├── models.py           # Model profiles (Gemma, DeepSeek, BFS, etc.)
+│   ├── paper.py            # PDF paper verification
+│   ├── llm_client.py       # LLM backends (Ollama + OpenAI-compat)
+│   ├── lean_interface.py   # Lean 4 build + goal extraction
+│   ├── scanner.py          # Sorry scanner + difficulty prioritization
+│   ├── tracker.py          # Git + TSV experiment tracking
+│   ├── error_classifier.py # Error categorization for smarter retries
+│   ├── prompts.py          # LLM prompt templates
+│   └── __main__.py         # CLI
+├── tests/                  # 117 tests
+└── workspace/              # Example Lean project (36 sorry targets)
+    ├── AutoLean/Trivial.lean      # Single-tactic proofs
+    ├── AutoLean/Easy.lean         # 2-3 step proofs
+    ├── AutoLean/Medium.lean       # Induction, case analysis
+    ├── AutoLean/Gromov.lean       # Growth theory + Gap Conjecture
+    └── AutoLean/Veil/             # Distributed systems (2PC)
 ```
 
-## Results
+## Prerequisites
 
-Experiments are logged to `workspace/results.tsv`:
-
-```
-cycle  target_id        outcome    attempt  duration_s  llm_tokens
-1      Trivial.lean:9   success    1        12.3        45
-2      Trivial.lean:13  success    1        8.7         23
-3      Easy.lean:10     fail_build 1        34.1        112
-4      Easy.lean:10     success    2        28.5        89
-```
-
-Git history shows each successful proof as a commit on the `autolean/` branch.
+- **Nix** (recommended): `nix develop` gives you everything
+- **Lean 4**: via [elan](https://github.com/leanprover/elan)
+- **Ollama**: [ollama.com](https://ollama.com) with a model pulled
+- **uv**: `pip install uv` or via Nix
+- **pymupdf** (optional, for paper verification): `uv pip install pymupdf`
 
 ## License
 

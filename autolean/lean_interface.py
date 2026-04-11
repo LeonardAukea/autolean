@@ -263,14 +263,20 @@ class LeanProject:
 
         indent = " " * sorry_match.start()
 
-        # Indent the replacement to match
+        # Indent the replacement to match the sorry's position.
+        # Strip the LLM's indentation and re-indent consistently.
         replacement_lines = replacement.strip().split("\n")
         indented = []
         for i, rline in enumerate(replacement_lines):
-            if i == 0:
-                indented.append(rline)
+            stripped = rline.strip()
+            if not stripped:
+                indented.append("")
+            elif i == 0:
+                # First line: placed exactly where sorry was
+                indented.append(stripped)
             else:
-                indented.append(indent + "  " + rline if rline.strip() else "")
+                # Subsequent lines: same indentation as sorry's column
+                indented.append(indent + stripped)
 
         replacement_block = "\n".join(indented)
 
