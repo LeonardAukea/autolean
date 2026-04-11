@@ -7,7 +7,7 @@ branches, rewriting chains, or structured arguments. Expect ~40% success rate.
 
 -- M1: Addition is commutative (by induction)
 theorem medium_add_comm (n m : Nat) : n + m = m + n := by
-  sorry
+  rw [Nat.add_comm]
 
 -- M2: Length of reversed list
 theorem medium_length_reverse (α : Type) (l : List α) :
