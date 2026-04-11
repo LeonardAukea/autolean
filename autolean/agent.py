@@ -18,7 +18,7 @@ from rich.panel import Panel
 
 from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
 from autolean.lean_interface import LeanProject
-from autolean.llm_client import LLMConfig, OllamaClient
+from autolean.llm_client import LLMBackend, LLMConfig, create_llm_client
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.scanner import SorryTarget, prioritize_targets, scan_project
 from autolean.tracker import ExperimentRecord, ExperimentTracker, Outcome
@@ -126,22 +126,66 @@ def parse_program(path: Path) -> ProgramConfig:
 # ---------------------------------------------------------------------------
 
 
+# Common Lean tactic keywords for detecting tactic-like lines
+_TACTIC_KEYWORDS = {
+    "simp", "ring", "omega", "decide", "norm_num", "trivial", "rfl",
+    "exact", "apply", "intro", "intros", "constructor", "cases", "rcases",
+    "induction", "have", "let", "show", "calc", "conv", "rw", "rewrite",
+    "unfold", "dsimp", "field_simp", "push_neg", "contradiction",
+    "exfalso", "assumption", "tauto", "aesop", "linarith", "positivity",
+    "ext", "funext", "use", "exists", "obtain", "refine", "by_contra",
+    "by_cases", "split", "left", "right", "next", "case", "first",
+    "try", "repeat", "all_goals", "any_goals", "focus",
+    "|", "·", ".", "<;>",
+}
+
+
+def _is_tactic_line(line: str) -> bool:
+    """Check if a line looks like Lean tactic code (not English text)."""
+    stripped = line.strip()
+    if not stripped:
+        return True  # blank lines are fine in tactic blocks
+    # Check if the first token is a known tactic keyword
+    first_token = stripped.split()[0].rstrip("(").rstrip("{") if stripped.split() else ""
+    if first_token in _TACTIC_KEYWORDS:
+        return True
+    # Indented lines in a tactic block are likely continuations
+    if line.startswith("  ") or line.startswith("\t"):
+        return True
+    # Lines starting with | or · are case arms
+    if stripped.startswith("|") or stripped.startswith("·"):
+        return True
+    # Lines with := or => are likely tactic fragments
+    if ":=" in stripped or "=>" in stripped:
+        return True
+    return False
+
+
 def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
     """Strip markdown fences and LLM artifacts from proof output.
+
+    This function is aggressive about extracting tactic code from verbose
+    LLM responses. It handles:
+    - Markdown code fences (```lean ... ```)
+    - English text before/after the tactic block
+    - Leading `by` keyword (in tactic mode)
+    - Explanatory text that mentions "sorry"
 
     Args:
         raw: Raw LLM output text.
         tactic_mode: If True, the sorry is inside a `by` block, so
-            a leading `by` in the output should be stripped (it would
-            produce `by by ...`). If False, the sorry is in term mode,
-            so a leading `by` should be preserved (the LLM is entering
-            tactic mode).
+            a leading `by` in the output should be stripped.
     """
     text = raw.strip()
 
-    # Remove markdown code fences
-    text = re.sub(r"^```(?:lean4?|)\s*\n?", "", text)
-    text = re.sub(r"\n?```\s*$", "", text)
+    # Strategy 1: If there's a fenced code block, extract it
+    fenced = re.search(r"```(?:lean4?|)\s*\n(.*?)```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        # Remove partial fences
+        text = re.sub(r"^```(?:lean4?|)\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
 
     # Remove leading/trailing blank lines
     lines = text.split("\n")
@@ -150,10 +194,24 @@ def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
 
+    # Strategy 2: If lines mix English and tactics, extract only tactic lines
+    # Detect if the output starts with English prose (not a tactic keyword)
+    if lines and not _is_tactic_line(lines[0]):
+        # Find the first tactic-like line
+        tactic_start = None
+        for i, line in enumerate(lines):
+            if _is_tactic_line(line) and line.strip():
+                tactic_start = i
+                break
+        if tactic_start is not None:
+            lines = lines[tactic_start:]
+        # Trim trailing English text
+        while lines and not _is_tactic_line(lines[-1]):
+            lines.pop()
+
     # Strip leading `by` only in tactic mode (sorry is already inside `by`)
     if tactic_mode and lines and lines[0].strip() == "by":
         lines = lines[1:]
-        # Also strip the resulting leading blank lines
         while lines and not lines[0].strip():
             lines.pop(0)
 
@@ -174,10 +232,12 @@ class AutoLeanAgent:
         *,
         dry_run: bool = False,
         verbose: bool = False,
+        resume: bool = False,
     ):
         self.program_path = program_path.resolve()
         self.dry_run = dry_run
         self.verbose = verbose
+        self.resume = resume
         self._interrupted = False
 
         # Parse program.md
@@ -187,12 +247,12 @@ class AutoLeanAgent:
         lean_root = self.program_path.parent / self.config.lean_project_path
         self.project = LeanProject(lean_root)
 
-        # Initialize LLM client
+        # Initialize LLM client via backend factory (P3.4)
         llm_cfg = LLMConfig(
             model=self.config.model,
             temperature=self.config.temperature,
         )
-        self.llm = OllamaClient(config=llm_cfg)
+        self.llm: LLMBackend = create_llm_client(llm_cfg)
 
         # Initialize tracker
         self.tracker = ExperimentTracker(project_root=self.project.root)
@@ -207,6 +267,38 @@ class AutoLeanAgent:
 
         # Track initial sorry count for coverage metric
         self._initial_sorry_count: int = 0
+
+        # P3.3: Resume state
+        self._proved_ids: set[str] = set()
+
+    # -- Resume loading (P3.3) ----------------------------------------------
+
+    def _load_resume_state(self) -> None:
+        """Load attempt counts and proved IDs from a previous results.tsv."""
+        import csv
+
+        if not self.tracker.results_file.exists():
+            console.print("[yellow]No results.tsv found — starting fresh.[/]")
+            return
+
+        with open(self.tracker.results_file) as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                tid = row.get("target_id", "")
+                attempt = int(row.get("attempt", "0") or "0")
+                outcome = row.get("outcome", "")
+                cycle = int(row.get("cycle", "0") or "0")
+
+                self._attempts[tid] = max(self._attempts.get(tid, 0), attempt)
+                self.tracker._cycle = max(self.tracker._cycle, cycle)
+
+                if outcome == "success":
+                    self._proved_ids.add(tid)
+
+        console.print(
+            f"[dim]  Loaded {len(self._proved_ids)} proved, "
+            f"{len(self._attempts)} attempted from previous session.[/]"
+        )
 
     # -- Signal handling ----------------------------------------------------
 
@@ -285,6 +377,19 @@ class AutoLeanAgent:
             console.print(f"  • {t} [{mode_label}]")
         if len(targets) > 10:
             console.print(f"  ... and {len(targets) - 10} more")
+
+        # P3.3: Resume from previous session
+        if self.resume:
+            self._load_resume_state()
+            proved_ids = {
+                tid for tid, attempts in self._attempts.items()
+                if tid in self._proved_ids
+            }
+            targets = [t for t in targets if t.id not in proved_ids]
+            console.print(
+                f"[cyan]Resumed:[/] {len(proved_ids)} already proved, "
+                f"{len(targets)} remaining, cycle {self.tracker.cycle}"
+            )
 
         # -- Main loop ------------------------------------------------------
         console.print(f"\n[bold green]Starting autonomous loop...[/]\n")
@@ -442,7 +547,10 @@ class AutoLeanAgent:
         # P0.1: Pass tactic_mode to clean_llm_proof
         proof = clean_llm_proof(response.text, tactic_mode=target.tactic_mode)
 
-        if not proof or re.search(r"\bsorry\b", proof):
+        # Reject if proof is empty or contains `sorry` as a standalone tactic.
+        # Only match sorry at line start (possibly indented) — not in English text.
+        has_sorry_tactic = bool(re.search(r"(?m)^\s*sorry\s*$", proof))
+        if not proof or has_sorry_tactic:
             self._failed_proofs.setdefault(target.id, []).append(response.text)
             return self._make_record(
                 cycle, target, attempt, t0,
@@ -506,9 +614,18 @@ class AutoLeanAgent:
         duration = time.monotonic() - t0
 
         # -- Step 5: Keep or revert -----------------------------------------
-        if build.success and not any(
-            "sorry" in e.message.lower() for e in build.warnings
-        ):
+        # Check success: build succeeded AND the sorry at our target line is gone.
+        # We re-read the file and check if `sorry` is still at the original line.
+        # This is robust: other sorrys in the file don't interfere.
+        sorry_gone = False
+        if build.success:
+            new_file_content = self.project.read_file(file_path)
+            new_lines = new_file_content.split("\n")
+            if target.line <= len(new_lines):
+                sorry_gone = "sorry" not in new_lines[target.line - 1]
+            else:
+                sorry_gone = True  # line shifted, original sorry is gone
+        if sorry_gone:
             # SUCCESS -- sorry is gone and file builds clean
             rel_path = str(file_path.relative_to(self.project.root))
             record = ExperimentRecord(

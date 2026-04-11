@@ -6,3 +6,4 @@ import AutoLean.Trivial
 import AutoLean.Easy
 import AutoLean.Medium
 import AutoLean.Gromov
+import AutoLean.Veil.TwoPhaseCommit

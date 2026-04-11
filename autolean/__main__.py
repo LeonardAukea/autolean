@@ -69,12 +69,26 @@ def main(ctx: click.Context) -> None:
     default=None,
     help="Override max experiment cycles (0 = unlimited).",
 )
+@click.option(
+    "--resume", "-r",
+    is_flag=True,
+    default=False,
+    help="Resume from previous session (reads results.tsv).",
+)
+@click.option(
+    "--backend", "-b",
+    type=click.Choice(["ollama", "openai_compat"]),
+    default=None,
+    help="LLM backend (default: ollama).",
+)
 def run(
     program: Path,
     dry_run: bool,
     verbose: bool,
     model: str | None,
     max_cycles: int | None,
+    resume: bool,
+    backend: str | None,
 ) -> None:
     """Start the autonomous proof agent loop.
 
@@ -82,7 +96,7 @@ def run(
     The agent reads program.md, scans for sorry targets,
     and enters the edit-build-evaluate loop:
       1. Pick highest-priority sorry target
-      2. Query Gemma 4 via Ollama for a proof
+      2. Query LLM (Gemma 4 via Ollama by default) for a proof
       3. Apply the proof to the .lean file
       4. Run `lake build` to check
       5. Keep (git commit) or revert
@@ -98,12 +112,18 @@ def run(
         program_path=program,
         dry_run=dry_run,
         verbose=verbose,
+        resume=resume,
     )
 
     # CLI overrides
     if model:
         agent.config.model = model
         agent.llm.config.model = model
+    if backend:
+        agent.llm.config.backend = backend
+        # Recreate client with new backend
+        from autolean.llm_client import create_llm_client
+        agent.llm = create_llm_client(agent.llm.config)
     if max_cycles is not None:
         agent.config.max_cycles = max_cycles
 
