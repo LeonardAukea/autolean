@@ -428,9 +428,21 @@ class AutoLeanAgent:
             record = self._try_fill_sorry(cycle, target, attempt_num)
             self.tracker.log(record)
 
-            # P0.4: On success, remove the target from the persistent list
+            # On success, rescan the modified file (line numbers may have shifted
+            # due to multi-line proof insertion) and update the target list.
             if record.outcome == Outcome.SUCCESS:
-                targets = [t for t in targets if t.id != target.id]
+                changed_file = target.file
+                # Remove ALL targets from the changed file
+                targets = [t for t in targets if t.file != changed_file]
+                # Rescan just that file for remaining sorrys
+                from autolean.scanner import scan_file
+                new_targets = scan_file(changed_file, project_root=self.project.root)
+                targets.extend(new_targets)
+                targets = prioritize_targets(targets)
+                # Invalidate goal cache for targets in this file (lines shifted)
+                stale_ids = [k for k in self._goal_cache if changed_file.name in k]
+                for k in stale_ids:
+                    del self._goal_cache[k]
 
             # -- Rich status output --
             summary = self.tracker.summary()

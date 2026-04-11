@@ -36,4 +36,4 @@ theorem trivial_bool : (true && false) = false := by
 
 -- T8: Implication
 theorem trivial_impl (P Q : Prop) (h : P) (hpq : P → Q) : Q := by
-  sorry
+  exact hpq h
