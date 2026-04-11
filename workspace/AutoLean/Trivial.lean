@@ -11,7 +11,7 @@ theorem trivial_rfl : 1 + 1 = 2 := by
 
 -- T2: Propositional identity
 theorem trivial_id (P : Prop) (h : P) : P := by
-  sorry
+  exact h
 
 -- T3: And introduction
 theorem trivial_and (h1 : True) (h2 : True) : True ∧ True := by
