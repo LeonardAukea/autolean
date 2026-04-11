@@ -34,7 +34,7 @@ theorem easy_nat_le : ∀ n : Nat, n ≤ n + 1 := by
 
 -- E6: List append nil
 theorem easy_append_nil (α : Type) (l : List α) : l ++ [] = l := by
-  sorry
+  simp
 
 -- E7: Function composition
 theorem easy_comp_assoc (α β γ δ : Type)
