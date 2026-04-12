@@ -15,7 +15,7 @@ lora_target_modules:
 - up_proj
 - down_proj
 datasets:
-- path: training_data/sft.jsonl
+- path: /Users/leonardaukea/Src/autolean/workspace/training_data/sft_20260412_133641.jsonl
   type: sharegpt
   conversation: chatml
 sequence_len: 8192
