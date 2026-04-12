@@ -126,24 +126,24 @@ def _parse_diagnostics(output: str) -> list[Diagnostic]:
 # Standard tactics for deterministic pre-search
 # ---------------------------------------------------------------------------
 
-# Tried before querying the LLM (ordered by speed/specificity)
-STANDARD_TACTICS: list[str] = [
-    # Definitional equality / computation
+# Fast tactics — tried first in pre-search (cheap to check)
+FAST_TACTICS: list[str] = [
     "rfl",
     "trivial",
     "decide",
-    # Arithmetic / numeric
     "norm_num",
     "omega",
     "ring",
-    # Simplification
     "simp",
-    "simp_all",
-    # Logic / finishing
-    "tauto",
-    "aesop",
     "assumption",
     "contradiction",
+]
+
+# Full set — includes slower tactics tried when fast pass fails
+STANDARD_TACTICS: list[str] = FAST_TACTICS + [
+    "simp_all",
+    "tauto",
+    "aesop",
 ]
 
 # Compound tactics for slightly harder goals

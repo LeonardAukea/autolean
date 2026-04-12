@@ -22,7 +22,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
-from autolean.lean_interface import STANDARD_TACTICS, LeanProject
+from autolean.lean_interface import FAST_TACTICS, STANDARD_TACTICS, LeanProject
 from autolean.llm_client import LLMBackend, LLMConfig, create_llm_client
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.scanner import SorryTarget, prioritize_targets, scan_project
@@ -425,17 +425,17 @@ class AutoLeanAgent:
         # -- Deterministic tactic pre-search (before LLM) -------------------
         # Try standard tactics on all targets. This instantly solves trivial
         # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
-        console.print(f"\n[bold]Tactic pre-search ({len(STANDARD_TACTICS)} tactics)...[/]")
+        console.print(f"\n[bold]Tactic pre-search ({len(FAST_TACTICS)} fast tactics)...[/]")
         presearch_proved = 0
         presearch_targets = list(targets)  # copy to iterate while modifying
         for t in presearch_targets:
             if self._interrupted:
                 break
             self._step(f"Trying standard tactics on {t.decl_name}...")
-            tactic = self.project.try_standard_tactics(
+            tactic = self.project.try_tactics_fast(
                 t.file, t.line, t.col,
-                timeout_per_tactic=min(self.config.cycle_timeout_seconds, 30),
-                include_compound=True,
+                tactics=FAST_TACTICS,
+                timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
             )
             if tactic:
                 # Apply the winning tactic permanently
