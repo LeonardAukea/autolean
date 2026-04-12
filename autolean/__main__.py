@@ -25,17 +25,17 @@ def main(ctx: click.Context) -> None:
 
     \b
     Quick start:
-      uv run autolean run              # start the agent loop
-      uv run autolean scan             # scan for sorry targets
-      uv run autolean models           # list available LLM profiles
-      uv run autolean check            # verify connectivity
-      uv run autolean verify-paper <pdf-or-arxiv-url>
+      autolean prove "1 + 1 = 2"       # prove a theorem
+      autolean challenge collatz        # attempt an open problem
+      autolean verify <arxiv-url>       # verify a paper
+      autolean run                      # prove all sorry targets
+      autolean build-library "topology" # create missing definitions
 
     \b
-    Model selection:
-      uv run autolean run --model deepseek-prover
-      uv run autolean run --model gemma4-31b
-      uv run autolean run --model bfs-prover
+    Open problems:
+      autolean challenge               # list 11 famous unsolved problems
+      autolean challenge goldbach       # attempt Goldbach's conjecture
+      autolean challenge --difficulty accessible
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -1109,6 +1109,96 @@ def improve(
 
     console.print(f"[yellow]Could not improve after {max_attempts} attempts.[/]")
     llm.close()
+
+
+# ---------------------------------------------------------------------------
+# challenge — attempt an open mathematical problem
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("problem_id", required=False)
+@click.option("--field", type=str, default=None, help="Filter by field (e.g., 'number theory').")
+@click.option("--difficulty", type=click.Choice(["accessible", "hard", "very-hard", "millennium"]),
+              default=None, help="Filter by difficulty.")
+@click.option("--max-cycles", type=int, default=50, help="Max proof attempts.")
+@click.option("--program", "-p", type=click.Path(exists=True, path_type=Path),
+              default="program.md", help="Path to program.md.")
+def challenge(
+    problem_id: str | None, field: str | None, difficulty: str | None,
+    max_cycles: int, program: Path,
+) -> None:
+    """Take on an open mathematical problem.
+
+    \b
+    Without arguments, lists all available problems.
+    With a problem ID, generates the formalization and starts proving.
+
+    \b
+    Examples:
+      autolean challenge                        # list all problems
+      autolean challenge collatz                 # attempt Collatz conjecture
+      autolean challenge goldbach --max-cycles 100
+      autolean challenge --field "number theory" # filter by field
+      autolean challenge --difficulty accessible # show easiest problems
+    """
+    from autolean.challenges import (
+        OPEN_PROBLEMS, generate_challenge_file, print_problems_table,
+    )
+
+    if problem_id is None:
+        print_problems_table(filter_field=field, filter_difficulty=difficulty)
+        return
+
+    # Find the problem
+    problem = next((p for p in OPEN_PROBLEMS if p.id == problem_id), None)
+    if not problem:
+        # Try partial match
+        matches = [p for p in OPEN_PROBLEMS if problem_id.lower() in p.id.lower() or problem_id.lower() in p.name.lower()]
+        if len(matches) == 1:
+            problem = matches[0]
+        elif matches:
+            console.print(f"[yellow]Multiple matches for '{problem_id}':[/]")
+            for m in matches:
+                console.print(f"  {m.id}: {m.name}")
+            return
+        else:
+            console.print(f"[red]Problem '{problem_id}' not found.[/]")
+            console.print("Run [cyan]autolean challenge[/] to see all problems.")
+            return
+
+    # Display problem info
+    diff_colors = {"accessible": "green", "hard": "yellow", "very-hard": "red", "millennium": "bold magenta"}
+    dc = diff_colors.get(problem.difficulty, "white")
+
+    console.print(Panel(
+        f"[bold]{problem.name}[/bold]\n"
+        f"Field:      {problem.field}\n"
+        f"Difficulty: [{dc}]{problem.difficulty}[/{dc}]\n"
+        f"\n{problem.description}\n"
+        + (f"\nSub-results: {len(problem.sub_results)} provable lemma(s)" if problem.sub_results else "")
+        + (f"\nRef: {problem.references[0]}" if problem.references else ""),
+        title=f"Challenge: {problem.id}",
+        border_style=dc.split()[-1] if " " in dc else dc,
+        width=75,
+    ))
+
+    # Generate the challenge file
+    path = generate_challenge_file(problem)
+    console.print(f"\n[green]Generated:[/] {path}")
+
+    # Count sorry targets
+    content = open(path).read()
+    n_sorry = content.count("sorry")
+    console.print(f"[cyan]{n_sorry} sorry target(s)[/] (main conjecture + {len(problem.sub_results)} sub-results)")
+
+    # Ask if they want to start proving
+    console.print(f"\n[bold]Starting proof attempts ({max_cycles} cycles)...[/]\n")
+
+    from autolean.agent import AutoLeanAgent
+    agent = AutoLeanAgent(program_path=program, verbose=True)
+    agent.config.max_cycles = max_cycles
+    agent.run()
 
 
 # ---------------------------------------------------------------------------
