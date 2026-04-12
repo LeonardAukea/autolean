@@ -843,6 +843,184 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# improve — simplify/deepen/beautify an existing proof
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("file_path", type=click.Path(exists=True, path_type=Path))
+@click.argument("theorem_name")
+@click.option("--goal", type=click.Choice(["shorter", "elegant", "faster", "readable"]),
+              default="elegant", help="What to optimize for.")
+@click.option("--model", "-m", type=str, default=None, help="Model to use.")
+@click.option("--max-attempts", type=int, default=5, help="Max improvement attempts.")
+@click.option("--program", "-p", type=click.Path(exists=True, path_type=Path),
+              default="program.md", help="Path to program.md.")
+def improve(
+    file_path: Path, theorem_name: str, goal: str,
+    model: str | None, max_attempts: int, program: Path,
+) -> None:
+    """Improve an existing proof — make it shorter, more elegant, or faster.
+
+    \b
+    Takes a .lean file and theorem name, reads the current proof,
+    asks the LLM to improve it, verifies the new version compiles,
+    and replaces the original if successful.
+
+    \b
+    Examples:
+      autolean improve workspace/AutoLean/Medium.lean medium_add_comm
+      autolean improve workspace/AutoLean/Medium.lean medium_add_comm --goal shorter
+      autolean improve my_project/Foo.lean my_theorem --goal elegant
+    """
+    import re
+    from autolean.agent import parse_program
+    from autolean.lean_interface import LeanProject
+    from autolean.llm_client import LLMConfig, create_llm_client
+    from autolean.models import resolve_profile
+    from autolean.prompts import PROOF_GOLF_USER
+
+    cfg = parse_program(program)
+    file_path = file_path.resolve()
+
+    # Find the theorem and its proof in the file
+    content = file_path.read_text(encoding="utf-8")
+    lines = content.split("\n")
+
+    # Locate the theorem declaration
+    theorem_line = None
+    for i, line in enumerate(lines):
+        if re.search(rf"\b{re.escape(theorem_name)}\b", line):
+            if re.match(r"\s*(theorem|lemma|def)\s+", line):
+                theorem_line = i
+                break
+
+    if theorem_line is None:
+        console.print(f"[red]Theorem '{theorem_name}' not found in {file_path}[/]")
+        return
+
+    # Extract the current proof (everything after `:= by` until the next declaration)
+    proof_start = None
+    proof_end = None
+    for i in range(theorem_line, len(lines)):
+        if "by" in lines[i] and proof_start is None:
+            proof_start = i + 1
+        elif proof_start is not None and i > proof_start:
+            stripped = lines[i].strip()
+            if stripped and not stripped.startswith("--") and not lines[i].startswith(" ") and not lines[i].startswith("\t"):
+                proof_end = i
+                break
+    if proof_start is None:
+        console.print(f"[red]No tactic proof found for '{theorem_name}'[/]")
+        return
+    if proof_end is None:
+        proof_end = len(lines)
+
+    current_proof = "\n".join(lines[proof_start:proof_end])
+    decl_line = "\n".join(lines[theorem_line:proof_start])
+
+    console.print(f"[bold]Improving:[/] {theorem_name}")
+    console.print(f"[bold]Goal:[/] {goal}")
+    console.print(f"[bold]Current proof:[/]")
+    for line in current_proof.split("\n")[:10]:
+        console.print(f"  [dim]{line}[/]")
+    console.print()
+
+    # Setup LLM
+    if model:
+        profile = resolve_profile(model)
+        if profile:
+            llm_cfg = LLMConfig(model=profile.model, base_url=profile.base_url,
+                                temperature=profile.temperature, num_predict=profile.num_predict,
+                                backend=profile.backend)
+        else:
+            llm_cfg = LLMConfig(model=model)
+    else:
+        llm_cfg = LLMConfig(model=cfg.model, temperature=cfg.temperature)
+
+    llm = create_llm_client(llm_cfg)
+    if not llm.ping():
+        console.print("[red]Cannot connect to LLM.[/]")
+        return
+
+    # Find project root
+    lean_root = file_path.parent
+    while lean_root != lean_root.parent:
+        if (lean_root / "lakefile.lean").exists() or (lean_root / "lakefile.toml").exists():
+            break
+        lean_root = lean_root.parent
+    project = LeanProject(lean_root)
+
+    goal_prompts = {
+        "shorter": "Make this proof as SHORT as possible. Minimize the number of tactics and lines.",
+        "elegant": "Make this proof more ELEGANT and mathematically beautiful. Use clean, idiomatic Lean 4.",
+        "faster": "Make this proof FASTER for the Lean kernel to check. Avoid slow tactics like simp on large goals.",
+        "readable": "Make this proof more READABLE. Use descriptive names, add comments, structure clearly.",
+    }
+
+    system = (
+        "You are a Lean 4 proof golf expert. "
+        f"{goal_prompts[goal]} "
+        "Output ONLY the improved tactic block. No explanation, no markdown."
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        console.print(f"[bold]Attempt {attempt}/{max_attempts}...[/]")
+
+        context = f"{decl_line}\n{current_proof}"
+        user_prompt = PROOF_GOLF_USER.format(
+            file_context=context,
+            decl_name=theorem_name,
+            line=theorem_line + 1,
+            current_proof=current_proof,
+        )
+
+        with console.status("[dim]Generating improved proof..."):
+            response = llm.generate(system, user_prompt)
+
+        from autolean.agent import clean_llm_proof
+        new_proof = clean_llm_proof(response.text, tactic_mode=True)
+
+        if not new_proof or new_proof.strip() == current_proof.strip():
+            console.print(f"  [yellow]No improvement generated.[/]")
+            continue
+
+        console.print(f"  [cyan]New proof:[/]")
+        for line in new_proof.split("\n")[:8]:
+            console.print(f"    [cyan]{line}[/]")
+
+        # Try to apply the new proof
+        new_lines = lines.copy()
+        # Replace proof lines
+        indent = "  "
+        replacement = "\n".join(indent + l.strip() if l.strip() else "" for l in new_proof.split("\n"))
+        new_lines[proof_start:proof_end] = replacement.split("\n")
+        new_content = "\n".join(new_lines)
+
+        # Write and build
+        file_path.write_text(new_content, encoding="utf-8")
+        with console.status("[dim]Building..."):
+            build = project.check_file(file_path, timeout=120)
+
+        if build.success:
+            old_len = len(current_proof.strip().split("\n"))
+            new_len = len(new_proof.strip().split("\n"))
+            console.print(f"  [bold green]Improved![/] {old_len} lines -> {new_len} lines")
+            if new_len < old_len:
+                console.print(f"  [green]Reduced by {old_len - new_len} lines ({(old_len-new_len)/old_len*100:.0f}%)[/]")
+            llm.close()
+            return
+        else:
+            # Revert
+            file_path.write_text(content, encoding="utf-8")
+            err = build.errors[0].message[:100] if build.errors else "unknown error"
+            console.print(f"  [red]Build failed:[/] {err}")
+
+    console.print(f"[yellow]Could not improve after {max_attempts} attempts.[/]")
+    llm.close()
+
+
+# ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
 
