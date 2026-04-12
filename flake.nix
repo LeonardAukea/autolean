@@ -26,35 +26,40 @@
             # -- Ollama (local LLM) --
             ollama
 
+            # -- SMT solvers (for Veil / lean-smt) --
+            z3
+            cvc5
+
             # -- Git (experiment tracking) --
             git
 
             # -- Dev tools --
-            jq          # JSON processing for Ollama responses
-            ripgrep     # Fast sorry scanning fallback
+            jq
+            ripgrep
+            tmux        # for overnight runs
           ];
 
           shellHook = ''
-            echo "🔧 AutoLean dev shell"
-            echo "  lean: $(lean --version 2>/dev/null || echo 'run: elan default stable')"
-            echo "  uv:   $(uv --version)"
+            echo "AutoLean dev shell"
+            echo "  lean:   $(lean --version 2>/dev/null || echo 'run: elan default stable')"
+            echo "  uv:     $(uv --version)"
+            echo "  z3:     $(z3 --version 2>/dev/null || echo 'not found')"
+            echo "  cvc5:   $(cvc5 --version 2>/dev/null || echo 'not found')"
             echo "  ollama: $(ollama --version 2>/dev/null || echo 'not running')"
             echo ""
-            echo "Quick start:"
-            echo "  uv sync                    # install Python deps"
-            echo "  ollama serve &             # start Ollama (if not running)"
-            echo "  uv run autolean            # run the agent"
-            echo "  uv run autolean --help     # see options"
+            echo "Commands:"
+            echo "  uv run autolean prove \"1 + 1 = 2\""
+            echo "  uv run autolean run --overnight"
+            echo "  uv run autolean verify <arxiv-url>"
+            echo "  uv run autolean build-library \"group theory\""
           '';
 
-          # Ensure uv uses the Nix Python
           UV_PYTHON = "${pkgs.python312}/bin/python3";
         };
 
-        # -- Package (for `nix run .`) --
         packages.default = pkgs.writeShellApplication {
           name = "autolean";
-          runtimeInputs = with pkgs; [ python312 uv elan git ];
+          runtimeInputs = with pkgs; [ python312 uv elan git z3 cvc5 ];
           text = ''
             cd "$(dirname "$(realpath "$0")")/.." || exit 1
             exec uv run autolean "$@"

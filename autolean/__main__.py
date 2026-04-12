@@ -843,6 +843,100 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# build-library — create missing types/structures for a mathematical field
+# ---------------------------------------------------------------------------
+
+
+@main.command("build-library")
+@click.argument("topic")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
+              help="Output .lean file path.")
+@click.option("--model", "-m", type=str, default=None, help="Model to use.")
+@click.option("--prove", is_flag=True, help="Immediately attempt proofs after generating.")
+@click.option("--program", "-p", type=click.Path(exists=True, path_type=Path),
+              default="program.md", help="Path to program.md.")
+def build_library(
+    topic: str, output: Path | None, model: str | None,
+    prove: bool, program: Path,
+) -> None:
+    """Build a local Lean 4 library for a mathematical topic.
+
+    \b
+    Creates definitions, structures, and basic lemmas that supplement
+    mathlib for a specific domain. Fills gaps that mathlib doesn't cover.
+
+    \b
+    Examples:
+      autolean build-library "differential geometry"
+      autolean build-library "graph theory" --prove
+      autolean build-library "category theory basics" -o MyLib.lean
+      autolean build-library "finite automata"
+      autolean build-library "tropical geometry"
+    """
+    import re as _re
+    from autolean.agent import parse_program
+    from autolean.library import generate_library_file
+    from autolean.llm_client import LLMConfig, create_llm_client
+    from autolean.models import resolve_profile
+
+    cfg = parse_program(program)
+
+    # Setup LLM
+    if model:
+        profile = resolve_profile(model)
+        llm_cfg = LLMConfig(
+            model=profile.model if profile else model,
+            base_url=profile.base_url if profile else "http://localhost:11434",
+            temperature=0.3,
+            num_predict=32768,
+            backend=profile.backend if profile else "ollama",
+        )
+    else:
+        llm_cfg = LLMConfig(model=cfg.model, temperature=0.3, num_predict=32768)
+
+    llm = create_llm_client(llm_cfg)
+    if not llm.ping():
+        console.print("[red]Cannot connect to LLM.[/]")
+        return
+
+    # Generate output path
+    safe_topic = _re.sub(r"[^a-zA-Z0-9]", "", topic.title().replace(" ", ""))
+    lean_root = program.parent / cfg.lean_project_path
+    output = output or lean_root / "AutoLean" / f"Lib{safe_topic}.lean"
+
+    console.print(f"[bold]Building library for:[/] {topic}")
+    console.print(f"[bold]Output:[/] {output}\n")
+
+    with console.status(f"[dim]Generating {topic} library..."):
+        path = generate_library_file(topic, output, llm.generate)
+
+    # Count generated definitions and sorrys
+    content = path.read_text()
+    n_defs = len(_re.findall(r"\b(?:def|structure|class|instance|theorem|lemma)\b", content))
+    n_sorrys = len(_re.findall(r"\bsorry\b", content))
+
+    console.print(f"[green]Generated {n_defs} definitions/theorems ({n_sorrys} sorry targets)[/]")
+    console.print(f"  File: {path}\n")
+
+    # Show preview
+    for line in content.split("\n")[:20]:
+        console.print(f"  [dim]{line}[/]")
+    if len(content.split("\n")) > 20:
+        console.print(f"  [dim]... ({len(content.split(chr(10))) - 20} more lines)[/]")
+
+    llm.close()
+
+    if prove and n_sorrys > 0:
+        console.print(f"\n[bold]Attempting to prove {n_sorrys} sorry targets...[/]\n")
+        from autolean.agent import AutoLeanAgent
+        agent = AutoLeanAgent(program_path=program, verbose=True)
+        agent.config.max_cycles = n_sorrys * 3
+        agent.run()
+    elif n_sorrys > 0:
+        console.print(f"\n  Next: [cyan]uv run autolean run[/] to attempt {n_sorrys} proofs")
+
+
+# ---------------------------------------------------------------------------
 # improve — simplify/deepen/beautify an existing proof
 # ---------------------------------------------------------------------------
 
