@@ -1,0 +1,11 @@
+{
+  "name": "simplification",
+  "description": "Closes goals via simplification lemmas",
+  "tactics": [
+    "simp"
+  ],
+  "applicable_when": "Goal can be simplified to True or a known fact",
+  "example_theorem": "u14_append_nil : ",
+  "times_used": 1,
+  "times_succeeded": 1
+}
