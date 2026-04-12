@@ -379,7 +379,7 @@ def verify_paper(
     else:
         # Paper extraction needs more tokens than proof generation (long prompts
         # cause thinking models to exhaust budget before producing content)
-        llm_cfg = LLMConfig(model=cfg.model, temperature=cfg.temperature, num_predict=16384)
+        llm_cfg = LLMConfig(model=cfg.model, temperature=cfg.temperature, num_predict=-1)
 
     llm = create_llm_client(llm_cfg)
     if not llm.ping():

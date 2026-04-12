@@ -23,7 +23,7 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OPENAI_URL = "http://localhost:8080"  # vLLM / llama.cpp default
 DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_TEMPERATURE = 0.4
-DEFAULT_NUM_PREDICT = 4096  # must be large enough for thinking models (Gemma 4 uses extended thinking)
+DEFAULT_NUM_PREDICT = -1  # -1 = unlimited (let the model generate as much as it needs)
 
 
 @dataclass

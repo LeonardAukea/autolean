@@ -39,7 +39,7 @@ PROFILES: dict[str, ModelProfile] = {
     "gemma4": ModelProfile(
         name="gemma4",
         model="gemma4:26b",
-        num_predict=4096,
+        num_predict=-1,
         temperature=0.4,
         thinking=True,
         description="Google Gemma 4 26B — general-purpose, extended thinking",
@@ -49,7 +49,7 @@ PROFILES: dict[str, ModelProfile] = {
     "gemma4-31b": ModelProfile(
         name="gemma4-31b",
         model="gemma4:31b",
-        num_predict=4096,
+        num_predict=-1,
         temperature=0.4,
         thinking=True,
         description="Google Gemma 4 31B — larger variant, better reasoning",
@@ -59,7 +59,7 @@ PROFILES: dict[str, ModelProfile] = {
     "deepseek-prover": ModelProfile(
         name="deepseek-prover",
         model="yinyaowenhua1314/deepseek-prover-v2-7b",
-        num_predict=2048,
+        num_predict=-1,
         temperature=0.3,
         thinking=True,
         description="DeepSeek Prover V2 7B — purpose-built Lean 4 prover (88.9% miniF2F)",
@@ -101,7 +101,7 @@ PROFILES: dict[str, ModelProfile] = {
         model="mistralai/Leanstral-2603",
         backend="openai_compat",
         base_url="http://localhost:8000",
-        num_predict=4096,
+        num_predict=-1,
         temperature=0.3,
         thinking=True,
         description="Mistral Leanstral 119B MoE — requires vLLM (68+ GB VRAM)",
