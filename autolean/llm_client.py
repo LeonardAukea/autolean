@@ -23,7 +23,7 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OPENAI_URL = "http://localhost:8080"  # vLLM / llama.cpp default
 DEFAULT_MODEL = "gemma4:26b"
 DEFAULT_TEMPERATURE = 0.4
-DEFAULT_NUM_PREDICT = -1  # -1 = unlimited (let the model generate as much as it needs)
+DEFAULT_NUM_PREDICT = 32768  # generous limit; keeps thinking models from spinning forever
 
 
 @dataclass
@@ -34,7 +34,7 @@ class LLMConfig:
     base_url: str = DEFAULT_OLLAMA_URL
     temperature: float = DEFAULT_TEMPERATURE
     num_predict: int = DEFAULT_NUM_PREDICT
-    timeout: float = 1800.0  # 30 min per request (unlimited tokens + thinking models need room)
+    timeout: float = 300.0  # 5 min per LLM request; keeps the loop moving on hard targets
     backend: str = "ollama"  # "ollama" | "openai_compat"
 
 

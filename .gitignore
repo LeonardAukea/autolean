@@ -19,6 +19,8 @@ result-*
 results.tsv
 progress.md
 *.log
+workspace/logs/
+.overnight.pid
 
 # Lean build artifacts (in workspace)
 workspace/**/build/

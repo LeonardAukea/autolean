@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-import io
+import logging
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -12,9 +12,11 @@ from enum import Enum
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
+log = logging.getLogger("autolean")
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +96,11 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def git_is_repo(cwd: Path) -> bool:
-    """Check if cwd is inside a git repo."""
     r = _git(["rev-parse", "--is-inside-work-tree"], cwd)
     return r.returncode == 0
 
 
 def git_init(cwd: Path) -> None:
-    """Initialize a git repo if not already one."""
     if not git_is_repo(cwd):
         _git(["init"], cwd)
         _git(["add", "."], cwd)
@@ -108,30 +108,55 @@ def git_init(cwd: Path) -> None:
 
 
 def git_create_branch(cwd: Path, branch_name: str) -> None:
-    """Create and checkout a new branch."""
     _git(["checkout", "-b", branch_name], cwd)
 
 
 def git_commit(cwd: Path, message: str, files: list[str] | None = None) -> bool:
-    """Stage and commit. Returns True if commit succeeded."""
     if files:
         for f in files:
             _git(["add", f], cwd)
     else:
         _git(["add", "-A"], cwd)
-
     r = _git(["commit", "-m", message], cwd)
     return r.returncode == 0
 
 
 def git_revert_file(cwd: Path, filepath: str) -> None:
-    """Revert a single file to the last committed state."""
     _git(["checkout", "--", filepath], cwd)
 
 
 def git_stash_and_restore(cwd: Path, filepath: str, original_content: str) -> None:
-    """Write original content back to a file (manual revert)."""
     (cwd / filepath).write_text(original_content, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+
+def setup_logging(log_dir: Path, verbose: bool = False) -> None:
+    """Configure structured logging to file + console."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"autolean_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    log.addHandler(file_handler)
+    log.setLevel(logging.DEBUG)
+
+    if verbose:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(logging.Formatter("%(levelname)-7s | %(message)s"))
+        log.addHandler(console_handler)
+
+    log.info("AutoLean session started — log: %s", log_file)
+    return log_file
 
 
 # ---------------------------------------------------------------------------
@@ -162,35 +187,39 @@ class ExperimentTracker:
     # -- TSV logging --------------------------------------------------------
 
     def _ensure_tsv_header(self) -> None:
-        """Write TSV header if file doesn't exist."""
         if not self.results_file.exists():
             with open(self.results_file, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=TSV_FIELDS, delimiter="\t")
                 writer.writeheader()
 
     def log(self, record: ExperimentRecord) -> None:
-        """Append a record to the TSV log."""
+        """Append a record to the TSV log and structured log."""
         self._ensure_tsv_header()
         self.records.append(record)
         with open(self.results_file, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=TSV_FIELDS, delimiter="\t")
             writer.writerow(record.as_dict())
 
+        # Structured log entry
+        log.info(
+            "cycle=%d target=%s outcome=%s attempt=%d duration=%.1fs tokens=%d%s",
+            record.cycle, record.decl_name, record.outcome.value,
+            record.attempt, record.duration_seconds, record.llm_tokens,
+            f" error_cat={record.error_category}" if record.error_category else "",
+        )
+
     # -- Git integration ----------------------------------------------------
 
     def setup_branch(self, branch_name: str | None = None) -> str:
-        """Create an experiment branch."""
         if branch_name is None:
             date_str = datetime.now().strftime("%b%d").lower()
             branch_name = f"autolean/{date_str}"
-
         git_init(self.project_root)
         git_create_branch(self.project_root, branch_name)
         console.print(f"[green]Branch:[/] {branch_name}")
         return branch_name
 
     def commit_success(self, record: ExperimentRecord) -> bool:
-        """Commit a successful proof fill."""
         msg = (
             f"autolean: prove {record.decl_name} "
             f"(cycle {record.cycle}, attempt {record.attempt})"
@@ -198,86 +227,117 @@ class ExperimentTracker:
         return git_commit(self.project_root, msg)
 
     def revert_failure(self, filepath: str, original_content: str) -> None:
-        """Revert a failed attempt."""
         git_stash_and_restore(self.project_root, filepath, original_content)
 
     # -- Summary ------------------------------------------------------------
 
     def summary(self) -> dict[str, int]:
-        """Return counts by outcome."""
         counts: dict[str, int] = {}
         for r in self.records:
-            key = r.outcome.value
-            counts[key] = counts.get(key, 0) + 1
+            counts[r.outcome.value] = counts.get(r.outcome.value, 0) + 1
         return counts
 
     def print_summary(self, initial_count: int = 0) -> None:
-        """Print a rich summary table with detailed metrics."""
-        table = Table(title="AutoLean Session Summary")
-        table.add_column("Metric", style="bold")
-        table.add_column("Value", justify="right")
-
+        """Print a properly formatted session summary using Rich tables."""
         total = len(self.records)
         successes = sum(1 for r in self.records if r.outcome == Outcome.SUCCESS)
         failures = total - successes
 
-        # Core metrics
-        table.add_row("Total cycles", str(self._cycle))
-        table.add_row("Total attempts", str(total))
-        table.add_row("Proofs found", f"[green]{successes}[/]")
-        table.add_row("Failed attempts", f"[red]{failures}[/]")
+        # ── Main metrics table ──
+        metrics = Table(
+            title="Session Metrics",
+            show_header=True,
+            header_style="bold",
+            min_width=50,
+            pad_edge=True,
+        )
+        metrics.add_column("Metric", style="bold", min_width=25)
+        metrics.add_column("Value", justify="right", min_width=20)
+
+        metrics.add_row("Total cycles", str(self._cycle))
+        metrics.add_row("Total attempts", str(total))
+        metrics.add_row("Proofs found", f"[bold green]{successes}[/bold green]")
+        metrics.add_row("Failed attempts", f"[red]{failures}[/red]")
 
         if total > 0:
-            table.add_row("Overall success rate", f"{successes / total * 100:.1f}%")
+            metrics.add_row(
+                "Overall success rate",
+                f"{successes / total * 100:.1f}%",
+            )
 
-            # First-attempt success rate (measures prompt quality)
             first_attempts = [r for r in self.records if r.attempt == 1]
             first_successes = sum(1 for r in first_attempts if r.outcome == Outcome.SUCCESS)
             if first_attempts:
-                table.add_row(
+                rate = first_successes / len(first_attempts) * 100
+                metrics.add_row(
                     "First-attempt success",
-                    f"{first_successes / len(first_attempts) * 100:.1f}%",
+                    f"{'[green]' if rate > 50 else '[yellow]'}{rate:.1f}%[/]",
                 )
 
-            # Coverage metric (most important!)
             if initial_count > 0:
                 coverage = successes / initial_count * 100
-                table.add_row(
+                metrics.add_row(
                     "Sorry coverage",
-                    f"[{'green' if coverage > 50 else 'yellow'}]"
-                    f"{successes}/{initial_count} ({coverage:.1f}%)[/]",
+                    f"[bold {'green' if coverage > 50 else 'yellow'}]"
+                    f"{successes}/{initial_count} ({coverage:.1f}%)"
+                    f"[/bold {'green' if coverage > 50 else 'yellow'}]",
                 )
 
-            # Token efficiency
             total_tokens = sum(r.llm_tokens for r in self.records)
             if total_tokens > 0 and successes > 0:
-                tokens_per_proof = total_tokens / successes
-                table.add_row("Tokens per proof", f"{tokens_per_proof:.0f}")
-            table.add_row("Total tokens", f"{total_tokens:,}")
+                metrics.add_row("Tokens per proof", f"{total_tokens / successes:,.0f}")
+            metrics.add_row("Total tokens used", f"{total_tokens:,}")
 
-            # Timing
             avg_dur = sum(r.duration_seconds for r in self.records) / total
-            table.add_row("Avg cycle time", f"{avg_dur:.1f}s")
-            avg_build = sum(r.build_duration_seconds for r in self.records) / total
-            if avg_build > 0:
-                table.add_row("Avg build time", f"{avg_build:.1f}s")
+            metrics.add_row("Avg cycle time", f"{avg_dur:.1f}s")
 
-        # Error category breakdown
+            build_times = [r.build_duration_seconds for r in self.records if r.build_duration_seconds > 0]
+            if build_times:
+                metrics.add_row("Avg build time", f"{sum(build_times) / len(build_times):.1f}s")
+
+        console.print(metrics)
+
+        # ── Error breakdown table ──
         error_counts: dict[str, int] = {}
         for r in self.records:
             if r.error_category:
                 error_counts[r.error_category] = error_counts.get(r.error_category, 0) + 1
+
         if error_counts:
-            table.add_section()
-            table.add_row("[bold]Error Categories[/]", "")
+            err_table = Table(
+                title="Error Breakdown",
+                show_header=True,
+                header_style="bold red",
+                min_width=50,
+            )
+            err_table.add_column("Category", style="bold", min_width=25)
+            err_table.add_column("Count", justify="right", min_width=10)
+            err_table.add_column("Pct", justify="right", min_width=10)
+
             for cat, count in sorted(error_counts.items(), key=lambda x: -x[1]):
-                table.add_row(f"  {cat}", str(count))
+                pct = count / failures * 100 if failures > 0 else 0
+                err_table.add_row(cat, str(count), f"{pct:.0f}%")
 
-        # Outcome breakdown
-        table.add_section()
-        table.add_row("[bold]Outcomes[/]", "")
-        for outcome, count in sorted(self.summary().items(), key=lambda x: -x[1]):
-            style = "green" if outcome == "success" else "red"
-            table.add_row(f"  {outcome}", f"[{style}]{count}[/{style}]")
+            console.print(err_table)
 
-        console.print(table)
+        # ── Outcome breakdown table ──
+        outcome_table = Table(
+            title="Outcome Breakdown",
+            show_header=True,
+            header_style="bold",
+            min_width=50,
+        )
+        outcome_table.add_column("Outcome", style="bold", min_width=25)
+        outcome_table.add_column("Count", justify="right", min_width=10)
+        outcome_table.add_column("Pct", justify="right", min_width=10)
+
+        for outcome_val, count in sorted(self.summary().items(), key=lambda x: -x[1]):
+            style = "green" if outcome_val == "success" else "red"
+            pct = count / total * 100 if total > 0 else 0
+            outcome_table.add_row(
+                f"[{style}]{outcome_val}[/{style}]",
+                f"[{style}]{count}[/{style}]",
+                f"{pct:.0f}%",
+            )
+
+        console.print(outcome_table)
