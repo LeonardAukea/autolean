@@ -11,7 +11,9 @@ theorem u6_nat_eq : 2 + 3 = 5 := by rfl
 theorem u7_bool_and : (true && false) = false := by rfl
 theorem u8_mp (P Q : Prop) (h : P) (f : P → Q) : Q := by exact f h
 theorem u9_and_comm (P Q : Prop) (h : P ∧ Q) : Q ∧ P := by exact ⟨h.2, h.1⟩
-theorem u10_or_elim (P Q R : Prop) (hp : P → R) (hq : Q → R) (h : P ∨ Q) : R := by sorry
+theorem u10_or_elim (P Q R : Prop) (hp : P → R) (hq : Q → R) (h : P ∨ Q) : R := by cases h with
+                                                                                   | inl hP => exact hp hP
+                                                                                   | inr hQ => exact hq hQ
 theorem u11_contra (P Q : Prop) (f : P → Q) (nq : ¬Q) : ¬P := by sorry
 theorem u12_dne (P : Prop) (h : P) : ¬¬P := by sorry
 theorem u13_nat_le : ∀ n : Nat, n ≤ n + 1 := by sorry
