@@ -73,7 +73,8 @@ theorem poly_growth_degree_mono (γ : GrowthFn) (d : Nat) :
 /-- G4: If γ has polynomial growth, then it has polynomial growth. -/
 theorem has_poly_of_poly_degree (γ : GrowthFn) (d : Nat) :
     IsPolynomialGrowth γ d → HasPolynomialGrowth γ := by
-  sorry
+  intro h
+  exact ⟨d, h⟩
 
 /-- G5: The identity growth function (γ(n) = 1) is polynomial. -/
 theorem identity_growth_is_poly :
