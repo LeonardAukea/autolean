@@ -20,7 +20,8 @@ import httpx
 log = logging.getLogger("autolean")
 
 LOOGLE_URL = "https://loogle.lean-lang.org/json"
-LEANSEARCH_URL = "https://leansearch.net/api/v1/search"
+LEANSEARCH_URL = "https://leansearch.net/search"  # POST, query as list
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 
 
 @dataclass
@@ -66,7 +67,7 @@ def search_loogle(query: str, max_results: int = 5, timeout: float = 10.0) -> li
 
 
 def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -> list[SearchResult]:
-    """Search mathlib by natural language via LeanSearch.
+    """Search mathlib by natural language via LeanSearch (POST API).
 
     Examples:
         "sum of two even numbers is even"
@@ -74,18 +75,22 @@ def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -
         "Cauchy-Schwarz inequality"
     """
     try:
-        resp = httpx.get(
+        resp = httpx.post(
             LEANSEARCH_URL,
-            params={"query": query, "num_results": max_results},
+            json={"query": [query], "num_results": max_results},
             timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
 
         results = []
-        for hit in data if isinstance(data, list) else data.get("results", []):
-            name = hit.get("name", "") or hit.get("formal_name", "")
-            type_sig = hit.get("type", "") or hit.get("formal_statement", "")
+        # Response is [[result1, result2, ...]] (list of lists)
+        items = data[0] if data and isinstance(data[0], list) else data
+        for hit in items[:max_results]:
+            r = hit.get("result", hit) if isinstance(hit, dict) else {}
+            name_parts = r.get("name", [])
+            name = ".".join(name_parts) if isinstance(name_parts, list) else str(name_parts)
+            type_sig = r.get("signature", "") or r.get("type", "")
             if name:
                 results.append(SearchResult(name=name, type_sig=type_sig, source="leansearch"))
 
@@ -95,6 +100,63 @@ def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -
     except Exception as e:
         log.debug("LeanSearch failed: %s", e)
         return []
+
+
+def search_arxiv(query: str, max_results: int = 3, timeout: float = 15.0) -> list[dict]:
+    """Search arXiv for relevant papers to aid proof formulation.
+
+    Returns paper metadata (title, abstract, authors, URL).
+    This is a database lookup — no LLM involved.
+    """
+    try:
+        resp = httpx.get(
+            ARXIV_API_URL,
+            params={
+                "search_query": f"all:{query}",
+                "start": 0,
+                "max_results": max_results,
+                "sortBy": "relevance",
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+
+        # Parse Atom XML (minimal, no lxml dependency)
+        import re
+        papers = []
+        for entry in re.findall(r"<entry>(.*?)</entry>", resp.text, re.DOTALL):
+            title = re.search(r"<title>(.*?)</title>", entry, re.DOTALL)
+            summary = re.search(r"<summary>(.*?)</summary>", entry, re.DOTALL)
+            arxiv_id = re.search(r"<id>http://arxiv.org/abs/(.*?)</id>", entry)
+            authors = re.findall(r"<name>(.*?)</name>", entry)
+
+            if title:
+                papers.append({
+                    "title": title.group(1).strip().replace("\n", " "),
+                    "abstract": (summary.group(1).strip()[:500] if summary else ""),
+                    "arxiv_id": arxiv_id.group(1) if arxiv_id else "",
+                    "authors": authors[:3],
+                    "url": f"https://arxiv.org/abs/{arxiv_id.group(1)}" if arxiv_id else "",
+                })
+
+        log.debug("arXiv: %d results for '%s'", len(papers), query)
+        return papers
+
+    except Exception as e:
+        log.debug("arXiv search failed: %s", e)
+        return []
+
+
+def format_arxiv_for_prompt(papers: list[dict]) -> str:
+    """Format arXiv results as proof hints for the LLM."""
+    if not papers:
+        return ""
+    lines = ["## Relevant Research (arXiv)"]
+    for p in papers:
+        lines.append(f"- [{p['title'][:80]}]({p['url']})")
+        if p["abstract"]:
+            lines.append(f"  {p['abstract'][:150]}...")
+    return "\n".join(lines)
 
 
 def search_relevant_lemmas(

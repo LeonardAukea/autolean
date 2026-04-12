@@ -615,20 +615,40 @@ class AutoLeanAgent:
             self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
 
-        # Search mathlib for relevant lemmas (Loogle + LeanSearch)
+        # Search mathlib + arXiv for relevant lemmas/research (database lookups, NOT LLMs)
         if attempt == 1:  # only search on first attempt (cached for retries)
-            from autolean.search import search_relevant_lemmas, format_search_results_for_prompt
-            self._step("Searching mathlib for relevant lemmas...")
+            from autolean.search import (
+                search_relevant_lemmas, format_search_results_for_prompt,
+                search_arxiv, format_arxiv_for_prompt,
+            )
+            self._step("Searching mathlib (Loogle + LeanSearch)...")
             search_results = search_relevant_lemmas(
                 goal_state or "", target.decl_name,
             )
+            search_context_parts = []
             if search_results:
                 self._step(f"Found {len(search_results)} relevant lemmas", "cyan")
-                search_context = format_search_results_for_prompt(search_results)
-                file_context += f"\n\n{search_context}"
-                self._search_cache[target.id] = search_context
+                for r in search_results[:3]:
+                    self._step(f"  {r.name}: {r.type_sig[:60]}", "dim")
+                search_context_parts.append(format_search_results_for_prompt(search_results))
             else:
                 self._step("No relevant lemmas found in mathlib", "dim")
+
+            # For research-level targets, also search arXiv
+            from autolean.scanner import _difficulty_score
+            if _difficulty_score(target) >= 7:  # hard or research
+                self._step("Searching arXiv for relevant research...")
+                papers = search_arxiv(target.decl_name.replace("_", " "), max_results=2)
+                if papers:
+                    self._step(f"Found {len(papers)} relevant papers", "cyan")
+                    for p in papers:
+                        self._step(f"  {p['title'][:70]}", "dim")
+                    search_context_parts.append(format_arxiv_for_prompt(papers))
+
+            if search_context_parts:
+                combined = "\n\n".join(search_context_parts)
+                file_context += f"\n\n{combined}"
+                self._search_cache[target.id] = combined
         elif target.id in self._search_cache:
             file_context += f"\n\n{self._search_cache[target.id]}"
 
