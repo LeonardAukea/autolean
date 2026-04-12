@@ -5,7 +5,7 @@ theorem u2_id (P : Prop) (h : P) : P := by exact h
 theorem u3_and_intro (a b : Prop) (ha : a) (hb : b) : a ∧ b := by constructor
                                                                   exact ha
                                                                   exact hb
-theorem u4_or_inl (a : Prop) (ha : a) (b : Prop) : a ∨ b := by sorry
+theorem u4_or_inl (a : Prop) (ha : a) (b : Prop) : a ∨ b := by exact Or.inl ha
 theorem u5_true : True := by sorry
 theorem u6_nat_eq : 2 + 3 = 5 := by sorry
 theorem u7_bool_and : (true && false) = false := by sorry
