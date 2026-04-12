@@ -35,20 +35,39 @@ def classify_error(message: str) -> ErrorCategory:
         return ErrorCategory.TYPE_MISMATCH
     if "unknown identifier" in msg or "unknown constant" in msg:
         return ErrorCategory.UNKNOWN_IDENTIFIER
+    if "unknown namespace" in msg or "unknown declaration" in msg:
+        return ErrorCategory.UNKNOWN_IDENTIFIER
     if "unsolved goals" in msg:
         return ErrorCategory.UNSOLVED_GOALS
     if "tactic" in msg and ("failed" in msg or "error" in msg):
         return ErrorCategory.TACTIC_FAILED
+    if "omega" in msg and "failed" in msg:
+        return ErrorCategory.TACTIC_FAILED
+    if "simp made no progress" in msg:
+        return ErrorCategory.TACTIC_FAILED
+    if "ring_nf failed" in msg or "ring failed" in msg:
+        return ErrorCategory.TACTIC_FAILED
     if "declaration uses 'sorry'" in msg:
+        return ErrorCategory.SORRY_REMAINS
+    if "'sorry'" in msg and "uses" in msg:
         return ErrorCategory.SORRY_REMAINS
     if "expected" in msg and "got" in msg:
         return ErrorCategory.SYNTAX_ERROR
     if "timeout" in msg or "deterministic timeout" in msg or "(kernel) deep recursion" in msg:
         return ErrorCategory.TIMEOUT
+    if "maximum recursion depth" in msg or "max heartbeats" in msg:
+        return ErrorCategory.TIMEOUT
     if "elaboration" in msg or "failed to synthesize" in msg:
+        return ErrorCategory.ELABORATION_ERROR
+    if "failed to synthesize instance" in msg:
         return ErrorCategory.ELABORATION_ERROR
     if "unexpected token" in msg or "expected token" in msg:
         return ErrorCategory.SYNTAX_ERROR
+    if "unexpected end of input" in msg:
+        return ErrorCategory.SYNTAX_ERROR
+    # Catch remaining tactic failures
+    if "failed" in msg and any(kw in msg for kw in ["apply", "exact", "rewrite", "rw", "intro"]):
+        return ErrorCategory.TACTIC_FAILED
 
     return ErrorCategory.OTHER
 

@@ -66,7 +66,13 @@ _DIAG_RE = re.compile(
 
 
 def _parse_diagnostics(output: str) -> list[Diagnostic]:
-    """Parse Lean compiler output into structured diagnostics."""
+    """Parse Lean compiler output into structured diagnostics.
+
+    Handles:
+    1. Standard Lean diagnostics: file:line:col: severity: message
+    2. Lake-level errors: 'error:' lines without file location
+    3. Multi-line continuations (indented or non-matching lines)
+    """
     diags: list[Diagnostic] = []
     # Lean sometimes emits multi-line diagnostics; collect them
     lines = output.split("\n")
@@ -92,8 +98,66 @@ def _parse_diagnostics(output: str) -> list[Diagnostic]:
             )
             i = j
         else:
-            i += 1
+            # Fallback: capture bare "error:" lines from lake/lean without location
+            stripped = lines[i].strip()
+            if stripped.lower().startswith("error:"):
+                msg_lines = [stripped[6:].strip()]
+                j = i + 1
+                while j < len(lines) and not _DIAG_RE.match(lines[j]) and not lines[j].strip().lower().startswith("error:"):
+                    if lines[j].strip():
+                        msg_lines.append(lines[j])
+                    j += 1
+                diags.append(
+                    Diagnostic(
+                        file="<lake>",
+                        line=0,
+                        col=0,
+                        severity="error",
+                        message="\n".join(msg_lines).strip(),
+                    )
+                )
+                i = j
+            else:
+                i += 1
     return diags
+
+
+# ---------------------------------------------------------------------------
+# Standard tactics for deterministic pre-search
+# ---------------------------------------------------------------------------
+
+# Tried before querying the LLM (ordered by speed/specificity)
+STANDARD_TACTICS: list[str] = [
+    # Definitional equality / computation
+    "rfl",
+    "trivial",
+    "decide",
+    # Arithmetic / numeric
+    "norm_num",
+    "omega",
+    "ring",
+    # Simplification
+    "simp",
+    "simp_all",
+    # Logic / finishing
+    "tauto",
+    "aesop",
+    "assumption",
+    "contradiction",
+]
+
+# Compound tactics for slightly harder goals
+COMPOUND_TACTICS: list[str] = [
+    "intro h; exact h",
+    "intro h; contradiction",
+    "constructor <;> assumption",
+    "constructor <;> rfl",
+    "constructor <;> simp",
+    "split <;> intro <;> rfl",
+    "split <;> intro <;> simp",
+    "ext; simp",
+    "funext x; simp",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +301,87 @@ class LeanProject:
         finally:
             # ALWAYS revert — even if build crashes or times out
             self.write_file(lean_file, original)
+
+    # -- Deterministic tactic search ------------------------------------------
+
+    def try_standard_tactics(
+        self,
+        lean_file: Path,
+        line: int,
+        col: int,
+        *,
+        timeout_per_tactic: int = 30,
+        include_compound: bool = True,
+    ) -> str | None:
+        """Try standard closing tactics at a sorry position.
+
+        Returns the first tactic that makes the file build cleanly with no
+        sorry remaining at the target line. Returns None if nothing works.
+
+        This is the "deterministic pre-search" — runs before any LLM call.
+        For trivial goals like `1 + 1 = 2`, this finds `rfl` instantly.
+        """
+        original = self.read_file(lean_file)
+
+        tactics_to_try = list(STANDARD_TACTICS)
+        if include_compound:
+            tactics_to_try.extend(COMPOUND_TACTICS)
+
+        for tactic in tactics_to_try:
+            try:
+                new_content = self.replace_sorry_at(
+                    lean_file, line, tactic, original_content=original
+                )
+                self.write_file(lean_file, new_content)
+                result = self.check_file(lean_file, timeout=timeout_per_tactic)
+
+                if result.success:
+                    # Verify sorry is actually gone at target line
+                    new_lines = new_content.split("\n")
+                    if line <= len(new_lines) and "sorry" not in new_lines[line - 1]:
+                        return tactic
+            except (ValueError, OSError):
+                pass
+            finally:
+                # Always revert
+                self.write_file(lean_file, original)
+
+        return None
+
+    def try_tactics_fast(
+        self,
+        lean_file: Path,
+        line: int,
+        col: int,
+        tactics: list[str],
+        *,
+        timeout_per_tactic: int = 30,
+    ) -> str | None:
+        """Try a specific list of tactics at a sorry position.
+
+        Like try_standard_tactics but with a caller-provided list.
+        Returns the first working tactic or None.
+        """
+        original = self.read_file(lean_file)
+
+        for tactic in tactics:
+            try:
+                new_content = self.replace_sorry_at(
+                    lean_file, line, tactic, original_content=original
+                )
+                self.write_file(lean_file, new_content)
+                result = self.check_file(lean_file, timeout=timeout_per_tactic)
+
+                if result.success:
+                    new_lines = new_content.split("\n")
+                    if line <= len(new_lines) and "sorry" not in new_lines[line - 1]:
+                        return tactic
+            except (ValueError, OSError):
+                pass
+            finally:
+                self.write_file(lean_file, original)
+
+        return None
 
     # -- Sorry replacement --------------------------------------------------
 

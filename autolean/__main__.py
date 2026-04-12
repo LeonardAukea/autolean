@@ -58,10 +58,12 @@ def main(ctx: click.Context) -> None:
 @click.option("--resume", "-r", is_flag=True, help="Resume from previous session.")
 @click.option("--backend", "-b", type=click.Choice(["ollama", "openai_compat"]),
               default=None, help="LLM backend override.")
+@click.option("--target", "-t", type=str, default=None,
+              help="Only process targets matching this name (e.g., 'one_plus_one').")
 def run(
     program: Path, dry_run: bool, verbose: bool,
     model: str | None, max_cycles: int | None,
-    resume: bool, backend: str | None,
+    resume: bool, backend: str | None, target: str | None,
 ) -> None:
     """Start the autonomous proof agent loop.
 
@@ -90,6 +92,7 @@ def run(
     agent = AutoLeanAgent(
         program_path=program, dry_run=dry_run,
         verbose=verbose, resume=resume,
+        target_filter=target,
     )
 
     # Model override: check for profile name first, then raw model string
@@ -379,11 +382,19 @@ def prove(statement: str, model: str | None, max_attempts: int, program: Path) -
     target_file.write_text(new_content)
     console.print(f"[green]Wrote to {target_file}[/]\n")
 
-    # Step 3: Run agent on just this target
+    # Step 3: Run agent on ONLY this target (not all sorries)
     console.print(f"[bold]Attempting proof ({max_attempts} attempts)...[/]\n")
     llm.close()
 
-    agent = AutoLeanAgent(program_path=program, verbose=True)
+    # Extract the Lean declaration name from the formalized code
+    import re as _re
+    _decl_match = _re.search(r"\b(?:theorem|lemma|def)\s+(\S+)", claim.lean_code)
+    target_name = _decl_match.group(1).split(":")[0].split("(")[0].strip() if _decl_match else None
+
+    agent = AutoLeanAgent(
+        program_path=program, verbose=True,
+        target_filter=target_name,  # Only target the user's theorem
+    )
     if model:
         profile = resolve_profile(model)
         if profile:

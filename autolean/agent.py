@@ -22,7 +22,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
-from autolean.lean_interface import LeanProject
+from autolean.lean_interface import STANDARD_TACTICS, LeanProject
 from autolean.llm_client import LLMBackend, LLMConfig, create_llm_client
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.scanner import SorryTarget, prioritize_targets, scan_project
@@ -239,11 +239,13 @@ class AutoLeanAgent:
         dry_run: bool = False,
         verbose: bool = False,
         resume: bool = False,
+        target_filter: str | None = None,
     ):
         self.program_path = program_path.resolve()
         self.dry_run = dry_run
         self.verbose = verbose
         self.resume = resume
+        self.target_filter = target_filter  # Only process targets matching this decl_name
         self._interrupted = False
 
         # Parse program.md
@@ -395,6 +397,18 @@ class AutoLeanAgent:
         # P0.4: Scan ONCE before the loop (not every cycle)
         targets = scan_project(self.project.root)
         targets = prioritize_targets(targets)
+
+        # Apply target filter (from `prove` command or --target flag)
+        if self.target_filter:
+            targets = [
+                t for t in targets
+                if self.target_filter in t.decl_name or self.target_filter in t.id
+            ]
+            console.print(
+                f"\n[cyan]Target filter:[/] '{self.target_filter}' — "
+                f"{len(targets)} matching target(s)."
+            )
+
         self._initial_sorry_count = len(targets)
         console.print(f"\n[bold]Found {len(targets)} sorry target(s).[/]")
 
@@ -407,6 +421,86 @@ class AutoLeanAgent:
             console.print(f"  • {t} [{mode_label}]")
         if len(targets) > 10:
             console.print(f"  ... and {len(targets) - 10} more")
+
+        # -- Deterministic tactic pre-search (before LLM) -------------------
+        # Try standard tactics on all targets. This instantly solves trivial
+        # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
+        console.print(f"\n[bold]Tactic pre-search ({len(STANDARD_TACTICS)} tactics)...[/]")
+        presearch_proved = 0
+        presearch_targets = list(targets)  # copy to iterate while modifying
+        for t in presearch_targets:
+            if self._interrupted:
+                break
+            self._step(f"Trying standard tactics on {t.decl_name}...")
+            tactic = self.project.try_standard_tactics(
+                t.file, t.line, t.col,
+                timeout_per_tactic=min(self.config.cycle_timeout_seconds, 30),
+                include_compound=True,
+            )
+            if tactic:
+                # Apply the winning tactic permanently
+                original = self.project.read_file(t.file)
+                new_content = self.project.replace_sorry_at(
+                    t.file, t.line, tactic, original_content=original
+                )
+                self.project.write_file(t.file, new_content)
+                presearch_proved += 1
+                console.print(
+                    f"  [bold green]PROVED (tactic search):[/bold green] "
+                    f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
+                )
+
+                # Record as success
+                cycle = self.tracker.next_cycle()
+                record = ExperimentRecord(
+                    cycle=cycle,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    target_id=t.id,
+                    decl_name=t.decl_name,
+                    file=str(t.file.relative_to(self.project.root)),
+                    line=t.line,
+                    outcome=Outcome.SUCCESS,
+                    attempt=0,  # 0 = tactic search, not LLM
+                    duration_seconds=0.0,
+                    llm_tokens=0,
+                    llm_tok_per_sec=0.0,
+                    proof_length=len(tactic.splitlines()),
+                )
+                self.tracker.log(record)
+                self.tracker.commit_success(record)
+
+                # Self-improving loop
+                self.collector.record_attempt(record, tactic)
+                self.skill_memory.learn_from_proof(
+                    theorem_name=t.decl_name,
+                    theorem_statement=t.context_before[:200],
+                    proof=tactic,
+                    goal_state="",
+                )
+
+                # Remove from targets
+                targets = [x for x in targets if x.id != t.id]
+
+        if presearch_proved:
+            console.print(
+                f"\n[green]Tactic pre-search proved {presearch_proved} target(s).[/green]"
+            )
+            # Rescan affected files
+            affected_files = {t.file for t in presearch_targets if t.id not in {x.id for x in targets}}
+            for f in affected_files:
+                targets = [t for t in targets if t.file != f]
+                from autolean.scanner import scan_file
+                new_targets = scan_file(f, project_root=self.project.root)
+                targets.extend(new_targets)
+            targets = prioritize_targets(targets)
+            self._initial_sorry_count = len(targets) + presearch_proved
+        else:
+            console.print(f"[dim]  No targets solved by standard tactics.[/dim]")
+
+        if not targets:
+            console.print("[green]All targets solved by tactic pre-search![/]")
+            self._print_final_report(targets, time.monotonic())
+            return
 
         # P3.3: Resume from previous session
         if self.resume:
