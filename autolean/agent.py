@@ -2,6 +2,11 @@
 
 Inspired by Karpathy's autoresearch and RightNow-AI's autokernel:
   edit → build → evaluate → keep/revert → log → repeat
+
+All LLM inference is LOCAL (Ollama at localhost). No external LLM APIs.
+External tool calls are limited to:
+  - Loogle/LeanSearch (database lookups for mathlib lemmas)
+  - lake build (Lean compiler verification)
 """
 
 from __future__ import annotations

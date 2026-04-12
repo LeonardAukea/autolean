@@ -7,8 +7,10 @@ Two modes:
   2. Reactive: During proving, when a proof fails with "unknown identifier",
      the agent tries to define the missing piece and retries
 
-This supplements mathlib with project-local definitions that make
-harder proofs achievable.
+All generation uses the LOCAL LLM (the same Ollama model the agent already
+runs for proof generation — e.g., gemma4:26b at localhost:11434).
+No external LLM APIs are called. The only external network calls are to
+Loogle and LeanSearch, which are database lookups, not LLM inference.
 """
 
 from __future__ import annotations
