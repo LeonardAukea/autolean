@@ -166,17 +166,29 @@ def search_relevant_lemmas(
 ) -> list[SearchResult]:
     """Search for lemmas relevant to the current proof goal.
 
-    Uses both Loogle (type-based) and LeanSearch (natural language) and
-    merges results.
+    Strategy:
+    1. Search by theorem name (often the lemma has a similar name in mathlib)
+    2. Search by goal conclusion type pattern (Loogle)
+    3. Search by natural language (LeanSearch)
     """
     results: list[SearchResult] = []
     seen: set[str] = set()
 
-    # Extract key types/patterns from goal state for Loogle
+    # Strategy 1: Search by theorem name — often mathlib has exactly this
+    if theorem_name:
+        # Convert our name to mathlib-style: list_reverse_append -> List.reverse_append
+        parts = theorem_name.split("_")
+        # Try capitalized prefix: "list_reverse_append" -> "List.reverse_append"
+        if len(parts) >= 2:
+            mathlib_name = parts[0].capitalize() + "." + "_".join(parts[1:])
+            for r in search_loogle(mathlib_name, max_results=3):
+                if r.name not in seen:
+                    results.append(r)
+                    seen.add(r.name)
+
+    # Strategy 2: Search by goal conclusion type pattern (Loogle)
     if goal_state:
-        # Try searching by the goal's conclusion
         goal_lines = goal_state.strip().split("\n")
-        # The last line starting with ⊢ or |- is the conclusion
         conclusion = ""
         for line in reversed(goal_lines):
             stripped = line.strip()
@@ -185,7 +197,6 @@ def search_relevant_lemmas(
                 break
 
         if conclusion:
-            # Loogle: search by type pattern
             for r in search_loogle(conclusion, max_results=4):
                 if r.name not in seen:
                     results.append(r)
@@ -207,13 +218,20 @@ def search_relevant_lemmas(
 
 
 def format_search_results_for_prompt(results: list[SearchResult]) -> str:
-    """Format search results as a prompt section for the LLM."""
+    """Format search results as a prompt section for the LLM.
+
+    If a lemma looks like it directly closes the goal, highlight it
+    with explicit tactic suggestions (exact, simp, rw).
+    """
     if not results:
         return ""
 
     lines = ["## Relevant Mathlib Lemmas (from search)"]
+    lines.append("TRY THESE FIRST before writing a manual proof:")
     for r in results:
         sig = r.type_sig[:150] if r.type_sig else ""
         lines.append(f"- `{r.name}` : {sig}")
+        # Suggest concrete tactics for each lemma
+        lines.append(f"  Try: `exact {r.name}` or `simp [{r.name}]` or `rw [{r.name}]`")
 
     return "\n".join(lines)

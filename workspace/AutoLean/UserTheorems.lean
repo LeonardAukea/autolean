@@ -2,6 +2,6 @@
 
 import Mathlib.Data.List.Basic
 
-theorem list_reverse_append {α : Type} (as bs : List α) :
+theorem list_reverse_append (α : Type _) (as bs : List α) :
   List.reverse (as ++ bs) = List.reverse bs ++ List.reverse as := by
-  sorry
+  rw [List.reverse_append]
