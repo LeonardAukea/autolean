@@ -1,0 +1,13 @@
+{
+  "name": "case_analysis",
+  "description": "Proves by case analysis on a hypothesis",
+  "tactics": [
+    "cases",
+    "true",
+    "false"
+  ],
+  "applicable_when": "Goal has a disjunction or inductive hypothesis to split",
+  "example_theorem": "bool_and_true : theorem bool_and_true (b : Bool) : (b && true) = b := by",
+  "times_used": 1,
+  "times_succeeded": 1
+}
