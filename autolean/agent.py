@@ -411,6 +411,23 @@ class AutoLeanAgent:
             ]
 
             if not active_targets:
+                if self.config.max_cycles == 0 and targets:
+                    # Overnight mode: reset retry counts and start a new epoch.
+                    # Bump temperature slightly for variety in new epoch.
+                    epoch = max(self._attempts.values()) // self.config.max_retries_per_sorry + 1
+                    console.print(
+                        f"\n[cyan]Epoch {epoch}:[/] All retries exhausted. "
+                        f"Resetting {len(targets)} targets for another pass..."
+                    )
+                    for t in targets:
+                        self._attempts[t.id] = 0
+                        self._failed_proofs.pop(t.id, None)
+                        self._last_error.pop(t.id, None)
+                        self._goal_cache.pop(t.id, None)
+                    self.config.temperature = min(
+                        self.config.temperature + 0.05, 1.0
+                    )
+                    continue
                 console.print(
                     f"\n[green]All targets either proved or exhausted retries. Done![/]"
                 )

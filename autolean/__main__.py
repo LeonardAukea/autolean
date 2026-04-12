@@ -118,11 +118,12 @@ def run(
         agent.llm = _create(agent.llm.config)
 
     if overnight:
-        # Overnight mode: unlimited cycles, auto-resume, robust recovery
+        # Overnight mode: unlimited cycles, massive retry budget, auto-resume.
+        # Resets and starts new epochs when all retries exhausted.
         agent.config.max_cycles = 0
-        agent.config.max_retries_per_sorry = 8  # more attempts per target
-        agent.resume = True  # always resume in overnight mode
-        console.print("[bold magenta]OVERNIGHT MODE[/] — unlimited cycles, auto-resume, Ctrl+C to stop")
+        agent.config.max_retries_per_sorry = 100
+        agent.resume = True
+        console.print("[bold magenta]OVERNIGHT MODE[/] — unlimited cycles, 100 retries/sorry, auto-resume, Ctrl+C to stop")
     elif max_cycles is not None:
         agent.config.max_cycles = max_cycles
 
@@ -412,7 +413,10 @@ def verify_paper(
             console.print(f"  [yellow]SKIP[/] {c.label} (could not formalize)")
 
     # Write output file
-    output = output or Path(f"workspace/AutoLean/Paper_{paper_title.replace(' ', '_')}.lean")
+    # Sanitize filename: remove characters that break Lake module paths
+    import re as _re
+    safe_title = _re.sub(r"[^a-zA-Z0-9_]", "_", paper_title.replace(" ", "_"))
+    output = output or Path(f"workspace/AutoLean/Paper_{safe_title}.lean")
     output.parent.mkdir(parents=True, exist_ok=True)
     create_verification_file(claims, output, paper_title=paper_title)
     console.print(f"\n[bold green]Wrote {output}[/]")

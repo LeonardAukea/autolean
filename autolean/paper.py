@@ -124,46 +124,25 @@ def read_pdf(path: Path, pages: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 EXTRACT_CLAIMS_PROMPT = """\
-You are a mathematical assistant. Extract all theorem statements, lemma \
-statements, propositions, and corollaries from the following paper text.
+List ALL theorems, lemmas, propositions, conjectures, and problems from this paper.
+For each, write: N. Label: precise mathematical statement.
 
-For each claim, provide:
-1. The label (e.g., "Theorem 3.1", "Lemma 2")
-2. The precise mathematical statement
-
-Output as a numbered list. Include ONLY the mathematical content, not \
-commentary or proof sketches.
-
-Example output format:
-1. Theorem 1.1: For every prime p, there exists a prime q > p.
-2. Lemma 2.3: If G is a finite group of order n, then every element has order dividing n.
-
-Paper text:
+Paper:
 {text}
 """
 
 FORMALIZE_CLAIM_PROMPT = """\
-You are a Lean 4 formalization expert. Convert the following mathematical \
-claim into a Lean 4 theorem statement with `sorry` as the proof.
+Convert to a Lean 4 theorem with `sorry` proof. Use Mathlib syntax. \
+Output ONLY the Lean 4 code, no markdown.
 
-Rules:
-- Use standard Lean 4 / Mathlib syntax
-- Add necessary imports as comments at the top
-- Use descriptive identifier names (snake_case)
-- The proof should be `sorry` (we will fill it in later)
-- If the statement cannot be directly formalized, add a comment explaining why \
-and provide the closest approximation
-
-Claim: {label}: {statement}
-
-Output ONLY the Lean 4 code (theorem statement + sorry). No markdown fences.
+{label}: {statement}
 """
 
 
 def extract_claims(
     text: str,
     llm_generate: object,
-    system: str = "You are a mathematical assistant.",
+    system: str = "",
 ) -> list[Claim]:
     """Extract mathematical claims from paper text using an LLM.
 
@@ -174,9 +153,11 @@ def extract_claims(
     Returns:
         List of extracted claims.
     """
-    prompt = EXTRACT_CLAIMS_PROMPT.format(text=text[:15000])  # truncate for context
+    # Keep prompt short and text chunked — thinking models blow budget on long inputs.
+    # Use minimal system message to leave token budget for the actual extraction.
+    prompt = EXTRACT_CLAIMS_PROMPT.format(text=text[:10000])
 
-    response = llm_generate(system, prompt)  # type: ignore
+    response = llm_generate(system or "List math claims.", prompt)  # type: ignore
     raw = response.text
 
     # Parse numbered list — flexible format
