@@ -272,6 +272,16 @@ class AutoLeanAgent:
         # P3.3: Resume state
         self._proved_ids: set[str] = set()
 
+        # Self-improving loop: data collection + skill memory
+        from autolean.collector import TrainingDataCollector
+        from autolean.skills import SkillMemory
+        self.collector = TrainingDataCollector(
+            output_dir=self.project.root / "training_data"
+        )
+        self.skill_memory = SkillMemory(
+            skills_dir=self.project.root / "skills"
+        )
+
     # -- Resume loading (P3.3) ----------------------------------------------
 
     def _load_resume_state(self) -> None:
@@ -549,6 +559,9 @@ class AutoLeanAgent:
                 )
         goal_state = self._goal_cache[target.id]
 
+        # Store context for training data collection
+        self.collector.set_context(target.id, goal_state or "", file_context)
+
         if self.verbose and goal_state:
             console.print(f"  [dim]Goal: {goal_state[:120]}...[/]")
 
@@ -571,6 +584,13 @@ class AutoLeanAgent:
         hints = "\n".join(f"- {h}" for h in self.config.strategy_hints)
         if hints:
             file_context += f"\n\n## Strategy Hints\n{hints}"
+
+        # Inject learned skills (Hermes-inspired self-improving loop)
+        skill_injection = self.skill_memory.get_prompt_injection(
+            goal_state or file_context, max_skills=5
+        )
+        if skill_injection:
+            file_context += f"\n\n{skill_injection}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
         user_prompt = SORRY_FILL_USER.format(
@@ -717,6 +737,15 @@ class AutoLeanAgent:
             self.tracker.commit_success(record)
             self._failed_proofs.pop(target.id, None)
             self._last_error.pop(target.id, None)
+
+            # Self-improving loop: collect training data + learn skill
+            self.collector.record_attempt(record, proof)
+            self.skill_memory.learn_from_proof(
+                theorem_name=target.decl_name,
+                theorem_statement=target.context_before[:200],
+                proof=proof,
+                goal_state=goal_state or "",
+            )
             return record
 
         # FAILURE -- revert with error handling (P0.6)
@@ -749,7 +778,7 @@ class AutoLeanAgent:
 
         self._failed_proofs.setdefault(target.id, []).append(proof)
 
-        return ExperimentRecord(
+        fail_record = ExperimentRecord(
             cycle=cycle,
             timestamp=datetime.now(timezone.utc).isoformat(),
             target_id=target.id,
@@ -765,6 +794,11 @@ class AutoLeanAgent:
             error_category=error_category,
             build_duration_seconds=build.duration_seconds,
         )
+
+        # Collect failed attempt for DPO training data
+        self.collector.record_attempt(fail_record, proof)
+
+        return fail_record
 
     # -- Helpers ------------------------------------------------------------
 
@@ -968,12 +1002,28 @@ class AutoLeanAgent:
             width=70,
         ))
 
+        # ── Export training data ──
+        stats = self.collector.stats()
+        if stats["total_examples"] > 0:
+            exported = self.collector.export_all()
+            console.print(Panel(
+                f"[bold]Training Data Collected[/bold]\n"
+                f"Total examples:    {stats['total_examples']}\n"
+                f"Positive (SFT):    {stats['positive']}\n"
+                f"Negative (DPO):    {stats['negative']}\n"
+                f"Unique theorems:   {stats['unique_theorems']}\n"
+                + ("\n".join(f"  {fmt}: {path}" for fmt, path in exported.items()) if exported else ""),
+                title="Self-Improving Loop",
+                border_style="magenta",
+                width=70,
+            ))
+
         # ── Log the final summary to structured log ──
         log.info(
-            "SESSION COMPLETE: proved=%d/%d (%.1f%%) cycles=%d time=%.1fm tokens=%d",
+            "SESSION COMPLETE: proved=%d/%d (%.1f%%) cycles=%d time=%.1fm tokens=%d training_examples=%d",
             len(proved), self._initial_sorry_count,
             len(proved) / self._initial_sorry_count * 100 if self._initial_sorry_count else 0,
-            self.tracker.cycle, elapsed / 60, total_tokens,
+            self.tracker.cycle, elapsed / 60, total_tokens, stats.get("total_examples", 0),
         )
         for r in proved:
             log.info("  PROVED: %s (attempt %d, %.1fs)", r.decl_name, r.attempt, r.duration_seconds)

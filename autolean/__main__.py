@@ -524,6 +524,175 @@ def diff(project: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# export-training — export collected training data
+# ---------------------------------------------------------------------------
+
+
+@main.command("export-training")
+@click.option("--project", "-d", type=click.Path(exists=True, path_type=Path),
+              default="workspace", help="Path to Lean project root.")
+def export_training(project: Path) -> None:
+    """Export training data from previous runs (SFT, ShareGPT, DPO).
+
+    \b
+    Uses results.tsv + cached proof data to generate:
+      - SFT JSONL (instruction tuning with successful proofs)
+      - ShareGPT JSONL (Hermes/Axolotl compatible)
+      - DPO JSONL (preference pairs: good proof vs bad proof)
+
+    \b
+    Use the exported data to fine-tune Gemma or other models:
+      pip install unsloth
+      # See workspace/training_data/finetune_config.yaml
+    """
+    from autolean.collector import TrainingDataCollector
+
+    project = project.resolve()
+    collector = TrainingDataCollector(output_dir=project / "training_data")
+
+    # Read from existing training data files
+    td = project / "training_data"
+    if not td.exists() or not any(td.glob("*.jsonl")):
+        console.print("[yellow]No training data found. Run the agent first:[/]")
+        console.print("  uv run autolean run --max-cycles 20")
+        return
+
+    # Show existing files
+    console.print("[bold]Training data files:[/]\n")
+    for f in sorted(td.glob("*.jsonl")):
+        lines = sum(1 for _ in open(f))
+        size = f.stat().st_size / 1024
+        console.print(f"  {f.name} ({lines} examples, {size:.1f} KB)")
+
+    # Show stats
+    console.print(f"\n[bold]Usage:[/]")
+    console.print("  Fine-tune with Unsloth:")
+    console.print(f"    unsloth train --data {td}/sft_*.jsonl --model gemma4:26b")
+    console.print("  Fine-tune with Axolotl:")
+    console.print(f"    axolotl train {td}/finetune_config.yaml")
+    console.print("  DPO training:")
+    console.print(f"    Use {td}/dpo_*.jsonl with TRL DPOTrainer")
+
+
+# ---------------------------------------------------------------------------
+# finetune-config — generate training configuration
+# ---------------------------------------------------------------------------
+
+
+@main.command("finetune-config")
+@click.option("--project", "-d", type=click.Path(exists=True, path_type=Path),
+              default="workspace", help="Path to Lean project root.")
+@click.option("--model", "-m", default="google/gemma-4-E2B",
+              help="Base model for fine-tuning.")
+@click.option("--framework", type=click.Choice(["unsloth", "axolotl", "trl"]),
+              default="axolotl", help="Training framework.")
+def finetune_config(project: Path, model: str, framework: str) -> None:
+    """Generate a fine-tuning config for Lean 4 proof models.
+
+    \b
+    Creates a ready-to-use config file for the specified framework.
+    Supports: Axolotl, Unsloth, HuggingFace TRL.
+    """
+    import yaml
+
+    project = project.resolve()
+    td = project / "training_data"
+    td.mkdir(parents=True, exist_ok=True)
+
+    sft_files = sorted(td.glob("sft_*.jsonl"))
+    dpo_files = sorted(td.glob("dpo_*.jsonl"))
+
+    if framework == "axolotl":
+        config = {
+            "base_model": model,
+            "model_type": "AutoModelForCausalLM",
+            "tokenizer_type": "AutoTokenizer",
+            "load_in_4bit": True,
+            "adapter": "qlora",
+            "lora_r": 64,
+            "lora_alpha": 64,
+            "lora_dropout": 0.0,
+            "lora_target_modules": [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            "datasets": [
+                {
+                    "path": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
+                    "type": "sharegpt",
+                    "conversation": "chatml",
+                },
+            ],
+            "sequence_len": 8192,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 8,
+            "num_epochs": 3,
+            "learning_rate": 2e-4,
+            "lr_scheduler": "cosine",
+            "warmup_ratio": 0.1,
+            "optimizer": "adamw_8bit",
+            "bf16": True,
+            "gradient_checkpointing": True,
+            "output_dir": str(td / "output"),
+            "logging_steps": 10,
+            "save_strategy": "epoch",
+            "wandb_project": "autolean-finetune",
+        }
+        config_path = td / "axolotl_config.yaml"
+        config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
+        console.print(f"[green]Generated Axolotl config:[/] {config_path}")
+        console.print(f"\n  Run: accelerate launch -m axolotl.cli.train {config_path}")
+
+    elif framework == "unsloth":
+        config = {
+            "model_name": model,
+            "max_seq_length": 8192,
+            "load_in_4bit": True,
+            "lora_r": 64,
+            "lora_alpha": 64,
+            "dataset": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
+            "dataset_type": "messages",
+            "num_epochs": 3,
+            "learning_rate": 2e-4,
+            "batch_size": 1,
+            "gradient_accumulation": 8,
+            "output_dir": str(td / "output"),
+        }
+        config_path = td / "unsloth_config.yaml"
+        config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
+        console.print(f"[green]Generated Unsloth config:[/] {config_path}")
+        console.print(f"\n  pip install unsloth")
+        console.print(f"  python -m unsloth.train --config {config_path}")
+
+    elif framework == "trl":
+        config = {
+            "model_name": model,
+            "dataset_path": str(dpo_files[-1]) if dpo_files else "training_data/dpo.jsonl",
+            "lora_r": 64,
+            "lora_alpha": 64,
+            "beta": 0.1,
+            "num_epochs": 1,
+            "learning_rate": 5e-6,
+            "batch_size": 1,
+            "gradient_accumulation_steps": 8,
+            "output_dir": str(td / "dpo_output"),
+        }
+        config_path = td / "trl_dpo_config.yaml"
+        config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
+        console.print(f"[green]Generated TRL DPO config:[/] {config_path}")
+        console.print(f"\n  pip install trl")
+        console.print(f"  Use DPOTrainer with config from {config_path}")
+
+    # Summary
+    console.print(f"\n[bold]Self-improving loop:[/]")
+    console.print(f"  1. Run agent:      uv run autolean run --overnight")
+    console.print(f"  2. Export data:     uv run autolean export-training")
+    console.print(f"  3. Fine-tune:      {framework} train ...")
+    console.print(f"  4. Import model:   ollama create autolean-v1 -f Modelfile")
+    console.print(f"  5. Run again:      uv run autolean run --model autolean-v1")
+
+
+# ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
 
