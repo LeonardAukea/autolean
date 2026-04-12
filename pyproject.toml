@@ -23,8 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24"]
+lean = ["lean-interact>=0.11"]
 dev = ["ruff", "pytest", "respx", "mypy"]
-all = ["pymupdf>=1.24"]
+all = ["pymupdf>=1.24", "lean-interact>=0.11"]
 
 [project.scripts]
 autolean = "autolean.__main__:main"

@@ -265,6 +265,7 @@ class AutoLeanAgent:
 
         # Cache goal states per target (P0.3: avoids double builds)
         self._goal_cache: dict[str, str | None] = {}
+        self._search_cache: dict[str, str] = {}  # lemma search results per target
 
         # Track initial sorry count for coverage metric
         self._initial_sorry_count: int = 0
@@ -608,6 +609,23 @@ class AutoLeanAgent:
             n_skills = skill_injection.count("**")  // 2
             self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
+
+        # Search mathlib for relevant lemmas (Loogle + LeanSearch)
+        if attempt == 1:  # only search on first attempt (cached for retries)
+            from autolean.search import search_relevant_lemmas, format_search_results_for_prompt
+            self._step("Searching mathlib for relevant lemmas...")
+            search_results = search_relevant_lemmas(
+                goal_state or "", target.decl_name,
+            )
+            if search_results:
+                self._step(f"Found {len(search_results)} relevant lemmas", "cyan")
+                search_context = format_search_results_for_prompt(search_results)
+                file_context += f"\n\n{search_context}"
+                self._search_cache[target.id] = search_context
+            else:
+                self._step("No relevant lemmas found in mathlib", "dim")
+        elif target.id in self._search_cache:
+            file_context += f"\n\n{self._search_cache[target.id]}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
         user_prompt = SORRY_FILL_USER.format(
