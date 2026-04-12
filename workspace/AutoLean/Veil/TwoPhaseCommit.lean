@@ -94,7 +94,7 @@ theorem noFalseCommit_init (n : Nat) : NoFalseCommit (TwoPC.init n) := by
 
 /-- V2 holds in the initial state. -/
 theorem noSplitDecision_init (n : Nat) : NoSplitDecision (TwoPC.init n) := by
-  sorry
+  simp [TwoPC.init, NoSplitDecision]
 
 /-- V2 is preserved by castNo. -/
 theorem noSplitDecision_castNo {n : Nat} (s : TwoPC n) (i : Fin n)
