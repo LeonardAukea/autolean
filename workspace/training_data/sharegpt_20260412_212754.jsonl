@@ -1,0 +1,1 @@
+{"conversations": [{"from": "system", "value": "You are a Lean 4 theorem prover. Output ONLY tactic code."}, {"from": "human", "value": "## Task\nProvide the tactic proof for `one_plus_one_eq_two`."}, {"from": "gpt", "value": "rfl"}], "metadata": {"theorem": "one_plus_one_eq_two", "file": "AutoLean/UserTheorems.lean", "attempt": 0, "tokens": 0}}

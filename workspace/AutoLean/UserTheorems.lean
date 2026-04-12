@@ -20,7 +20,7 @@ theorem u12_dne (P : Prop) (h : P) : ¬¬P := by intro h_not_P
                                                exact h_not_P h
 theorem u13_nat_le : ∀ n : Nat, n ≤ n + 1 := by intro n
                                                 apply Nat.le_succ n
-theorem u14_append_nil (α : Type) (l : List α) : l ++ [] = l := by sorry
+theorem u14_append_nil (α : Type) (l : List α) : l ++ [] = l := by simp
 theorem u15_comp (α β γ : Type) (f : α → β) (g : β → γ) (x : α) : g (f x) = (g ∘ f) x := by rfl
 theorem u16_add_comm (n m : Nat) : n + m = m + n := by rw [Nat.add_comm]
 theorem u17_le_trans (a b c : Nat) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by sorry
