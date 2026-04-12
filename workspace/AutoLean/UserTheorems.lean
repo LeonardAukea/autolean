@@ -12,7 +12,9 @@ theorem add_lt_add_of_lt (a b c : Nat) : a < b → a + c < b + c := by
 
 -- U3: Boolean logic (decide/simp)
 theorem bool_and_true (b : Bool) : (b && true) = b := by
-  sorry
+  cases b with
+  | true => rfl
+  | false => rfl
 
 -- U4: List length (needs induction)
 theorem length_map_eq (α β : Type) (f : α → β) (l : List α) :
