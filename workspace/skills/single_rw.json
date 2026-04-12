@@ -7,5 +7,5 @@
   "applicable_when": "Goal is closeable by rw",
   "example_theorem": "list_reverse_append : theorem list_reverse_append (\u03b1 : Type _) (as bs : List \u03b1) :\n  List.reverse (as ++ bs) = List.reverse",
   "times_used": 1,
-  "times_succeeded": 1
+  "times_succeeded": 2
 }
