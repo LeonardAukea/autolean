@@ -12,7 +12,9 @@ theorem medium_add_comm (n m : Nat) : n + m = m + n := by
 -- M2: Length of reversed list
 theorem medium_length_reverse (α : Type) (l : List α) :
     (l.reverse).length = l.length := by
-  sorry
+  induction l with
+  | nil => rfl
+  | cons x xs ih => rw [List.reverse]; simp [ih]
 
 -- M3: Map preserves length
 theorem medium_map_length (α β : Type) (f : α → β) (l : List α) :
