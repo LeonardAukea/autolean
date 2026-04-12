@@ -1075,16 +1075,16 @@ class AutoLeanAgent:
             for fmt, path in (exported or {}).items():
                 data_lines.append(f"  {fmt}: {path}")
 
-            # Auto fine-tuning trigger
-            if self.collector.should_finetune(threshold=50):
+            # Auto fine-tuning trigger (self-improving loop)
+            from autolean.finetune import check_finetune_readiness, trigger_local_finetune
+            ft_status = check_finetune_readiness(self.project.root / "training_data")
+            if ft_status.ready:
                 data_lines.append("")
-                data_lines.append("[bold magenta]Fine-tuning ready![/bold magenta] 50+ proof examples collected.")
-                data_lines.append("  uv run autolean finetune-config")
-                data_lines.append("  accelerate launch -m axolotl.cli.train ...")
-                data_lines.append("  ollama create autolean-v1 -f Modelfile")
-                data_lines.append("  uv run autolean run --model autolean-v1")
+                data_lines.append("[bold magenta]Fine-tuning auto-triggered![/bold magenta]")
+                trigger_local_finetune(self.project.root / "training_data")
             elif stats["positive"] > 0:
-                data_lines.append(f"  ({50 - stats['positive']} more proofs until fine-tuning trigger)")
+                remaining = 50 - ft_status.positive_examples
+                data_lines.append(f"  ({remaining} more proofs until auto fine-tuning)")
 
             console.print(Panel(
                 "\n".join(data_lines),
