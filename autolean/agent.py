@@ -341,11 +341,14 @@ class AutoLeanAgent:
         console.print(
             Panel(
                 f"[bold]AutoLean Agent[/]\n"
-                f"Mode: {self.config.mode}\n"
-                f"Model: {self.config.model}\n"
-                f"Project: {self.project.root}\n"
-                f"Max retries/sorry: {self.config.max_retries_per_sorry}\n"
-                f"Max cycles: {self.config.max_cycles or '∞'}",
+                f"Mode:             {self.config.mode}\n"
+                f"Model:            {self.config.model}\n"
+                f"Project:          {self.project.root}\n"
+                f"Max retries:      {self.config.max_retries_per_sorry}\n"
+                f"Max cycles:       {self.config.max_cycles or '∞'}\n"
+                f"Self-correction:  [green]ON[/green] (error-informed retries)\n"
+                f"Data collection:  [green]ON[/green] (SFT + DPO for fine-tuning)\n"
+                f"Skill learning:   [green]ON[/green] ({len(self.skill_memory.skills)} skills loaded)",
                 title="Starting",
                 border_style="green",
             )
@@ -1002,17 +1005,33 @@ class AutoLeanAgent:
             width=70,
         ))
 
-        # ── Export training data ──
+        # ── Export training data + fine-tuning trigger ──
         stats = self.collector.stats()
         if stats["total_examples"] > 0:
             exported = self.collector.export_all()
+            data_lines = [
+                f"[bold]Training Data Collected[/bold]",
+                f"Total examples:    {stats['total_examples']}",
+                f"Positive (SFT):    {stats['positive']}",
+                f"Negative (DPO):    {stats['negative']}",
+                f"Unique theorems:   {stats['unique_theorems']}",
+            ]
+            for fmt, path in (exported or {}).items():
+                data_lines.append(f"  {fmt}: {path}")
+
+            # Auto fine-tuning trigger
+            if self.collector.should_finetune(threshold=50):
+                data_lines.append("")
+                data_lines.append("[bold magenta]Fine-tuning ready![/bold magenta] 50+ proof examples collected.")
+                data_lines.append("  uv run autolean finetune-config")
+                data_lines.append("  accelerate launch -m axolotl.cli.train ...")
+                data_lines.append("  ollama create autolean-v1 -f Modelfile")
+                data_lines.append("  uv run autolean run --model autolean-v1")
+            elif stats["positive"] > 0:
+                data_lines.append(f"  ({50 - stats['positive']} more proofs until fine-tuning trigger)")
+
             console.print(Panel(
-                f"[bold]Training Data Collected[/bold]\n"
-                f"Total examples:    {stats['total_examples']}\n"
-                f"Positive (SFT):    {stats['positive']}\n"
-                f"Negative (DPO):    {stats['negative']}\n"
-                f"Unique theorems:   {stats['unique_theorems']}\n"
-                + ("\n".join(f"  {fmt}: {path}" for fmt, path in exported.items()) if exported else ""),
+                "\n".join(data_lines),
                 title="Self-Improving Loop",
                 border_style="magenta",
                 width=70,

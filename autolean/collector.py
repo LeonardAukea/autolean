@@ -314,3 +314,7 @@ class TrainingDataCollector:
             "negative": total - pos,
             "unique_theorems": len(set(e.theorem_name for e in self.examples)),
         }
+
+    def should_finetune(self, threshold: int = 50) -> bool:
+        """Check if enough positive examples collected to trigger fine-tuning."""
+        return sum(1 for e in self.examples if e.success) >= threshold
