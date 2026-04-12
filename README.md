@@ -131,27 +131,78 @@ cd my_project && lake update
 uv run autolean run
 ```
 
+## Overnight / Long-Running Mode
+
+AutoLean is designed to run unattended for hours:
+
+```bash
+# Simple: just let it run (Ctrl+C to stop with full report)
+uv run autolean run --overnight --verbose
+
+# In tmux (survives terminal close):
+tmux new-session -d -s autolean \
+  'cd /path/to/autolean && caffeinate -s uv run autolean run --overnight --verbose 2>&1 | tee workspace/overnight.log'
+
+# Check on it:
+tmux attach -t autolean         # live view (Ctrl+B, D to detach)
+tail -f workspace/overnight.log  # log follow
+uv run autolean results          # experiment table
+uv run autolean diff             # what was proved
+```
+
+`--overnight` enables:
+- **Unlimited cycles** — runs until interrupted
+- **100 retries per sorry** — extensive exploration per target
+- **Epoch resets** — when all retries exhausted, resets counters with higher temperature and tries again
+- **Auto-resume** — picks up where it left off if restarted
+
+When stopped (Ctrl+C or max-cycles), you get a full report:
+- Summary table with success rate, coverage, token efficiency
+- List of proved theorems with timings
+- List of remaining targets
+- Suggested next steps
+
 ## Configuration
 
-Edit `program.md` to steer the agent:
+Edit `program.md` to control the agent. All fields have sane defaults.
 
 ```markdown
 ## Mode
-sorry-elimination
+sorry-elimination            # sorry-elimination | autoformalize | proof-golf
 
 ## Lean Project Path
-workspace
+workspace                    # relative to program.md location
 
 ## Strategy Hints
 - Try simp, omega, ring first
 - For inductive types, try cases or induction
+- For algebraic goals, try ring or field_simp then ring
 
 ## LLM Configuration
-model: gemma4:26b
-temperature: 0.4
-max_retries_per_sorry: 5
-cycle_timeout_seconds: 120
-max_cycles: 0
+model: gemma4:26b            # model name or profile
+temperature: 0.4             # base temperature (escalates on retries)
+max_retries_per_sorry: 5     # attempts per target before skipping
+cycle_timeout_seconds: 120   # max build time per cycle
+max_cycles: 0                # 0 = unlimited
+```
+
+### Key defaults
+
+| Setting | Default | What it does |
+|---------|---------|-------------|
+| `model` | `gemma4:26b` | LLM to use (see `autolean models` for profiles) |
+| `temperature` | `0.4` | Starting temperature; +0.1 per retry, capped at 1.0 |
+| `max_retries_per_sorry` | `5` | Attempts per sorry before moving to next target |
+| `cycle_timeout_seconds` | `120` | Max time for `lake build` per cycle |
+| `max_cycles` | `0` | Total cycles; 0 = unlimited (use `--max-cycles` to override) |
+| `num_predict` | `-1` | Token limit; -1 = unlimited (model stops naturally) |
+| `timeout` | `1800` | HTTP timeout in seconds (30 min for thinking models) |
+
+Override any setting via CLI flags:
+
+```bash
+uv run autolean run --model gemma4-31b --max-cycles 50
+uv run autolean run --overnight --model deepseek-prover
 ```
 
 ## CLI Reference
@@ -159,10 +210,11 @@ max_cycles: 0
 | Command | Description |
 |---------|-------------|
 | `autolean run` | Start the autonomous proof loop |
+| `autolean run --overnight` | Run all night (unlimited, epoch resets) |
 | `autolean scan` | List sorry targets (grouped by difficulty) |
 | `autolean check` | Verify Ollama + Lean connectivity |
 | `autolean models` | List model profiles and installation status |
-| `autolean results` | Display experiment log |
+| `autolean results` | Display experiment log with summary stats |
 | `autolean diff` | Show what the agent proved (git diff) |
 | `autolean verify-paper` | Extract and formalize paper claims |
 | `autolean init` | Scaffold a new AutoLean project |
@@ -173,9 +225,10 @@ max_cycles: 0
 |------|-------------|
 | `--model`, `-m` | Model profile name or raw model string |
 | `--max-cycles` | Limit experiment cycles (0 = unlimited) |
-| `--resume`, `-r` | Continue from previous session |
+| `--overnight` | Unlimited cycles, 100 retries, epoch resets, auto-resume |
+| `--resume`, `-r` | Continue from previous session's results.tsv |
 | `--dry-run`, `-n` | Query LLM but don't modify files |
-| `--verbose`, `-v` | Show detailed output |
+| `--verbose`, `-v` | Show generated proofs, goal states, build errors |
 | `--backend`, `-b` | `ollama` or `openai_compat` |
 
 ## Architecture
