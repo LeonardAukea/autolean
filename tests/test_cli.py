@@ -74,7 +74,7 @@ class TestCLIBasics:
     def test_run_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["run", "--help"])
         assert result.exit_code == 0
-        assert "--overnight" in result.output
+        assert "--max-cycles" in result.output
         assert "--model" in result.output
         assert "--resume" in result.output
 

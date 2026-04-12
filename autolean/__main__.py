@@ -58,14 +58,17 @@ def main(ctx: click.Context) -> None:
 @click.option("--resume", "-r", is_flag=True, help="Resume from previous session.")
 @click.option("--backend", "-b", type=click.Choice(["ollama", "openai_compat"]),
               default=None, help="LLM backend override.")
-@click.option("--overnight", is_flag=True,
-              help="Run all night (unlimited cycles, robust error recovery).")
 def run(
     program: Path, dry_run: bool, verbose: bool,
     model: str | None, max_cycles: int | None,
-    resume: bool, backend: str | None, overnight: bool,
+    resume: bool, backend: str | None,
 ) -> None:
     """Start the autonomous proof agent loop.
+
+    \b
+    Runs continuously until all targets are proved or you press Ctrl+C.
+    Use --max-cycles to set a limit. Self-correction, data collection,
+    and skill learning are always active.
 
     \b
     The edit-build-evaluate loop:
@@ -75,12 +78,8 @@ def run(
       4. Apply proof to .lean file
       5. Run `lake build` to verify
       6. Keep (git commit) or revert
-      7. Log to results.tsv, repeat
-
-    \b
-    Overnight mode (--overnight):
-      Runs with unlimited cycles, auto-resume if results.tsv exists,
-      and robust error recovery. Designed to run unattended for 8+ hours.
+      7. Collect training data + learn skill
+      8. Repeat
 
     Press Ctrl+C once to stop gracefully. Twice to force quit.
     """
@@ -117,15 +116,13 @@ def run(
         from autolean.llm_client import create_llm_client as _create
         agent.llm = _create(agent.llm.config)
 
-    if overnight:
-        # Overnight mode: unlimited cycles, massive retry budget, auto-resume.
-        # Resets and starts new epochs when all retries exhausted.
-        agent.config.max_cycles = 0
-        agent.config.max_retries_per_sorry = 100
-        agent.resume = True
-        console.print("[bold magenta]OVERNIGHT MODE[/] — unlimited cycles, 100 retries/sorry, auto-resume, Ctrl+C to stop")
-    elif max_cycles is not None:
+    # Default: run continuously (max_cycles=0). User sets --max-cycles to limit.
+    if max_cycles is not None:
         agent.config.max_cycles = max_cycles
+    else:
+        agent.config.max_cycles = 0  # unlimited by default
+        agent.config.max_retries_per_sorry = 100  # generous retry budget
+        agent.resume = True  # auto-resume from previous session
 
     agent.run()
 
