@@ -507,13 +507,8 @@ class AutoLeanAgent:
                 f"{elapsed / 60:.0f}m elapsed"
             )
 
-        # -- Session complete -----------------------------------------------
-        console.print()
-        self.tracker.print_summary(initial_count=self._initial_sorry_count)
-
-        elapsed_total = time.monotonic() - session_start
-        console.print(f"\nTotal time: {elapsed_total / 60:.1f} minutes")
-        console.print(f"Results: {self.tracker.results_file}")
+        # -- Session complete — full report -----------------------------------
+        self._print_final_report(targets, session_start)
 
     # -- Single sorry attempt -----------------------------------------------
 
@@ -796,3 +791,96 @@ class AutoLeanAgent:
             proof_length=proof_length,
             build_duration_seconds=build_duration_seconds,
         )
+
+    # -- Final report -------------------------------------------------------
+
+    def _print_final_report(
+        self,
+        remaining_targets: list[SorryTarget],
+        session_start: float,
+    ) -> None:
+        """Print a comprehensive end-of-session report."""
+        from rich.panel import Panel
+        from rich.table import Table
+
+        elapsed = time.monotonic() - session_start
+
+        # -- Header --
+        console.print()
+        console.print(Panel(
+            f"[bold]Session Complete[/] — {elapsed / 60:.1f} minutes, "
+            f"{self.tracker.cycle} cycles",
+            border_style="cyan",
+        ))
+
+        # -- Summary table --
+        self.tracker.print_summary(initial_count=self._initial_sorry_count)
+
+        # -- Proved theorems --
+        proved = [r for r in self.tracker.records if r.outcome == Outcome.SUCCESS]
+        if proved:
+            console.print(f"\n[bold green]Proved ({len(proved)} theorems):[/]")
+            for r in proved:
+                console.print(
+                    f"  [green]OK[/] {r.decl_name} "
+                    f"[dim]({r.file}:{r.line}, attempt {r.attempt}, "
+                    f"{r.duration_seconds:.1f}s, {r.llm_tokens} tok)[/dim]"
+                )
+
+        # -- Remaining targets --
+        remaining = [
+            t for t in remaining_targets
+            if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
+        ]
+        exhausted = [
+            t for t in remaining_targets
+            if self._attempts.get(t.id, 0) >= self.config.max_retries_per_sorry
+        ]
+
+        if remaining:
+            console.print(f"\n[yellow]Remaining ({len(remaining)} targets):[/]")
+            for t in remaining[:15]:
+                attempts = self._attempts.get(t.id, 0)
+                console.print(f"  [yellow]--[/] {t.decl_name} [dim]({t.rel_path or t.file.name}:{t.line}, {attempts} attempts)[/dim]")
+            if len(remaining) > 15:
+                console.print(f"  [dim]... and {len(remaining) - 15} more[/dim]")
+
+        if exhausted:
+            console.print(f"\n[red]Exhausted retries ({len(exhausted)} targets):[/]")
+            for t in exhausted[:10]:
+                last_err = self._last_error.get(t.id)
+                err_hint = f" — {last_err[0].value}" if last_err else ""
+                console.print(f"  [red]X[/] {t.decl_name}{err_hint}")
+            if len(exhausted) > 10:
+                console.print(f"  [dim]... and {len(exhausted) - 10} more[/dim]")
+
+        # -- Timing stats --
+        console.print(f"\n[bold]Timing:[/]")
+        console.print(f"  Total wall time:    {elapsed / 60:.1f} minutes ({elapsed / 3600:.1f} hours)")
+        if proved:
+            avg_proof_time = sum(r.duration_seconds for r in proved) / len(proved)
+            console.print(f"  Avg time per proof: {avg_proof_time:.1f}s")
+            rate = len(proved) / (elapsed / 3600) if elapsed > 0 else 0
+            console.print(f"  Proof rate:         {rate:.1f}/hour")
+        total_tokens = sum(r.llm_tokens for r in self.tracker.records)
+        console.print(f"  Total tokens:       {total_tokens:,}")
+
+        # -- Files --
+        console.print(f"\n[bold]Files:[/]")
+        console.print(f"  Results:  {self.tracker.results_file}")
+        console.print(f"  Log:      workspace/overnight.log (if --overnight)")
+        console.print(f"  Git:      {self.tracker._cycle} commits on autolean/ branch")
+
+        # -- Next steps --
+        if remaining or exhausted:
+            console.print(f"\n[bold]Next steps:[/]")
+            if remaining:
+                console.print(f"  Resume:   uv run autolean run --resume")
+            console.print(f"  Diff:     uv run autolean diff")
+            console.print(f"  Results:  uv run autolean results")
+            if exhausted:
+                console.print(f"  Try specialized model: uv run autolean run --model deepseek-prover --resume")
+        else:
+            console.print(f"\n[bold green]All sorry targets resolved![/]")
+
+        console.print()
