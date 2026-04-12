@@ -26,7 +26,7 @@ theorem u16_add_comm (n m : Nat) : n + m = m + n := by rw [Nat.add_comm]
 theorem u17_le_trans (a b c : Nat) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by omega
 theorem u18_ite_same (P : Prop) [Decidable P] (a : Nat) : (if P then a else a) = a := by simp
 theorem u19_mul_add (a b c : Nat) : a * (b + c) = a * b + a * c := by sorry
-theorem u20_exists (n : Nat) : ∃ m, m = n + 1 := by sorry
+theorem u20_exists (n : Nat) : ∃ m, m = n + 1 := by simp
 
 theorem one_plus_one_eq_two : 1 + 1 = 2 := by
   rfl
