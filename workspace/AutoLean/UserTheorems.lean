@@ -8,7 +8,7 @@ theorem u3_and_intro (a b : Prop) (ha : a) (hb : b) : a ∧ b := by constructor
 theorem u4_or_inl (a : Prop) (ha : a) (b : Prop) : a ∨ b := by exact Or.inl ha
 theorem u5_true : True := by trivial
 theorem u6_nat_eq : 2 + 3 = 5 := by rfl
-theorem u7_bool_and : (true && false) = false := by sorry
+theorem u7_bool_and : (true && false) = false := by rfl
 theorem u8_mp (P Q : Prop) (h : P) (f : P → Q) : Q := by sorry
 theorem u9_and_comm (P Q : Prop) (h : P ∧ Q) : Q ∧ P := by sorry
 theorem u10_or_elim (P Q R : Prop) (hp : P → R) (hq : Q → R) (h : P ∨ Q) : R := by sorry
