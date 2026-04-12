@@ -34,7 +34,7 @@ class LLMConfig:
     base_url: str = DEFAULT_OLLAMA_URL
     temperature: float = DEFAULT_TEMPERATURE
     num_predict: int = DEFAULT_NUM_PREDICT
-    timeout: float = 300.0  # 5 min max per request
+    timeout: float = 1800.0  # 30 min per request (unlimited tokens + thinking models need room)
     backend: str = "ollama"  # "ollama" | "openai_compat"
 
 
