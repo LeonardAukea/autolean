@@ -8,5 +8,5 @@
   "applicable_when": "Goal is a function type (forall/arrow)",
   "example_theorem": "implication_transitive : theorem implication_transitive {P Q R : Prop} (h1 : P \u2192 Q) (h2 : Q \u2192 R) : P \u2192 R := by",
   "times_used": 1,
-  "times_succeeded": 3
+  "times_succeeded": 4
 }

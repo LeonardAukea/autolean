@@ -18,7 +18,8 @@ theorem u11_contra (P Q : Prop) (f : P → Q) (nq : ¬Q) : ¬P := by intro h
                                                                  exact nq (f h)
 theorem u12_dne (P : Prop) (h : P) : ¬¬P := by intro h_not_P
                                                exact h_not_P h
-theorem u13_nat_le : ∀ n : Nat, n ≤ n + 1 := by sorry
+theorem u13_nat_le : ∀ n : Nat, n ≤ n + 1 := by intro n
+                                                apply Nat.le_succ n
 theorem u14_append_nil (α : Type) (l : List α) : l ++ [] = l := by sorry
 theorem u15_comp (α β γ : Type) (f : α → β) (g : β → γ) (x : α) : g (f x) = (g ∘ f) x := by sorry
 theorem u16_add_comm (n m : Nat) : n + m = m + n := by sorry
