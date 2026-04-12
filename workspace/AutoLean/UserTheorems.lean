@@ -22,7 +22,7 @@ theorem u13_nat_le : ∀ n : Nat, n ≤ n + 1 := by intro n
                                                 apply Nat.le_succ n
 theorem u14_append_nil (α : Type) (l : List α) : l ++ [] = l := by sorry
 theorem u15_comp (α β γ : Type) (f : α → β) (g : β → γ) (x : α) : g (f x) = (g ∘ f) x := by rfl
-theorem u16_add_comm (n m : Nat) : n + m = m + n := by sorry
+theorem u16_add_comm (n m : Nat) : n + m = m + n := by rw [Nat.add_comm]
 theorem u17_le_trans (a b c : Nat) (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c := by sorry
 theorem u18_ite_same (P : Prop) [Decidable P] (a : Nat) : (if P then a else a) = a := by sorry
 theorem u19_mul_add (a b c : Nat) : a * (b + c) = a * b + a * c := by sorry
