@@ -535,6 +535,12 @@ class AutoLeanAgent:
 
     # -- Single sorry attempt -----------------------------------------------
 
+    def _step(self, msg: str, style: str = "dim") -> None:
+        """Print a timestamped agent step — always visible for full observability."""
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        console.print(f"  [dim]{ts}[/dim] [{style}]{msg}[/{style}]")
+
     def _try_fill_sorry(
         self, cycle: int, target: SorryTarget, attempt: int
     ) -> ExperimentRecord:
@@ -544,6 +550,7 @@ class AutoLeanAgent:
         original_content = self.project.read_file(file_path)
 
         # -- Step 1: Build context for LLM ----------------------------------
+        self._step(f"Reading {file_path.name}:{target.line} ({target.decl_name})")
         lines = original_content.split("\n")
         start = max(0, target.decl_line - 1)
         end = min(len(lines), target.line + 20)
@@ -553,24 +560,28 @@ class AutoLeanAgent:
 
         # P0.2 + P0.3: Get goal state via hole-punch (cached per target)
         if target.id not in self._goal_cache:
-            if self.verbose:
-                console.print(f"  [dim]Extracting goal state (hole-punch)...[/]")
+            self._step("Extracting goal state (hole-punch: sorry -> ?_)")
             with console.status("[dim]Extracting goal state...", spinner="dots"):
                 self._goal_cache[target.id] = self.project.get_goal_via_hole_punch(
                     file_path, target.line, target.col,
                     timeout=self.config.cycle_timeout_seconds,
                 )
+            if self._goal_cache[target.id]:
+                goal_preview = self._goal_cache[target.id].replace("\n", " ")[:100]
+                self._step(f"Goal: {goal_preview}", "cyan")
+            else:
+                self._step("Goal state unavailable (will infer from context)", "yellow")
+        else:
+            self._step("Goal state cached from previous attempt")
         goal_state = self._goal_cache[target.id]
 
         # Store context for training data collection
         self.collector.set_context(target.id, goal_state or "", file_context)
 
-        if self.verbose and goal_state:
-            console.print(f"  [dim]Goal: {goal_state[:120]}...[/]")
-
         # Format failed attempts with error-informed hints (P2.3)
         prev_fails = self._failed_proofs.get(target.id, [])
         if prev_fails:
+            self._step(f"Self-correction: {len(prev_fails)} previous failures inform this attempt", "yellow")
             failed_parts = []
             for i, p in enumerate(prev_fails[-3:]):  # last 3
                 failed_parts.append(f"Attempt {i + 1} (failed):\n```\n{p}\n```")
@@ -579,6 +590,7 @@ class AutoLeanAgent:
             last_err = self._last_error.get(target.id)
             if last_err:
                 category, msg = last_err
+                self._step(f"Last error: {category.value} — feeding hint to LLM", "yellow")
                 failed_str += f"\n\n{retry_hint_for(category, msg)}"
         else:
             failed_str = "(none)"
@@ -593,6 +605,8 @@ class AutoLeanAgent:
             goal_state or file_context, max_skills=5
         )
         if skill_injection:
+            n_skills = skill_injection.count("**")  // 2
+            self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
@@ -604,14 +618,13 @@ class AutoLeanAgent:
             failed_attempts=failed_str,
         )
 
-        if self.verbose:
-            console.print(f"  [dim]Querying {self.config.model}...[/]")
-
         # P2.2: Cap temperature escalation
         temp = min(
             self.config.temperature + (attempt - 1) * TEMP_ESCALATION_STEP,
             TEMP_MAX,
         )
+
+        self._step(f"Querying {self.config.model} (temp={temp:.2f})")
 
         try:
             response = self.llm.generate(
@@ -693,8 +706,7 @@ class AutoLeanAgent:
             )
 
         # -- Step 4: Build and check ----------------------------------------
-        if self.verbose:
-            console.print(f"  [dim]Building...[/]")
+        self._step("Verifying with lake build...")
 
         with console.status("[dim]Building...", spinner="dots"):
             build = self.project.check_file(
@@ -742,13 +754,16 @@ class AutoLeanAgent:
             self._last_error.pop(target.id, None)
 
             # Self-improving loop: collect training data + learn skill
+            self._step("Committing to git + collecting training data", "green")
             self.collector.record_attempt(record, proof)
-            self.skill_memory.learn_from_proof(
+            skill = self.skill_memory.learn_from_proof(
                 theorem_name=target.decl_name,
                 theorem_statement=target.context_before[:200],
                 proof=proof,
                 goal_state=goal_state or "",
             )
+            if skill:
+                self._step(f"Learned skill: {skill.name} ({skill.description[:60]})", "magenta")
             return record
 
         # FAILURE -- revert with error handling (P0.6)
