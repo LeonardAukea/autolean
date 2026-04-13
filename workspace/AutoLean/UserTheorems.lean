@@ -30,3 +30,6 @@ theorem u20_exists (n : Nat) : ∃ m, m = n + 1 := by simp
 
 theorem one_plus_one_eq_two : 1 + 1 = 2 := by
   rfl
+
+theorem one_plus_one_eq_two_2 : 1 + 1 = 2 := by
+  rfl

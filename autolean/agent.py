@@ -21,8 +21,12 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
-from autolean.lean_interface import FAST_TACTICS, STANDARD_TACTICS, LeanProject
+from autolean.error_classifier import (
+    STRUCTURAL_ERRORS, ErrorCategory, classify_error, retry_hint_for,
+)
+from autolean.lean_interface import (
+    COMPOUND_TACTICS, FAST_TACTICS, STANDARD_TACTICS, LeanProject,
+)
 from autolean.llm_client import LLMBackend, LLMConfig, create_llm_client
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.scanner import SorryTarget, prioritize_targets, scan_project
@@ -36,6 +40,12 @@ TEMP_MAX = 1.0
 
 # Maximum proof lines before we reject without building
 DEFAULT_MAX_PROOF_LINES = 50
+
+# Repeated-error bail-out: if the same error category repeats this many times
+# consecutively for a target, skip it.  Inspired by autoresearch's "reflect
+# before retrying" — repeating the same thing hoping for different results is
+# not reflection, it's waste.
+MAX_REPEATED_ERRORS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +280,14 @@ class AutoLeanAgent:
         self._failed_proofs: dict[str, list[str]] = {}
         self._last_error: dict[str, tuple[ErrorCategory, str]] = {}
 
+        # Repeated-error tracking: list of consecutive error categories per target.
+        # If the same category appears MAX_REPEATED_ERRORS times in a row, bail out.
+        self._error_history: dict[str, list[ErrorCategory]] = {}
+
+        # File health cache: files known to have structural (non-sorry) errors.
+        # Targets in these files are skipped until the file is repaired.
+        self._unhealthy_files: dict[Path, str] = {}  # file -> reason
+
         # Cache goal states per target (P0.3: avoids double builds)
         self._goal_cache: dict[str, str | None] = {}
         self._search_cache: dict[str, str] = {}  # lemma search results per target
@@ -318,6 +336,46 @@ class AutoLeanAgent:
             f"[dim]  Loaded {len(self._proved_ids)} proved, "
             f"{len(self._attempts)} attempted from previous session.[/]"
         )
+
+    # -- Pre-flight checks (autokernel: keep workspace clean) ----------------
+
+    def _check_file_health(self, lean_file: Path) -> str | None:
+        """Check if a file has non-sorry structural errors.
+
+        Returns None if the file is healthy (only sorry warnings),
+        or an error description if the file is structurally broken.
+
+        This prevents wasting LLM retries on targets in corrupted files
+        (e.g., imports inserted mid-file by gap-filling).
+        """
+        if lean_file in self._unhealthy_files:
+            return self._unhealthy_files[lean_file]
+
+        result = self.project.check_file(lean_file, timeout=60)
+        for diag in result.errors:
+            cat = classify_error(diag.message)
+            if cat in STRUCTURAL_ERRORS:
+                reason = f"{cat.value}: {diag.message[:120]}"
+                self._unhealthy_files[lean_file] = reason
+                return reason
+        return None
+
+    def _should_bail_repeated_error(self, target_id: str) -> bool:
+        """Check if the same error category has repeated too many times.
+
+        Inspired by autoresearch's "reflect before retrying" — if the same
+        error keeps occurring, the LLM approach isn't going to work.
+        """
+        history = self._error_history.get(target_id, [])
+        if len(history) < MAX_REPEATED_ERRORS:
+            return False
+        # Check if the last N errors are all the same category
+        recent = history[-MAX_REPEATED_ERRORS:]
+        return len(set(recent)) == 1
+
+    def _record_error_category(self, target_id: str, category: ErrorCategory) -> None:
+        """Track error category for repeated-error detection."""
+        self._error_history.setdefault(target_id, []).append(category)
 
     # -- Signal handling ----------------------------------------------------
 
@@ -425,16 +483,18 @@ class AutoLeanAgent:
         # -- Deterministic tactic pre-search (before LLM) -------------------
         # Try standard tactics on all targets. This instantly solves trivial
         # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
-        console.print(f"\n[bold]Tactic pre-search ({len(FAST_TACTICS)} fast tactics)...[/]")
+        # Two-phase: fast tactics first (cheap), then compound tactics (slightly slower).
+        all_presearch = FAST_TACTICS + [t for t in STANDARD_TACTICS if t not in FAST_TACTICS] + COMPOUND_TACTICS
+        console.print(f"\n[bold]Tactic pre-search ({len(all_presearch)} tactics: {len(FAST_TACTICS)} fast + {len(STANDARD_TACTICS) - len(FAST_TACTICS)} standard + {len(COMPOUND_TACTICS)} compound)...[/]")
         presearch_proved = 0
         presearch_targets = list(targets)  # copy to iterate while modifying
         for t in presearch_targets:
             if self._interrupted:
                 break
-            self._step(f"Trying standard tactics on {t.decl_name}...")
+            self._step(f"Trying {len(all_presearch)} tactics on {t.decl_name}...")
             tactic = self.project.try_tactics_fast(
                 t.file, t.line, t.col,
-                tactics=FAST_TACTICS,
+                tactics=all_presearch,
                 timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
             )
             if tactic:
@@ -648,6 +708,37 @@ class AutoLeanAgent:
         t0 = time.monotonic()
         file_path = target.file
         original_content = self.project.read_file(file_path)
+
+        # -- Pre-flight: structural error bail-out --------------------------
+        # autokernel principle: don't attempt work in a corrupted workspace.
+        file_issue = self._check_file_health(file_path)
+        if file_issue:
+            self._step(f"SKIP: file has structural error: {file_issue[:80]}", "red")
+            # Exhaust retries so the loop moves on
+            self._attempts[target.id] = self.config.max_retries_per_sorry
+            return self._make_record(
+                cycle, target, attempt, t0,
+                outcome=Outcome.SKIPPED,
+                error_summary=f"File structural error: {file_issue}",
+                error_category=classify_error(file_issue).value,
+            )
+
+        # autoresearch principle: reflect — if the same error repeats, stop.
+        if self._should_bail_repeated_error(target.id):
+            history = self._error_history.get(target.id, [])
+            repeated_cat = history[-1].value if history else "unknown"
+            self._step(
+                f"SKIP: same error ({repeated_cat}) repeated "
+                f"{MAX_REPEATED_ERRORS}x — bailing out",
+                "red",
+            )
+            self._attempts[target.id] = self.config.max_retries_per_sorry
+            return self._make_record(
+                cycle, target, attempt, t0,
+                outcome=Outcome.SKIPPED,
+                error_summary=f"Repeated error bail-out: {repeated_cat} x{MAX_REPEATED_ERRORS}",
+                error_category=repeated_cat,
+            )
 
         # -- Step 1: Build context for LLM ----------------------------------
         self._step(f"Reading {file_path.name}:{target.line} ({target.decl_name})")
@@ -889,6 +980,9 @@ class AutoLeanAgent:
             self.tracker.commit_success(record)
             self._failed_proofs.pop(target.id, None)
             self._last_error.pop(target.id, None)
+            self._error_history.pop(target.id, None)
+            # Clear unhealthy status for this file (proof success = file is OK)
+            self._unhealthy_files.pop(file_path, None)
 
             # Self-improving loop: collect training data + learn skill
             self._step("Committing to git + collecting training data", "green")
@@ -907,39 +1001,68 @@ class AutoLeanAgent:
         self._step("Build failed — analyzing error...", "red")
         error_summary = ""
         error_category = ""
+        cat = ErrorCategory.OTHER
         if build.errors:
             error_summary = build.errors[0].message[:500]
             cat = classify_error(error_summary)
             error_category = cat.value
             self._last_error[target.id] = (cat, error_summary)
+            self._record_error_category(target.id, cat)
+
+            # Structural error — exhaust retries immediately (LLM can't fix)
+            if cat in STRUCTURAL_ERRORS:
+                self._step(
+                    f"Structural error ({cat.value}) — skipping target",
+                    "red",
+                )
+                self._attempts[target.id] = self.config.max_retries_per_sorry
+                # Mark file as unhealthy so other targets in it are skipped too
+                self._unhealthy_files[file_path] = f"{cat.value}: {error_summary[:120]}"
 
             # Auto-detect missing definitions and try to fill gaps
-            from autolean.library import detect_missing_definitions, fill_gap
-            gaps = detect_missing_definitions(error_summary, file_context, str(file_path))
-            if gaps:
-                for gap in gaps[:2]:  # max 2 gaps per attempt
-                    self._step(f"Detected missing: {gap.name} — attempting to define it", "yellow")
-                    definition = fill_gap(gap, file_path, self.llm.generate)
-                    if definition:
-                        self._step(f"Generated definition for {gap.name} ({len(definition)} chars)", "cyan")
-                        # Prepend the definition to the file for next attempt
-                        prepend = f"\n-- Auto-generated by AutoLean (missing from mathlib)\n{definition}\n\n"
-                        current = self.project.read_file(file_path)
-                        # Insert after imports but before theorems
-                        import_end = 0
-                        for i, line in enumerate(current.split("\n")):
-                            if line.strip().startswith("import ") or line.strip().startswith("open "):
-                                import_end = i + 1
-                        lines_list = current.split("\n")
-                        lines_list.insert(import_end, prepend)
-                        self.project.write_file(file_path, "\n".join(lines_list))
-                        log.info("Auto-defined %s in %s", gap.name, file_path.name)
+            # (only for non-structural errors, and with validation)
+            elif cat == ErrorCategory.UNKNOWN_IDENTIFIER:
+                from autolean.library import detect_missing_definitions, fill_gap
+                gaps = detect_missing_definitions(error_summary, file_context, str(file_path))
+                if gaps:
+                    for gap in gaps[:2]:  # max 2 gaps per attempt
+                        self._step(f"Detected missing: {gap.name} — attempting to define it", "yellow")
+                        definition = fill_gap(gap, file_path, self.llm.generate)
+                        if definition:
+                            self._step(f"Generated definition for {gap.name} ({len(definition)} chars)", "cyan")
+                            # Insert after imports but before theorems
+                            current = self.project.read_file(file_path)
+                            prepend = f"\n-- Auto-generated by AutoLean (missing from mathlib)\n{definition}\n\n"
+                            import_end = 0
+                            for i, line in enumerate(current.split("\n")):
+                                if line.strip().startswith("import ") or line.strip().startswith("open "):
+                                    import_end = i + 1
+                            lines_list = current.split("\n")
+                            lines_list.insert(import_end, prepend)
+                            new_content_with_gap = "\n".join(lines_list)
+                            # Validate: only keep if file still builds (no structural errors)
+                            self.project.write_file(file_path, new_content_with_gap)
+                            check = self.project.check_file(file_path, timeout=60)
+                            has_structural = any(
+                                classify_error(d.message) in STRUCTURAL_ERRORS
+                                for d in check.errors
+                            )
+                            if has_structural:
+                                self._step(
+                                    f"Gap definition for {gap.name} corrupted file — reverting",
+                                    "red",
+                                )
+                                self.project.write_file(file_path, current)
+                            else:
+                                log.info("Auto-defined %s in %s", gap.name, file_path.name)
         elif not build.success:
             error_summary = build.stderr[:500] if build.stderr else "Build failed (unknown)"
             error_category = ErrorCategory.OTHER.value
+            self._record_error_category(target.id, ErrorCategory.OTHER)
         else:
             error_summary = f"sorry still present after replacement at line {target.line}"
             error_category = ErrorCategory.SORRY_REMAINS.value
+            self._record_error_category(target.id, ErrorCategory.SORRY_REMAINS)
 
         # P0.6: Safe revert with fallback
         try:
