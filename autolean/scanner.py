@@ -226,6 +226,9 @@ def scan_project(project_root: Path) -> list[SorryTarget]:
             continue
         if path.name == "lakefile.lean":
             continue
+        # Skip nested workspace copies (e.g., workspace/workspace/)
+        if "workspace" in parts:
+            continue
         targets.extend(scan_file(path, project_root=project_root))
     return targets
 

@@ -314,7 +314,7 @@ def results(file: Path, tail: int) -> None:
 @main.command()
 @click.argument("statement")
 @click.option("--model", "-m", type=str, default=None, help="Model to use.")
-@click.option("--max-attempts", type=int, default=20, help="Max proof attempts.")
+@click.option("--max-attempts", type=int, default=0, help="Max proof attempts (0 = unlimited).")
 @click.option("--program", "-p", type=click.Path(exists=True, path_type=Path),
               default="program.md", help="Path to program.md.")
 def prove(statement: str, model: str | None, max_attempts: int, program: Path) -> None:
@@ -412,7 +412,8 @@ def prove(statement: str, model: str | None, max_attempts: int, program: Path) -
     console.print(f"[green]Wrote to {target_file}[/]\n")
 
     # Step 3: Run agent on ONLY this target (not all sorries)
-    console.print(f"[bold]Attempting proof ({max_attempts} attempts)...[/]\n")
+    attempts_label = "unlimited" if max_attempts == 0 else str(max_attempts)
+    console.print(f"[bold]Attempting proof ({attempts_label} attempts)...[/]\n")
     llm.close()
 
     agent = AutoLeanAgent(
@@ -426,8 +427,9 @@ def prove(statement: str, model: str | None, max_attempts: int, program: Path) -
             agent.llm = _f(_C(model=profile.model, base_url=profile.base_url,
                               temperature=profile.temperature, num_predict=profile.num_predict,
                               backend=profile.backend))
-    agent.config.max_cycles = max_attempts
-    agent.config.max_retries_per_sorry = max_attempts
+    agent.config.max_cycles = max_attempts  # 0 = unlimited
+    if max_attempts > 0:
+        agent.config.max_retries_per_sorry = max_attempts
     agent.run()
 
 

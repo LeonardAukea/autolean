@@ -33,3 +33,6 @@ theorem one_plus_one_eq_two : 1 + 1 = 2 := by
 
 theorem one_plus_one_eq_two_2 : 1 + 1 = 2 := by
   rfl
+
+theorem one_plus_one_eq_two_3 : 1 + 1 = 2 := by
+  rfl

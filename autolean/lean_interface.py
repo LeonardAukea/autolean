@@ -218,11 +218,55 @@ class LeanProject:
         )
 
     def check_file(self, lean_file: Path, timeout: int = 120) -> BuildResult:
-        """Build a single Lean file by its module name."""
+        """Build a single Lean file by its module name.
+
+        Falls back to `lake env lean FILE` if the module isn't registered
+        in the lakefile (e.g., newly-generated paper verification files).
+        """
         # Convert file path to module name: AutoLean/Sandbox.lean -> AutoLean.Sandbox
         rel = lean_file.resolve().relative_to(self.root)
         module = str(rel).replace("/", ".").removesuffix(".lean")
-        return self.build(target=module, timeout=timeout)
+        result = self.build(target=module, timeout=timeout)
+
+        # Fallback: if lake build doesn't know the module, use lake env lean
+        if not result.success and "unknown target" in (result.stderr or ""):
+            return self._check_file_via_env(rel, timeout)
+
+        return result
+
+    def _check_file_via_env(self, rel_path: Path, timeout: int = 120) -> BuildResult:
+        """Check a file using `lake env lean FILE` (no module registration needed)."""
+        cmd = ["lake", "env", "lean", str(rel_path)]
+        t0 = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return BuildResult(
+                success=False,
+                stdout="",
+                stderr=f"Build timed out after {timeout}s",
+                duration_seconds=timeout,
+            )
+
+        duration = time.monotonic() - t0
+        combined = result.stdout + "\n" + result.stderr
+        diags = _parse_diagnostics(combined)
+
+        # lake env lean returns 0 even on errors; check diagnostics
+        has_errors = any(d.severity == "error" for d in diags)
+        return BuildResult(
+            success=not has_errors,
+            diagnostics=diags,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_seconds=duration,
+        )
 
     # -- File operations ----------------------------------------------------
 
@@ -230,9 +274,11 @@ class LeanProject:
         """Find all .lean files in the project (excluding .lake/)."""
         files = []
         for p in self.root.rglob("*.lean"):
-            # Skip lake build cache and lakefile itself
+            # Skip lake build cache, lakefile, and nested workspace copies
             parts = p.relative_to(self.root).parts
             if ".lake" in parts or "lake-packages" in parts or "build" in parts:
+                continue
+            if "workspace" in parts:
                 continue
             if p.name == "lakefile.lean":
                 continue

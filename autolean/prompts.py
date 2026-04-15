@@ -20,7 +20,6 @@ placeholders with valid proofs.
 ## CRITICAL: Tactics That DO NOT Exist
 
 Never use these — they look plausible but will cause "unknown tactic" errors:
-- `norm_cast` (use `push_cast` or `simp` instead)
 - `field_norm` (use `field_simp; ring`)
 - `nat_cast` (doesn't exist)
 - `finish` (doesn't exist — this is not Isabelle)
@@ -32,7 +31,7 @@ Never use these — they look plausible but will cause "unknown tactic" errors:
 ## Tactic Cheat Sheet (try in this order)
 
 - Trivial closers: `trivial`, `rfl`, `decide`, `norm_num`
-- Arithmetic: `omega`, `ring`, `field_simp; ring`, `positivity`, `linarith`
+- Arithmetic: `omega`, `ring`, `field_simp; ring`, `positivity`, `linarith`, `norm_cast`, `push_cast`
 - Simplification: `simp`, `simp [lemma]`, `simp_all`
 - Logic: `tauto`, `aesop`, `contradiction`, `exact absurd h₁ h₂`
 - Structure: `constructor`, `intro h`, `obtain ⟨a, b⟩ := h`

@@ -10,8 +10,9 @@ class ErrorCategory(str, Enum):
     """Categories of Lean build errors.
 
     Each category suggests a different retry strategy for the LLM.
-    Structural errors (DUPLICATE_DECLARATION, FILE_STRUCTURE_ERROR) indicate
-    problems the LLM cannot fix — the agent should skip or fix the file first.
+    Structural errors (DUPLICATE_DECLARATION, FILE_STRUCTURE_ERROR,
+    LAKE_CONFIG_ERROR) indicate problems the LLM cannot fix — the agent
+    should skip or fix the file first.
     """
 
     TYPE_MISMATCH = "type_mismatch"
@@ -22,9 +23,11 @@ class ErrorCategory(str, Enum):
     TIMEOUT = "timeout"
     SORRY_REMAINS = "sorry_remains"
     SYNTAX_ERROR = "syntax_error"
+    APPLICATION_ERROR = "application_error"
     # Structural errors — LLM retries cannot fix these
     DUPLICATE_DECLARATION = "duplicate_declaration"
     FILE_STRUCTURE_ERROR = "file_structure_error"
+    LAKE_CONFIG_ERROR = "lake_config_error"
     OTHER = "other"
 
 
@@ -34,6 +37,7 @@ class ErrorCategory(str, Enum):
 STRUCTURAL_ERRORS: frozenset[ErrorCategory] = frozenset({
     ErrorCategory.DUPLICATE_DECLARATION,
     ErrorCategory.FILE_STRUCTURE_ERROR,
+    ErrorCategory.LAKE_CONFIG_ERROR,
 })
 
 
@@ -59,6 +63,14 @@ def classify_error(message: str) -> ErrorCategory:
         return ErrorCategory.FILE_STRUCTURE_ERROR
     if "invalid 'open' command" in msg and "beginning" in msg:
         return ErrorCategory.FILE_STRUCTURE_ERROR
+    # Lake/build configuration errors
+    if "unknown target" in msg:
+        return ErrorCategory.LAKE_CONFIG_ERROR
+    if "unknown package" in msg or "unknown module" in msg:
+        return ErrorCategory.LAKE_CONFIG_ERROR
+    if "build failed" in msg and "lake" in msg:
+        return ErrorCategory.LAKE_CONFIG_ERROR
+
     # Unknown tactic = LLM hallucinated a tactic name
     if "unknown tactic" in msg:
         return ErrorCategory.TACTIC_FAILED
@@ -98,8 +110,28 @@ def classify_error(message: str) -> ErrorCategory:
         return ErrorCategory.SYNTAX_ERROR
     if "unexpected end of input" in msg:
         return ErrorCategory.SYNTAX_ERROR
+    # Function application errors
+    if "function expected" in msg:
+        return ErrorCategory.APPLICATION_ERROR
+    if "application type mismatch" in msg:
+        return ErrorCategory.TYPE_MISMATCH
+    if "incorrect number of arguments" in msg:
+        return ErrorCategory.APPLICATION_ERROR
+    if "too many arguments" in msg:
+        return ErrorCategory.APPLICATION_ERROR
+
+    # More unknown identifier patterns
+    if "not found" in msg and ("field" in msg or "member" in msg):
+        return ErrorCategory.UNKNOWN_IDENTIFIER
+    if "has not been defined" in msg:
+        return ErrorCategory.UNKNOWN_IDENTIFIER
+    if "invalid field" in msg:
+        return ErrorCategory.UNKNOWN_IDENTIFIER
+
     # Catch remaining tactic failures
     if "failed" in msg and any(kw in msg for kw in ["apply", "exact", "rewrite", "rw", "intro"]):
+        return ErrorCategory.TACTIC_FAILED
+    if "no goals" in msg and "to be solved" in msg:
         return ErrorCategory.TACTIC_FAILED
 
     return ErrorCategory.OTHER
@@ -172,6 +204,18 @@ def retry_hint_for(category: ErrorCategory, error_message: str) -> str:
                 f"STRUCTURAL ERROR: {error_message[:300]}\n"
                 f"The file has a structural problem (e.g., import in wrong position). "
                 f"This is NOT a proof error — the file needs manual repair."
+            )
+        case ErrorCategory.LAKE_CONFIG_ERROR:
+            return (
+                f"BUILD CONFIG ERROR: {error_message[:300]}\n"
+                f"The build system cannot find this module. "
+                f"This is NOT a proof error — the project config needs fixing."
+            )
+        case ErrorCategory.APPLICATION_ERROR:
+            return (
+                f"FUNCTION APPLICATION ERROR:\n{error_message[:400]}\n"
+                f"You applied a function/constructor with wrong arguments. "
+                f"Check the type signature and number of arguments."
             )
         case _:
             return f"Previous attempt failed:\n{error_message[:200]}"
