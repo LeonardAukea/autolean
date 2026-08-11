@@ -107,7 +107,13 @@ jobs:
       - name: Install host sandbox
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          /usr/bin/bwrap --unshare-user --unshare-net \
+            --ro-bind / / -- /bin/true
       - name: Restore Lake artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
