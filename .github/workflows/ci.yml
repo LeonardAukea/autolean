@@ -304,7 +304,9 @@ jobs:
 
   release:
     name: GitHub release
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: >-
+      ${{ !cancelled() && needs.required.result == 'success' &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: [required]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
