@@ -33,7 +33,30 @@ theorem collatz_step_one : collatz_step 1 = 4 := by rfl
 theorem collatz_step_two : collatz_step 2 = 1 := by rfl
 
 -- Sub-result 3
-theorem collatz_reaches_one_of_pow2 (k : Nat) : collatz_reaches_one (2^k) := by sorry
+theorem collatz_reaches_one_of_pow2 (k : Nat) : collatz_reaches_one (2^k) := by refine ⟨k, ?_⟩
+                                                                                induction k with
+                                                                                | zero =>
+                                                                                  first
+                                                                                    | rfl
+                                                                                    | simp
+                                                                                    | norm_num
+                                                                                | succ n ih =>
+                                                                                  have h2 : (2 : ℕ) ^ (n + 1) % 2 = 0 := by
+                                                                                    rw [pow_succ]; omega
+                                                                                  have hd : (2 : ℕ) ^ (n + 1) / 2 = 2 ^ n := by
+                                                                                    rw [pow_succ]; omega
+                                                                                  rw [Function.iterate_succ_apply]
+                                                                                  first
+                                                                                    | (have hc : collatz (2 ^ (n + 1)) = 2 ^ n := by
+                                                                                         simp [collatz, h2, hd, Nat.even_pow]
+                                                                                       rw [hc]
+                                                                                       exact ih)
+                                                                                    | (have hc : collatz_step (2 ^ (n + 1)) = 2 ^ n := by
+                                                                                         simp [collatz_step, h2, hd, Nat.even_pow]
+                                                                                       rw [hc]
+                                                                                       exact ih)
+                                                                                    | simpa [h2, hd, Nat.even_pow] using ih
+                                                                                    | simp_all [h2, hd, Nat.even_pow]
 
 -- References
 -- https://en.wikipedia.org/wiki/Collatz_conjecture
