@@ -92,7 +92,7 @@ jobs:
   nix:
     name: Lean and Nix closure
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,6 +115,10 @@ jobs:
         run: nix flake check path:. --no-build --all-systems
       - name: Run Nix checks
         run: nix flake check path:. --print-build-logs
+      - name: Restore pinned Mathlib artifacts
+        run: >-
+          nix develop path:. --command bash -euo pipefail -c
+          'cd workspace && lake exe cache get'
       - name: Build CSLib and the Lean workspace
         run: >-
           nix develop path:. --command bash -euo pipefail -c
