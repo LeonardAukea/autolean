@@ -68,6 +68,53 @@ def test_formalization_repairs_exact_lean_diagnostics(tmp_path: Path) -> None:
     assert len(project.sources) == 2
 
 
+def test_formalization_repairs_an_incomplete_pythagorean_declaration(
+    tmp_path: Path,
+) -> None:
+    responses = iter(
+        [
+            (
+                "open EuclideanGeometry\n\n"
+                "theorem pythagorean_theorem\n"
+                "    {V : Type*} {P : Type*} [NormedAddCommGroup V]\n"
+                "    [InnerProductSpace ℝ V] [MetricSpace P]\n"
+                "    [NormedAddTorsor V P]"
+            ),
+            (
+                "open RealInnerProductSpace\n\n"
+                "theorem pythagorean_theorem "
+                "{V : Type*} [NormedAddCommGroup V] "
+                "[InnerProductSpace ℝ V] (x y : V) "
+                "(h : ⟪x, y⟫ = 0) :\n"
+                "    ‖x + y‖ ^ 2 = ‖x‖ ^ 2 + ‖y‖ ^ 2 := by\n"
+                "  sorry"
+            ),
+        ]
+    )
+    prompts: list[str] = []
+
+    def generate(system: str, user: str) -> LLMResponse:
+        del system
+        prompts.append(user)
+        return LLMResponse(text=next(responses), model="fixture")
+
+    passed = SimpleNamespace(success=True, errors=[], stderr="")
+    project = Project(tmp_path, [passed])
+
+    theorem = formalize_theorem(
+        "the pytahgorean theorem",
+        _plan(),
+        generate,
+        project,
+    )
+
+    assert theorem.declaration_name == "pythagorean_theorem"
+    assert theorem.attempts == 2
+    assert "the pytahgorean theorem" in prompts[1]
+    assert "exactly one `sorry`" in prompts[1]
+    assert len(project.sources) == 1
+
+
 def test_formalization_requires_exactly_one_proof_target(tmp_path: Path) -> None:
     def generate(system: str, user: str) -> LLMResponse:
         del system, user

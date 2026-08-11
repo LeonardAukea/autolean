@@ -16,6 +16,16 @@ from click.testing import CliRunner
 from autolean.__main__ import _run_agent, main
 from autolean.routing import EscalationPolicy
 
+PYTHAGOREAN_FORMALIZATION = (
+    "open RealInnerProductSpace\n\n"
+    "theorem pythagorean_theorem "
+    "{V : Type*} [NormedAddCommGroup V] "
+    "[InnerProductSpace ℝ V] (x y : V) "
+    "(h : ⟪x, y⟫ = 0) :\n"
+    "    ‖x + y‖ ^ 2 = ‖x‖ ^ 2 + ‖y‖ ^ 2 := by\n"
+    "  sorry"
+)
+
 
 def _registered_command_paths(
     group: click.Group,
@@ -175,15 +185,12 @@ class TestCLIBasics:
             ),
             (
                 "the pythagorean theorem",
-                (
-                    "open RealInnerProductSpace\n\n"
-                    "theorem pythagorean_theorem "
-                    "{V : Type*} [NormedAddCommGroup V] "
-                    "[InnerProductSpace ℝ V] (x y : V) "
-                    "(h : ⟪x, y⟫ = 0) :\n"
-                    "    ‖x + y‖ ^ 2 = ‖x‖ ^ 2 + ‖y‖ ^ 2 := by\n"
-                    "  sorry"
-                ),
+                PYTHAGOREAN_FORMALIZATION,
+                "pythagorean_theorem",
+            ),
+            (
+                "the pytahgorean theorem",
+                PYTHAGOREAN_FORMALIZATION,
                 "pythagorean_theorem",
             ),
         ],
