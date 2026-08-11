@@ -165,13 +165,16 @@ jobs:
         run: |
           set -euo pipefail
           release_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          build_root="$(mktemp -d "$RUNNER_TEMP/autolean-build.XXXXXX")"
           export SOURCE_DATE_EPOCH="$release_epoch"
-          uv build --python .venv/bin/python --no-build-isolation --out-dir dist-first
-          uv build --python .venv/bin/python --no-build-isolation --out-dir dist-second
+          uv build --python .venv/bin/python --no-build-isolation \
+            --out-dir "$build_root/first"
+          uv build --python .venv/bin/python --no-build-isolation \
+            --out-dir "$build_root/second"
           diff -u \
-            <(cd dist-first && sha256sum ./* | sort) \
-            <(cd dist-second && sha256sum ./* | sort)
-          mv dist-first dist
+            <(cd "$build_root/first" && sha256sum ./* | sort) \
+            <(cd "$build_root/second" && sha256sum ./* | sort)
+          mv "$build_root/first" dist
       - name: Test the built wheel
         shell: bash
         run: |
