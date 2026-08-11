@@ -378,7 +378,7 @@ class TestReplaceSorryAt:
         assert "--unshare-all" in cmd
         assert cmd[cmd.index("--remount-ro") + 1] == "/"
         assert str(project.root / ".lake") not in cmd
-        assert (scratch / "candidate.lean").is_file()
+        assert (scratch / "AutoLeanInternal" / "Candidate.lean").is_file()
         assert set(env) == {
             "HOME",
             "LANG",
@@ -388,6 +388,58 @@ class TestReplaceSorryAt:
             "PATH",
             "TMPDIR",
         }
+
+    def test_linux_sandbox_uses_configured_bubblewrap(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        lean = tmp_path / "toolchain" / "bin" / "lean"
+        lean.parent.mkdir(parents=True)
+        lean.write_text("", encoding="utf-8")
+        bubblewrap = tmp_path / "bin" / "bwrap"
+        bubblewrap.parent.mkdir()
+        bubblewrap.write_text("#!/bin/sh\n", encoding="utf-8")
+        bubblewrap.chmod(0o700)
+        monkeypatch.setenv("AUTOLEAN_BWRAP", str(bubblewrap))
+        monkeypatch.setattr(lean_interface.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(lean_interface, "_resolve_lean", lambda root: lean)
+        monkeypatch.setattr(
+            lean_interface.shutil,
+            "which",
+            lambda name: pytest.fail(f"PATH lookup used for {name}"),
+        )
+
+        command, _ = project._sandboxed_lean_command(
+            scratch,
+            "example : True := by exact True.intro\n",
+        )
+
+        assert command[0] == str(bubblewrap.resolve())
+
+    def test_linux_sandbox_rejects_relative_bubblewrap_override(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        lean = tmp_path / "toolchain" / "bin" / "lean"
+        lean.parent.mkdir(parents=True)
+        lean.write_text("", encoding="utf-8")
+        monkeypatch.setenv("AUTOLEAN_BWRAP", "bin/bwrap")
+        monkeypatch.setattr(lean_interface.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(lean_interface, "_resolve_lean", lambda root: lean)
+
+        with pytest.raises(lean_interface.LeanSandboxError, match="absolute executable"):
+            project._sandboxed_lean_command(
+                scratch,
+                "example : True := by exact True.intro\n",
+            )
 
     def test_line_out_of_range_raises(self, project: LeanProject, tmp_path: Path) -> None:
         content = "theorem t : True := by\n  sorry\n"

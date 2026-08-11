@@ -53,15 +53,20 @@ claude_cli, codex_cli, anthropic, openai, ollama, openai_compat, muse_glimmer.
 endpoint: optional HTTP base URL for a self-hosted inference server.
 effort: optional reasoning-depth override for capable models.
 temperature: sampling value for backends that advertise support.
+escalation_policy: never, ask, or auto; ask is silent in non-interactive runs.
+escalation_model: optional exact stronger profile or raw model ID.
+escalation_after_failures: eligible kernel failures before a routing decision.
 -->
 model: opus
 temperature: 0.0
 max_retries_per_sorry: 5
+escalation_policy: ask
+escalation_after_failures: 2
 cycle_timeout_seconds: 120
 llm_timeout_seconds: 600
 max_proof_lines: 30
 
 ## Experiment Budget
 
-<!-- A zero budget runs until interrupted. -->
-max_cycles: 0
+<!-- Each invocation gets this many cycles. Use --overnight explicitly. -->
+max_cycles: 5

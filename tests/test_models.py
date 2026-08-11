@@ -41,6 +41,14 @@ class TestProfileTable:
         assert grouped == set(PROFILES)
 
     @pytest.mark.parametrize("profile", PROFILES.values(), ids=lambda p: p.name)
+    def test_default_escalation_routes_stay_on_one_backend(self, profile: ModelProfile) -> None:
+        if profile.escalates_to is None:
+            return
+        target = PROFILES[profile.escalates_to]
+        assert target.backend == profile.backend
+        assert target.model != profile.model
+
+    @pytest.mark.parametrize("profile", PROFILES.values(), ids=lambda p: p.name)
     def test_reasoning_profiles_declare_no_temperature(self, profile: ModelProfile) -> None:
         if profile.backend in ("claude_cli", "codex_cli", "anthropic", "openai"):
             assert profile.temperature is None

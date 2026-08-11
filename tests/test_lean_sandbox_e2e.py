@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from autolean.lean_interface import LeanProject
+from autolean.lean_interface import CORE_LOGICAL_AXIOMS, LeanProject
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AUTOLEAN_RUN_SANDBOX_E2E") != "1",
@@ -23,9 +23,13 @@ pytestmark = pytest.mark.skipif(
 def project_and_source() -> tuple[LeanProject, Path]:
     configured = os.environ.get("AUTOLEAN_SANDBOX_PROJECT")
     root = Path(configured) if configured is not None else Path(__file__).resolve().parents[1] / "workspace"
-    source = (
-        root / "AutoLean" / "Target.lean" if configured is not None else root / "AutoLean" / "Trivial.lean"
-    )
+    configured_source = os.environ.get("AUTOLEAN_SANDBOX_SOURCE")
+    if configured_source is not None:
+        source = Path(configured_source)
+    elif configured is not None:
+        source = root / "AutoLean" / "Target.lean"
+    else:
+        source = root / "AutoLean" / "Trivial.lean"
     return LeanProject(root), source
 
 
@@ -214,6 +218,59 @@ theorem preceding : True := by
     assert "outside preceding" in f"{wrong.stdout}\n{wrong.stderr}"
     assert exact.success
     assert exact.axioms == ()
+
+
+def test_pythagorean_formalization_and_proof_reach_isolated_lean(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    project, source = project_and_source
+    if not (project.root / ".lake" / "packages" / "mathlib").exists():
+        pytest.skip("the sandbox fixture has no Mathlib closure")
+
+    from autolean.llm import LLMResponse
+    from autolean.strategy import ProofPlan
+    from autolean.theorem import formalize_theorem
+
+    scaffold = """\
+open RealInnerProductSpace
+
+theorem pythagorean_theorem
+    {V : Type*} [NormedAddCommGroup V] [InnerProductSpace ℝ V]
+    (x y : V) (h : ⟪x, y⟫ = 0) :
+    ‖x + y‖ ^ 2 = ‖x‖ ^ 2 + ‖y‖ ^ 2 := by
+  sorry
+"""
+    plan = ProofPlan(
+        objective="Prove norm additivity for orthogonal vectors.",
+        formalization=("Use the real inner product and explicit scalar notation.",),
+        methods=("Apply Mathlib's inner-product Pythagorean identity.",),
+        checkpoints=("Compile the exact theorem scaffold.",),
+    )
+
+    theorem = formalize_theorem(
+        "the pythagorean theorem",
+        plan,
+        lambda _system, _user: LLMResponse(text=scaffold, model="fixture"),
+        project,
+        max_repairs=0,
+    )
+
+    proof_source = theorem.source.replace(
+        "  sorry\n",
+        ("  simpa [pow_two] using\n    norm_add_sq_eq_norm_sq_add_norm_sq_of_inner_eq_zero x y h\n"),
+    )
+    result = project.validate_candidate(
+        source,
+        proof_source,
+        declaration=theorem.declaration_name,
+        declaration_line=theorem.declaration_line,
+    )
+
+    assert theorem.declaration_name == "pythagorean_theorem"
+    assert "riemann_hypothesis" not in theorem.source
+    assert result.success, result.stderr or result.errors
+    assert set(result.axioms or ()) <= CORE_LOGICAL_AXIOMS
+    assert "sorryAx" not in (result.axioms or ())
 
 
 def test_runnable_challenge_sources_are_well_formed(

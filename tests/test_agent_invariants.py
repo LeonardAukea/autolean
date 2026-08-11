@@ -15,6 +15,7 @@ from autolean.llm import (
     LLMResponse,
 )
 from autolean.provenance import ProofEnvironment, sha256_text
+from autolean.routing import EscalationPolicy
 from autolean.scanner import SorryTarget
 from autolean.tracker import Outcome
 
@@ -140,6 +141,20 @@ def test_dry_run_preserves_the_complete_project_tree(
     assert agent.tracker.records[-1].environment_sha256 == "a" * 64
 
 
+def test_cycle_budget_is_fresh_when_an_experiment_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    agent.tracker._cycle = 10
+
+    result = agent.run()
+
+    assert result.successful
+    assert backend.calls == 1
+    assert agent.tracker.cycle == 11
+
+
 def test_terminal_provider_error_stops_after_one_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -203,6 +218,68 @@ def test_program_guidance_reaches_the_model_request(
     assert "Expose the main mathematical step." in backend.last_user
     assert "## Program Constraints" in backend.last_user
     assert "Use only declarations already in scope." in backend.last_user
+
+
+def test_auto_escalation_switches_once_without_expanding_the_attempt_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, original_backend = _prepare_agent(tmp_path, monkeypatch)
+    original_backend.close()
+    initial = FakeBackend(LLMConfig(model="gpt-5.6-luna", backend="codex_cli"))
+    initial.text = "exact False.elim (by contradiction)"
+    stronger = FakeBackend(LLMConfig(model="gpt-5.6-terra", backend="codex_cli"))
+    stronger.text = "trivial"
+    agent.llm = initial
+    agent.config.max_cycles = 2
+    agent.config.max_retries_per_sorry = 2
+    agent.config.escalation_policy = EscalationPolicy.AUTO
+    agent.config.escalation_after_failures = 1
+
+    created: list[LLMConfig] = []
+
+    def create_backend(config: LLMConfig) -> FakeBackend:
+        created.append(config)
+        return stronger
+
+    monkeypatch.setattr("autolean.agent.create_llm_client", create_backend)
+    validations = 0
+
+    def validate_candidate(*args: object, **kwargs: object) -> BuildResult:
+        nonlocal validations
+        del args, kwargs
+        validations += 1
+        if validations == 1:
+            return BuildResult(
+                success=False,
+                diagnostics=[
+                    Diagnostic(
+                        file="AutoLean/Target.lean",
+                        line=2,
+                        col=2,
+                        severity="error",
+                        message="type mismatch: False has type Prop but True was expected",
+                    )
+                ],
+            )
+        return BuildResult(success=True, duration_seconds=0.1, axioms=())
+
+    monkeypatch.setattr(agent.project, "validate_candidate", validate_candidate)
+
+    result = agent.run()
+
+    assert result.successful
+    assert initial.calls == 1
+    assert stronger.calls == 1
+    assert len(created) == 1
+    assert created[0].model == "gpt-5.6-terra"
+    assert agent.tracker.cycle == 2
+    assert [record.model for record in agent.tracker.records] == [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+    ]
+    assert len(agent.model_transitions) == 1
+    assert agent.model_transitions[0].failure_count == 1
 
 
 def test_structural_context_and_prompt_identity_reach_the_experiment(

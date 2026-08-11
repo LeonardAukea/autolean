@@ -12,9 +12,9 @@ Only source-faithful formalizations can enter the proof loop.
 
 from __future__ import annotations
 
-import dataclasses
+import re
 from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import field as dataclass_field
 from typing import Literal
 
 from rich.console import Console
@@ -29,17 +29,15 @@ class OpenProblem:
 
     id: str
     name: str
-    # `field` is an attribute name here, so the defaults below must spell out
-    # `dataclasses.field` rather than shadow it with a bare import.
     field: str
     difficulty: str  # "accessible" | "hard" | "very-hard" | "millennium"
     description: str
     lean_statement: str  # Lean 4 theorem statement with sorry
     formalization_status: Literal["formalized", "scaffold"] = "formalized"
     limitations: str = ""
-    sub_results: list[str] = dataclasses.field(default_factory=list)  # provable lemmas
-    references: list[str] = dataclasses.field(default_factory=list)
-    tags: list[str] = dataclasses.field(default_factory=list)
+    sub_results: list[str] = dataclass_field(default_factory=list)
+    references: list[str] = dataclass_field(default_factory=list)
+    tags: list[str] = dataclass_field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -349,10 +347,11 @@ def print_problems_table(filter_field: str | None = None, filter_difficulty: str
         )
 
     console.print(table)
-    console.print(
-        f"\n  [dim]Use:[/] autolean challenge {problems[0].id}"
-        f"  [dim]to generate a workspace and start proving[/]"
-    )
+    if problems:
+        console.print(
+            f"\n  [dim]Use:[/] autolean problems work {problems[0].id}"
+            f"  [dim]to open its formalization or proof workspace[/]"
+        )
 
 
 def render_challenge_source(problem: OpenProblem) -> str:
@@ -396,11 +395,97 @@ def render_challenge_source(problem: OpenProblem) -> str:
     return "\n".join(lines)
 
 
-def generate_challenge_file(problem: OpenProblem, output_dir: str | Path = "workspace/AutoLean") -> Path:
-    """Write one rendered challenge source and return its path."""
-    filename = f"Challenge_{problem.id.replace('-', '_').title()}.lean"
-    path = Path(output_dir) / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
+def search_problems(
+    query: str = "",
+    *,
+    field: str | None = None,
+    difficulty: str | None = None,
+) -> list[OpenProblem]:
+    """Return curated problems matching human-facing metadata."""
+    terms = tuple(part.casefold() for part in query.split() if part)
+    matches: list[OpenProblem] = []
+    for problem in OPEN_PROBLEMS:
+        if field and field.casefold() not in problem.field.casefold():
+            continue
+        if difficulty and problem.difficulty != difficulty:
+            continue
+        searchable = " ".join(
+            (
+                problem.id,
+                problem.name,
+                problem.field,
+                problem.description,
+                problem.limitations,
+                *problem.tags,
+            )
+        ).casefold()
+        if all(term in searchable for term in terms):
+            matches.append(problem)
+    return matches
 
-    path.write_text(render_challenge_source(problem), encoding="utf-8")
-    return path
+
+def match_open_problem(statement: str) -> OpenProblem | None:
+    """Match an exact catalog name or ID after conservative normalization."""
+
+    def normalize(text: str) -> str:
+        text = text.casefold().replace("’", "'").replace("'s", "")
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return " ".join(part for part in text.split() if part != "the")
+
+    query = normalize(statement)
+    for problem in OPEN_PROBLEMS:
+        names = {normalize(problem.id), normalize(problem.name)}
+        if query in names:
+            return problem
+    return None
+
+
+def suggest_problems(
+    *,
+    field: str | None = None,
+    difficulty: str | None = None,
+    limit: int = 3,
+) -> list[OpenProblem]:
+    """Rank problems by formal readiness and bounded sub-results."""
+    difficulty_rank = {
+        "accessible": 0,
+        "hard": 1,
+        "very-hard": 2,
+        "millennium": 3,
+    }
+    problems = search_problems(field=field, difficulty=difficulty)
+    problems.sort(
+        key=lambda problem: (
+            problem.formalization_status != "formalized",
+            difficulty_rank.get(problem.difficulty, 4),
+            -len(problem.sub_results),
+            problem.name,
+        )
+    )
+    return problems[: max(0, limit)]
+
+
+def render_research_brief(problem: OpenProblem) -> str:
+    """Render the source-fidelity work required before proof search."""
+    references = "\n".join(f"- {reference}" for reference in problem.references)
+    if not references:
+        references = "- Add a primary mathematical source."
+    boundary = problem.limitations or "No semantic boundary is recorded."
+    return (
+        f"# Formalization research: {problem.name}\n\n"
+        f"Field: {problem.field}\n\n"
+        "## Source claim\n\n"
+        f"{problem.description}\n\n"
+        "## Semantic boundary\n\n"
+        f"{boundary}\n\n"
+        "## Primary sources\n\n"
+        f"{references}\n\n"
+        "## Formalization protocol\n\n"
+        "1. Acquire the primary source and record its exact edition or hash.\n"
+        "2. Define every source-specific object and invariant in mathematical "
+        "language.\n"
+        "3. State the hypotheses and conclusion without a surrogate invariant.\n"
+        "4. Map each definition to existing Mathlib concepts or record a library gap.\n"
+        "5. Compile the Lean statement with `sorry` before starting proof search.\n"
+        "6. Have a domain expert approve source-to-statement fidelity.\n"
+    )
