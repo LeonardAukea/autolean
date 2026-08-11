@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import pytest
 
-from autolean.llm import LLMConfig, LLMError, anthropic_api, openai_api
+from autolean.llm import DocumentInput, LLMConfig, LLMError, anthropic_api, openai_api
 
 
 class FakeBadRequestError(Exception):
@@ -76,6 +76,28 @@ class TestAnthropicClient:
         assert kwargs["betas"] == [anthropic_api.FALLBACK_BETA]
         assert kwargs["fallbacks"] == "default"
         assert "temperature" not in kwargs
+
+    def test_builds_native_pdf_content_block(
+        self,
+        anthropic_client: anthropic_api.AnthropicClient,
+    ) -> None:
+        document = DocumentInput("paper.pdf", "application/pdf", b"%PDF")
+
+        kwargs = anthropic_client._request_kwargs("system", "user", None, (document,))
+
+        content = kwargs["messages"][0]["content"]
+        assert content == [
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERg==",
+                },
+                "title": "paper.pdf",
+            },
+            {"type": "text", "text": "user"},
+        ]
 
     def test_returns_text_and_usage(
         self,
@@ -274,6 +296,34 @@ class TestOpenAIClient:
                 "max_output_tokens": 32768,
                 "store": False,
                 "reasoning": {"effort": "xhigh"},
+            }
+        ]
+
+    def test_builds_native_pdf_responses_input(
+        self,
+        openai_client: openai_api.OpenAIClient,
+    ) -> None:
+        document = DocumentInput("paper.pdf", "application/pdf", b"%PDF")
+
+        response = openai_client.generate_with_documents(
+            "system",
+            "read the paper",
+            (document,),
+        )
+
+        assert response.text == "by exact h"
+        request_input = openai_client._sdk_client.responses.calls[0]["input"]
+        assert request_input == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": "paper.pdf",
+                        "file_data": "data:application/pdf;base64,JVBERg==",
+                    },
+                    {"type": "input_text", "text": "read the paper"},
+                ],
             }
         ]
 

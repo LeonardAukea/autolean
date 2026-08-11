@@ -6,6 +6,7 @@ import logging
 import re
 import signal
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,8 +42,20 @@ from autolean.llm import (
 )
 from autolean.program import parse_program
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
+from autolean.proof_loop import (
+    EscalationDecision,
+    EscalationRouter,
+    ModelTransition,
+    ProofContextBuilder,
+)
 from autolean.provenance import ProofEnvironmentError, sha256_text
-from autolean.scanner import SorryTarget, count_sorries, prioritize_targets, scan_project
+from autolean.scanner import (
+    SorryTarget,
+    count_sorries,
+    difficulty_score,
+    prioritize_targets,
+    scan_project,
+)
 from autolean.structure import LeanStructureProvider
 from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
 
@@ -253,6 +266,7 @@ class AutoLeanAgent:
         resume: bool = False,
         target_filter: str | None = None,
         target_file: Path | None = None,
+        confirm_escalation: Callable[[EscalationDecision], bool] | None = None,
     ):
         self.program_path = program_path.resolve()
         self.dry_run = dry_run
@@ -264,6 +278,7 @@ class AutoLeanAgent:
         self._terminal_failure: str | None = None
         self._consecutive_llm_errors = 0
         self._environment_sha256 = ""
+        self._model_router = EscalationRouter(confirm_escalation)
 
         # Parse program.md
         self.config = parse_program(self.program_path)
@@ -295,11 +310,13 @@ class AutoLeanAgent:
 
         # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
-        self._search_cache: dict[str, str] = {}  # lemma search results per target
         self._prompt_sha256: dict[str, str] = {}
         self._structural_context_sha256: dict[str, str] = {}
+        self._indexed_context_sha256: dict[str, str] = {}
+        self._strategy_sha256: dict[str, str] = {}
         self._response_input_tokens: dict[str, int] = {}
         self.structure = LeanStructureProvider()
+        self.proof_context = ProofContextBuilder(self.project.root, self._step)
 
         # Track initial sorry count for coverage metric
         self._initial_sorry_count: int = 0
@@ -320,6 +337,11 @@ class AutoLeanAgent:
     def close(self) -> None:
         """Release the backend owned by this agent."""
         self.llm.close()
+
+    @property
+    def model_transitions(self) -> tuple[ModelTransition, ...]:
+        """Return the authorized model switches made by this invocation."""
+        return self._model_router.transitions
 
     def __enter__(self) -> AutoLeanAgent:
         return self
@@ -391,6 +413,54 @@ class AutoLeanAgent:
     def _record_error_category(self, target_id: str, category: ErrorCategory) -> None:
         """Track error category for repeated-error detection."""
         self._error_history.setdefault(target_id, []).append(category)
+
+    def _consider_model_escalation(
+        self,
+        target: SorryTarget,
+        record: ExperimentRecord,
+    ) -> None:
+        """Offer or perform one evidence-backed model switch."""
+        route = self._model_router.route(
+            target_id=target.id,
+            outcome=record.outcome.value,
+            category=record.error_category,
+            policy=self.config.escalation_policy,
+            current_model=self.llm.config.model,
+            current_backend=self.llm.config.backend,
+            difficulty=difficulty_score(target),
+            after_failures=self.config.escalation_after_failures,
+            explicit_target=self.config.escalation_model,
+            endpoint=self.config.endpoint,
+            timeout=self.config.llm_timeout_seconds,
+            max_output_tokens=self.config.max_output_tokens,
+            effort=self.config.effort,
+            create_backend=create_llm_client,
+        )
+        if route.decision is not None:
+            console.print(
+                Panel(
+                    f"Current:  {route.decision.from_model} ({route.decision.from_backend})\n"
+                    f"Next:     {route.decision.to_model} ({route.decision.to_backend})\n"
+                    f"Evidence: {route.decision.reason}",
+                    title="Model escalation",
+                    border_style="yellow",
+                )
+            )
+        if route.notice:
+            console.print(f"[yellow]{route.notice}[/]")
+        if route.backend is None or route.transition is None:
+            return
+        assert route.decision is not None
+        previous = self.llm
+        self.llm = route.backend
+        previous.close()
+        self.config.model = route.decision.to_profile
+        self.config.backend = route.decision.to_backend
+        self._consecutive_llm_errors = 0
+        console.print(
+            f"[bold cyan]Model switched:[/] {route.transition.from_model} → "
+            f"{route.transition.to_model}; the total attempt budget is unchanged."
+        )
 
     # -- Signal handling ----------------------------------------------------
 
@@ -671,12 +741,15 @@ class AutoLeanAgent:
         console.print("\n[bold green]Starting autonomous loop...[/]\n")
         session_start = time.monotonic()
 
+        run_cycles = 0
         while not self._interrupted:
-            # Check cycle budget
-            if self.config.max_cycles > 0 and self.tracker.cycle >= self.config.max_cycles:
+            # The cycle budget belongs to this invocation. The tracker keeps a
+            # monotonic experiment number across resumed runs.
+            if self.config.max_cycles > 0 and run_cycles >= self.config.max_cycles:
                 console.print(f"\n[yellow]Reached max_cycles ({self.config.max_cycles}). Stopping.[/]")
                 break
             cycle = self.tracker.next_cycle()
+            run_cycles += 1
 
             # Retry state filters the stable target set for this epoch.
             active_targets = [
@@ -774,6 +847,7 @@ class AutoLeanAgent:
                 f"{rate:.1f}/hr | "
                 f"{elapsed / 60:.0f}m elapsed"
             )
+            self._consider_model_escalation(target, record)
 
         # -- Session complete — full report -----------------------------------
         self._print_final_report(targets, session_start)
@@ -930,47 +1004,19 @@ class AutoLeanAgent:
             self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
 
-        # Search indexes supply relevant declarations and research context.
-        if attempt == 1:  # only search on first attempt (cached for retries)
-            from autolean.search import (
-                format_arxiv_for_prompt,
-                format_search_results_for_prompt,
-                search_arxiv,
-                search_relevant_lemmas,
-            )
-
-            self._step("Searching mathlib (Loogle + LeanSearch)...")
-            search_results = search_relevant_lemmas(
-                goal_state or "",
-                target.decl_name,
-            )
-            search_context_parts = []
-            if search_results:
-                self._step(f"Found {len(search_results)} relevant lemmas", "cyan")
-                for r in search_results[:3]:
-                    self._step(f"  {r.name}: {r.type_sig[:60]}", "dim")
-                search_context_parts.append(format_search_results_for_prompt(search_results))
-            else:
-                self._step("No relevant lemmas found in mathlib", "dim")
-
-            # For research-level targets, also search arXiv
-            from autolean.scanner import difficulty_score
-
-            if difficulty_score(target) >= 7:  # hard or research
-                self._step("Searching arXiv for relevant research...")
-                papers = search_arxiv(target.decl_name.replace("_", " "), max_results=2)
-                if papers:
-                    self._step(f"Found {len(papers)} relevant papers", "cyan")
-                    for paper in papers:
-                        self._step(f"  {str(paper.get('title', ''))[:70]}", "dim")
-                    search_context_parts.append(format_arxiv_for_prompt(papers))
-
-            if search_context_parts:
-                combined = "\n\n".join(search_context_parts)
-                file_context += f"\n\n{combined}"
-                self._search_cache[target.id] = combined
-        elif target.id in self._search_cache:
-            file_context += f"\n\n{self._search_cache[target.id]}"
+        enrichment = self.proof_context.build(
+            target,
+            goal_state or "",
+            structural_quality=structural.quality.value,
+            local_references=tuple(
+                declaration.qualified_name for declaration in structural.referenced_declarations
+            ),
+            strategy_hints=tuple(self.config.strategy_hints),
+            attempt=attempt,
+        )
+        self._indexed_context_sha256[target.id] = enrichment.indexed_sha256
+        self._strategy_sha256[target.id] = enrichment.strategy_sha256
+        file_context += f"\n\n{enrichment.text}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
         user_prompt = SORRY_FILL_USER.format(
@@ -1443,6 +1489,8 @@ class AutoLeanAgent:
             llm_input_tokens=response.input_tokens,
             prompt_sha256=self._prompt_sha256.get(target.id, ""),
             structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+            indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
+            strategy_sha256=self._strategy_sha256.get(target.id, ""),
             model_revision=self.llm.config.model_revision or "",
             sampling_seed=self.llm.config.seed,
             model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",

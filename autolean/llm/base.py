@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol, Self, runtime_checkable
 from urllib.parse import urlsplit
 
@@ -72,6 +73,7 @@ class Capabilities:
     stop_sequences: bool = True
     token_counts: bool = True
     output_limit: bool = True
+    document_inputs: bool = False
     #: Retry policy may vary temperature when the model benefits from sampling.
     retry_temperature: bool = True
 
@@ -79,6 +81,35 @@ class Capabilities:
     def effort(self) -> bool:
         """Return whether the backend accepts a reasoning-effort control."""
         return bool(self.effort_values)
+
+
+@dataclass(frozen=True)
+class DocumentInput:
+    """One bounded document delivered natively to a capable backend."""
+
+    filename: str
+    media_type: str
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if not self.filename or Path(self.filename).name != self.filename:
+            raise ValueError("document filename must be one basename")
+        if self.media_type != "application/pdf":
+            raise ValueError("document media type must be application/pdf")
+        if not self.data:
+            raise ValueError("document data must not be empty")
+        if len(self.data) > 32 * 1024 * 1024:
+            raise ValueError("document data exceeds the 32 MiB request limit")
+
+    @classmethod
+    def from_path(cls, path: Path) -> DocumentInput:
+        """Read one PDF after validating its regular-file identity."""
+        path = path.resolve()
+        if not path.is_file():
+            raise ValueError(f"document is not a regular file: {path}")
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("document data exceeds the 32 MiB request limit")
+        return cls(path.name, "application/pdf", path.read_bytes())
 
 
 @dataclass(frozen=True)
@@ -197,6 +228,23 @@ class LLMBackend(Protocol):
     def __enter__(self) -> Self: ...
 
     def __exit__(self, *exc: object) -> None: ...
+
+
+@runtime_checkable
+class DocumentBackend(Protocol):
+    """Optional extension for providers with native document inputs."""
+
+    capabilities: Capabilities
+
+    def generate_with_documents(
+        self,
+        system: str,
+        user: str,
+        documents: tuple[DocumentInput, ...],
+        *,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
+    ) -> LLMResponse: ...
 
 
 @dataclass

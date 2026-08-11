@@ -8,6 +8,7 @@ import pytest
 
 from autolean.models import DEFAULT_PROFILE
 from autolean.program import parse_program
+from autolean.routing import EscalationPolicy
 
 # ---------------------------------------------------------------------------
 # Full parse
@@ -52,6 +53,8 @@ class TestParseProgram:
         assert cfg.temperature == pytest.approx(0.0)
         assert cfg.max_retries_per_sorry == 5
         assert cfg.max_proof_lines == 30
+        assert cfg.escalation_policy is EscalationPolicy.ASK
+        assert cfg.escalation_after_failures == 2
         assert len(cfg.strategy_hints) >= 1
         # The shipped program.md documents each key in an HTML comment; those
         # must not be mistaken for settings.
@@ -134,6 +137,17 @@ class TestBackendSelection:
         cfg = parse_program(self._write(tmp_path, "llm_timeout_seconds: 90\n"))
         assert cfg.llm_config().timeout == pytest.approx(90.0)
 
+    def test_model_escalation_policy_is_read(self, tmp_path: Path) -> None:
+        cfg = parse_program(
+            self._write(
+                tmp_path,
+                "escalation_policy: auto\nescalation_model: fable\nescalation_after_failures: 3\n",
+            )
+        )
+        assert cfg.escalation_policy is EscalationPolicy.AUTO
+        assert cfg.escalation_model == "fable"
+        assert cfg.escalation_after_failures == 3
+
     def test_backend_is_unset_when_absent(self, tmp_path: Path) -> None:
         cfg = parse_program(self._write(tmp_path, "model: opus\n"))
         assert cfg.backend is None
@@ -153,6 +167,8 @@ class TestBackendSelection:
             "llm_timeout_seconds: inf\n",
             "effort: impossible\n",
             "endpoint: file:///tmp/model\n",
+            "escalation_policy: eager\n",
+            "escalation_after_failures: 0\n",
         ],
     )
     def test_invalid_program_policy_is_rejected(self, tmp_path: Path, body: str) -> None:
@@ -179,7 +195,10 @@ class TestParseProgramDefaults:
         assert cfg.temperature == pytest.approx(0.4)
         assert cfg.max_retries_per_sorry == 5
         assert cfg.cycle_timeout_seconds == 120
-        assert cfg.max_cycles == 0
+        assert cfg.max_cycles == 5
+        assert cfg.escalation_policy is EscalationPolicy.ASK
+        assert cfg.escalation_model is None
+        assert cfg.escalation_after_failures == 2
         assert cfg.goals == []
         assert cfg.constraints == []
         assert cfg.strategy_hints == []

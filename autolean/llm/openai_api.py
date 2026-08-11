@@ -6,6 +6,7 @@ ChatGPT subscription access.
 
 from __future__ import annotations
 
+import base64
 import importlib
 import time
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from autolean.llm.base import (
     OPENAI_EFFORTS,
     BaseBackend,
     Capabilities,
+    DocumentInput,
     LLMAuthenticationError,
     LLMError,
     LLMRateLimitError,
@@ -33,6 +35,7 @@ _CAPABILITIES = Capabilities(
     temperature=False,
     effort_values=OPENAI_EFFORTS,
     stop_sequences=False,
+    document_inputs=True,
 )
 
 
@@ -41,6 +44,43 @@ def _require_sdk() -> Any:
         return importlib.import_module("openai")
     except ImportError as e:  # pragma: no cover - exercised via the error path
         raise LLMError("The openai SDK is not installed. Install it with: uv sync --extra openai") from e
+
+
+def _responses_input(user: str, documents: tuple[DocumentInput, ...]) -> Any:
+    if not documents:
+        return user
+    content = [
+        {
+            "type": "input_file",
+            "filename": document.filename,
+            "file_data": (
+                f"data:{document.media_type};base64,{base64.b64encode(document.data).decode('ascii')}"
+            ),
+        }
+        for document in documents
+    ]
+    content.append({"type": "input_text", "text": user})
+    return [{"role": "user", "content": content}]
+
+
+def _response_text(response: Any, max_output_tokens: int) -> str:
+    status = response.status
+    if status != "completed":
+        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        if reason == "content_filter":
+            raise LLMRefusalError("OpenAI declined the request (content filter)")
+        if reason == "max_output_tokens":
+            raise LLMError(f"OpenAI exhausted the {max_output_tokens}-token output limit")
+        error = getattr(response, "error", None)
+        detail = getattr(error, "message", None) or reason or "no detail"
+        raise LLMError(f"OpenAI response {status or 'has no status'}: {detail}")
+    try:
+        text = (response.output_text or "").strip()
+    except (AttributeError, TypeError) as error:
+        raise LLMError(f"OpenAI returned malformed text output: {error}") from error
+    if not text:
+        raise LLMError("OpenAI produced an empty completion")
+    return text
 
 
 @dataclass
@@ -83,13 +123,37 @@ class OpenAIClient(BaseBackend):
         temperature: float | None = None,
         stop: list[str] | None = None,
     ) -> LLMResponse:
+        return self._generate(system, user, (), temperature=temperature, stop=stop)
+
+    def generate_with_documents(
+        self,
+        system: str,
+        user: str,
+        documents: tuple[DocumentInput, ...],
+        *,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
+    ) -> LLMResponse:
+        """Generate with native Responses API PDF inputs."""
+        if not documents:
+            raise ValueError("documents must not be empty")
+        return self._generate(system, user, documents, temperature=temperature, stop=stop)
+
+    def _generate(
+        self,
+        system: str,
+        user: str,
+        documents: tuple[DocumentInput, ...],
+        *,
+        temperature: float | None,
+        stop: list[str] | None,
+    ) -> LLMResponse:
         del temperature, stop
         openai = _require_sdk()
-
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "instructions": system,
-            "input": user,
+            "input": _responses_input(user, documents),
             "max_output_tokens": self.config.max_output_tokens,
             # AutoLean requests are independent, so server-side conversation
             # storage has no continuation value.
@@ -106,25 +170,7 @@ class OpenAIClient(BaseBackend):
         except openai.APIConnectionError as e:
             raise LLMTransientError(f"OpenAI API unreachable: {e}") from e
         elapsed = time.monotonic() - t0
-
-        status = response.status
-        if status != "completed":
-            reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
-            if reason == "content_filter":
-                raise LLMRefusalError("OpenAI declined the request (content filter)")
-            if reason == "max_output_tokens":
-                raise LLMError(f"OpenAI exhausted the {self.config.max_output_tokens}-token output limit")
-            error = getattr(response, "error", None)
-            detail = getattr(error, "message", None) or reason or "no detail"
-            raise LLMError(f"OpenAI response {status or 'has no status'}: {detail}")
-
-        try:
-            text = (response.output_text or "").strip()
-        except (AttributeError, TypeError) as e:
-            raise LLMError(f"OpenAI returned malformed text output: {e}") from e
-        if not text:
-            raise LLMError("OpenAI produced an empty completion")
-
+        text = _response_text(response, self.config.max_output_tokens)
         usage = response.usage
         return LLMResponse(
             text=text,

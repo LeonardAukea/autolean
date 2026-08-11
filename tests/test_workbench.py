@@ -6,9 +6,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, OptionList, Select
+from textual.widgets import Button, Input, OptionList, Select
 
 from autolean.program import parse_program
+from autolean.routing import EscalationPolicy
 from autolean.workbench import (
     CUSTOM_MODEL,
     AutoLeanWorkbench,
@@ -64,6 +65,10 @@ def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> 
         effort="low",
         max_output_tokens=4096,
         max_cycles=2,
+        escalation_policy=EscalationPolicy.AUTO,
+        escalation_model="opus",
+        escalation_after_failures=3,
+        guidance="Use the local identity theorem.",
     )
     session_program = tmp_path / "session.md"
     session.write_program(settings, session_program)
@@ -75,6 +80,10 @@ def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> 
     assert parsed.effort == "low"
     assert parsed.max_output_tokens == 4096
     assert parsed.max_cycles == 2
+    assert parsed.escalation_policy is EscalationPolicy.AUTO
+    assert parsed.escalation_model == "opus"
+    assert parsed.escalation_after_failures == 3
+    assert parsed.strategy_hints[-1] == "Use the local identity theorem."
     assert Path(parsed.lean_project_path) == session.lean_root
 
     target = session.targets[0]
@@ -83,6 +92,7 @@ def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> 
     assert validation.argv[-1] == "--dry-run"
     assert not validation.mutates_project
     assert "--dry-run" not in acceptance.argv
+    assert "--resume" in acceptance.argv
     assert acceptance.mutates_project
     assert target.id in validation.argv
 
@@ -134,6 +144,10 @@ def test_workbench_runs_headlessly_at_common_terminal_sizes(
             app.query_one("#model-profile", Select).value = CUSTOM_MODEL
             await pilot.pause()
             assert not app.query_one("#custom-model", Input).disabled
+            assert app.query_one("#max-cycles", Input).value == "1"
+            assert app.query_one("#escalation-policy", Select).value == "ask"
+            assert app.query_one("#escalation-after", Input).value == "2"
+            assert app.query_one("#stop", Button).disabled
 
             await pilot.click("#solve")
             await pilot.pause()

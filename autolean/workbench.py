@@ -24,6 +24,7 @@ from textual.widgets.option_list import Option
 from autolean.llm import BACKEND_NAMES, BACKENDS
 from autolean.models import ModelProfile, profile_groups, resolve_profile
 from autolean.program import ProgramConfig, parse_program
+from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
 from autolean.scanner import SorryTarget, difficulty_score, prioritize_targets, scan_project
 
 WorkbenchAction = Literal["doctor", "inspect", "validate", "solve"]
@@ -46,6 +47,10 @@ class WorkbenchSettings:
     effort: str | None
     max_output_tokens: int | None
     max_cycles: int
+    escalation_policy: EscalationPolicy = EscalationPolicy.ASK
+    escalation_model: str | None = None
+    escalation_after_failures: int = DEFAULT_ESCALATION_AFTER
+    guidance: str = ""
 
     def program_config(self, base: ProgramConfig) -> ProgramConfig:
         """Apply session choices to a copy of the parsed program."""
@@ -55,6 +60,9 @@ class WorkbenchSettings:
         if self.max_cycles <= 0:
             raise WorkbenchInputError("Experiment cycles must be positive.")
 
+        strategy_hints = list(base.strategy_hints)
+        if guidance := " ".join(self.guidance.split()):
+            strategy_hints.append(guidance)
         config = replace(
             base,
             model=model,
@@ -63,6 +71,10 @@ class WorkbenchSettings:
             effort=self.effort,
             max_output_tokens=self.max_output_tokens,
             max_cycles=self.max_cycles,
+            escalation_policy=self.escalation_policy,
+            escalation_model=self.escalation_model,
+            escalation_after_failures=self.escalation_after_failures,
+            strategy_hints=strategy_hints,
         )
         try:
             config.validate()
@@ -145,8 +157,7 @@ class WorkbenchSession:
                 "--target",
                 target.id,
             )
-            if action == "validate":
-                argv = (*argv, "--dry-run")
+            argv = (*argv, "--dry-run") if action == "validate" else (*argv, "--resume")
         return CommandPlan(
             action=action,
             argv=argv,
@@ -176,11 +187,15 @@ def render_program(config: ProgramConfig, lean_root: Path) -> str:
     llm_lines.extend(
         (
             f"max_retries_per_sorry: {config.max_retries_per_sorry}",
+            f"escalation_policy: {config.escalation_policy.value}",
+            f"escalation_after_failures: {config.escalation_after_failures}",
             f"cycle_timeout_seconds: {config.cycle_timeout_seconds}",
             f"llm_timeout_seconds: {config.llm_timeout_seconds or 600}",
             f"max_proof_lines: {config.max_proof_lines}",
         )
     )
+    if config.escalation_model is not None:
+        llm_lines.append(f"escalation_model: {config.escalation_model}")
     llm_config = "\n".join(llm_lines)
 
     return (
@@ -291,6 +306,7 @@ class AutoLeanWorkbench(App[None]):
         Binding("ctrl+i", "inspect", "Inspect goal"),
         Binding("ctrl+v", "validate", "Validate"),
         Binding("ctrl+s", "solve", "Accept proof"),
+        Binding("escape", "stop", "Stop run"),
     ]
 
     CSS = """
@@ -472,9 +488,35 @@ class AutoLeanWorkbench(App[None]):
                 )
                 yield Label("Experiment cycles", classes="field-label")
                 yield Input(
-                    value=str(self.session.config.max_cycles or 1),
+                    value="1",
                     type="integer",
                     id="max-cycles",
+                )
+                yield Label("When the model stalls", classes="field-label")
+                yield Select(
+                    [
+                        ("Suggest a stronger model", EscalationPolicy.ASK.value),
+                        ("Keep the selected model", EscalationPolicy.NEVER.value),
+                        ("Switch automatically", EscalationPolicy.AUTO.value),
+                    ],
+                    value=self.session.config.escalation_policy.value,
+                    allow_blank=False,
+                    id="escalation-policy",
+                )
+                yield Input(
+                    value=self.session.config.escalation_model or "",
+                    placeholder="Use the profile's stronger sibling",
+                    id="escalation-model",
+                )
+                yield Input(
+                    value=str(self.session.config.escalation_after_failures),
+                    type="integer",
+                    id="escalation-after",
+                )
+                yield Label("Guidance for the next run", classes="field-label")
+                yield Input(
+                    placeholder="A constraint, lemma, or method to try",
+                    id="guidance",
                 )
                 yield Static("", id="model-details", markup=False)
         with Horizontal(id="actions"):
@@ -482,6 +524,7 @@ class AutoLeanWorkbench(App[None]):
             yield Button("Inspect goal", id="inspect", classes="command")
             yield Button("Validate", id="validate", variant="primary", classes="command")
             yield Button("Accept proof", id="solve", variant="warning", classes="command")
+            yield Button("Stop", id="stop", variant="error", disabled=True)
         yield Label(
             "Ready · Validate runs the complete model-to-kernel loop without project writes.",
             id="status",
@@ -543,6 +586,10 @@ class AutoLeanWorkbench(App[None]):
     def press_solve(self) -> None:
         self.action_solve()
 
+    @on(Button.Pressed, "#stop")
+    def press_stop(self) -> None:
+        self.action_stop()
+
     def action_focus_filter(self) -> None:
         self.query_one("#target-filter", Input).focus()
 
@@ -564,6 +611,14 @@ class AutoLeanWorkbench(App[None]):
             ConfirmSolve(target.qualified_decl_name or target.decl_name),
             self._confirmed_solve,
         )
+
+    def action_stop(self) -> None:
+        """Cancel the active child and keep all session choices editable."""
+        workers = self.workers.cancel_group(self, "command")
+        if workers:
+            self.query_one("#status", Label).update(
+                "Stopping current run · model and guidance remain editable."
+            )
 
     def _confirmed_solve(self, confirmed: bool | None) -> None:
         if confirmed:
@@ -632,6 +687,9 @@ class AutoLeanWorkbench(App[None]):
         endpoint = self.query_one("#endpoint", Input).value.strip() or None
         max_output_tokens = self._optional_positive_integer("#max-output-tokens", "Maximum output tokens")
         max_cycles = self._positive_integer("#max-cycles", "Experiment cycles")
+        escalation_value = self.query_one("#escalation-policy", Select).value
+        if not isinstance(escalation_value, str):
+            raise WorkbenchInputError("Select a model escalation policy.")
         settings = WorkbenchSettings(
             model=model,
             backend=backend,
@@ -639,6 +697,13 @@ class AutoLeanWorkbench(App[None]):
             effort=effort,
             max_output_tokens=max_output_tokens,
             max_cycles=max_cycles,
+            escalation_policy=EscalationPolicy(escalation_value),
+            escalation_model=self.query_one("#escalation-model", Input).value.strip() or None,
+            escalation_after_failures=self._positive_integer(
+                "#escalation-after",
+                "Escalation failures",
+            ),
+            guidance=self.query_one("#guidance", Input).value,
         )
         settings.program_config(self.session.config)
         return settings
@@ -668,8 +733,9 @@ class AutoLeanWorkbench(App[None]):
         if profile is None:
             details.update("Custom model · choose its backend and optional endpoint.")
             return
+        route = f"\nStronger sibling: {profile.escalates_to}" if profile.escalates_to else ""
         setup = f"\nSetup: {profile.setup_command}" if profile.setup_command else ""
-        details.update(f"{profile.description}\nBackend: {profile.backend}{setup}")
+        details.update(f"{profile.description}\nBackend: {profile.backend}{route}{setup}")
 
     def _launch(self, action: WorkbenchAction) -> None:
         try:
@@ -689,7 +755,9 @@ class AutoLeanWorkbench(App[None]):
 
     def _set_commands_disabled(self, disabled: bool) -> None:
         for button in self.query("#actions Button").results(Button):
-            button.disabled = disabled
+            if button.id != "stop":
+                button.disabled = disabled
+        self.query_one("#stop", Button).disabled = not disabled
 
     @work(exclusive=True, group="command")
     async def run_plan(self, plan: CommandPlan) -> None:
@@ -719,6 +787,9 @@ class AutoLeanWorkbench(App[None]):
                 verb = "accepted" if plan.mutates_project else "completed"
                 status.update(f"{plan.action.title()} {verb} successfully.")
                 self.notify(f"{plan.action.title()} {verb} successfully.")
+                if plan.mutates_project:
+                    self.session = WorkbenchSession.load(self.session.program_path)
+                    self._show_targets(self.session.targets)
             else:
                 status.update(f"{plan.action.title()} failed with exit code {return_code}.")
                 self.notify(f"{plan.action.title()} failed.", severity="error")

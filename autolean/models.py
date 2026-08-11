@@ -40,6 +40,7 @@ class ModelProfile:
     #: How to make this profile usable — install, pull, or sign in.
     setup_command: str = ""
     aliases: tuple[str, ...] = ()
+    escalates_to: str | None = None
 
     def to_config(self, *, timeout: float | None = None) -> LLMConfig:
         """Build the `LLMConfig` this profile describes."""
@@ -81,6 +82,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         description="Claude Opus 5 — complex coding and proof work",
         setup_command="claude  # then /login",
         aliases=("claude", "claude-opus", "opus-5"),
+        escalates_to="fable",
     ),
     ModelProfile(
         name="sonnet",
@@ -91,6 +93,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         description="Claude Sonnet 5 — fast, capable proof iteration",
         setup_command="claude  # then /login",
         aliases=("claude-sonnet", "sonnet-5"),
+        escalates_to="opus",
     ),
     ModelProfile(
         name="codex",
@@ -111,6 +114,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         description="GPT-5.6 Terra — balanced OpenAI reasoning",
         setup_command="codex login",
         aliases=("terra", "gpt-terra"),
+        escalates_to="codex",
     ),
     ModelProfile(
         name="codex-luna",
@@ -121,6 +125,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         description="GPT-5.6 Luna — efficient OpenAI reasoning",
         setup_command="codex login",
         aliases=("luna", "gpt-luna"),
+        escalates_to="codex-terra",
     ),
 )
 
@@ -148,6 +153,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         description="Claude Opus 5 over the Messages API (ANTHROPIC_API_KEY)",
         setup_command="export ANTHROPIC_API_KEY=... && uv sync --extra anthropic",
         aliases=("claude-api", "anthropic"),
+        escalates_to="fable-api",
     ),
     ModelProfile(
         name="sonnet-api",
@@ -158,6 +164,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         description="Claude Sonnet 5 over the Messages API (ANTHROPIC_API_KEY)",
         setup_command="export ANTHROPIC_API_KEY=... && uv sync --extra anthropic",
         aliases=(),
+        escalates_to="opus-api",
     ),
     ModelProfile(
         name="gpt-api",
@@ -178,6 +185,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         description="GPT-5.6 Terra over the Responses API (OPENAI_API_KEY)",
         setup_command="export OPENAI_API_KEY=... && uv sync --extra openai",
         aliases=("openai-terra-api",),
+        escalates_to="gpt-api",
     ),
     ModelProfile(
         name="gpt-luna-api",
@@ -188,6 +196,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         description="GPT-5.6 Luna over the Responses API (OPENAI_API_KEY)",
         setup_command="export OPENAI_API_KEY=... && uv sync --extra openai",
         aliases=("openai-luna-api",),
+        escalates_to="gpt-terra-api",
     ),
 )
 
@@ -240,6 +249,7 @@ _LOCAL: tuple[ModelProfile, ...] = (
         description="Google Gemma 4 26B — general-purpose local default",
         setup_command="ollama pull gemma4:26b",
         aliases=("gemma", "gemma4-26b"),
+        escalates_to="gemma4-31b",
     ),
     ModelProfile(
         name="gemma4-31b",
@@ -265,6 +275,7 @@ _LOCAL: tuple[ModelProfile, ...] = (
         description="BFS-Prover V2 7B — SOTA single-tactic prediction (ByteDance)",
         setup_command="ollama pull zeyu-zheng/BFS-Prover-V2-7B:q8_0",
         aliases=("bfs",),
+        escalates_to="bfs-prover-32b",
     ),
     ModelProfile(
         name="bfs-prover-32b",
@@ -438,6 +449,7 @@ def print_models_table() -> None:
         table.add_column("Profile", style="bold cyan")
         table.add_column("Status")
         table.add_column("Backend", style="dim")
+        table.add_column("Stronger sibling", style="dim")
         table.add_column("Description")
 
         for profile in profiles:
@@ -445,6 +457,7 @@ def print_models_table() -> None:
                 profile.name,
                 profile_status(profile, installed),
                 profile.backend,
+                profile.escalates_to or "—",
                 profile.description,
             )
         console.print(table)

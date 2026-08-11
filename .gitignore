@@ -16,6 +16,7 @@ result-*
 .direnv/
 
 # AutoLean runtime
+.autolean/
 results.tsv
 progress.md
 *.log

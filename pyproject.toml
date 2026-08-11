@@ -28,12 +28,13 @@ dependencies = [
     "textual>=8.2.8",
     "click>=8.4.2",
     "pyyaml>=6.0.3",
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.14.3",
 ]
 
 [project.optional-dependencies]
-pdf = ["pymupdf>=1.28.2", "pymupdf4llm>=1.28.2"]
 lean = ["lean-interact>=0.11.5"]
 # Hosted API providers use their official Python SDKs. Subscription providers
 # invoke the installed Claude Code and Codex CLIs.
@@ -49,8 +50,6 @@ dev = [
     "types-PyYAML>=6.0.12.20260724",
 ]
 all = [
-    "pymupdf>=1.28.2",
-    "pymupdf4llm>=1.28.2",
     "lean-interact>=0.11.5",
     "anthropic>=0.121.0",
     "openai>=2.53.0",

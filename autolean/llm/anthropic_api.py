@@ -7,6 +7,7 @@ backend uses Claude subscription access.
 
 from __future__ import annotations
 
+import base64
 import importlib
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from autolean.llm.base import (
     CLAUDE_EFFORTS,
     BaseBackend,
     Capabilities,
+    DocumentInput,
     LLMAuthenticationError,
     LLMError,
     LLMRateLimitError,
@@ -34,7 +36,11 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # Current Claude models take reasoning depth from `effort` and accept their
 # default sampling configuration.
-_CAPABILITIES = Capabilities(temperature=False, effort_values=CLAUDE_EFFORTS)
+_CAPABILITIES = Capabilities(
+    temperature=False,
+    effort_values=CLAUDE_EFFORTS,
+    document_inputs=True,
+)
 
 
 def _require_sdk() -> Any:
@@ -87,12 +93,33 @@ class AnthropicClient(BaseBackend):
             console.print(f"[red]Anthropic API unreachable:[/] {e}")
             return False
 
-    def _request_kwargs(self, system: str, user: str, stop: list[str] | None) -> dict[str, Any]:
+    def _request_kwargs(
+        self,
+        system: str,
+        user: str,
+        stop: list[str] | None,
+        documents: tuple[DocumentInput, ...] = (),
+    ) -> dict[str, Any]:
+        content: str | list[dict[str, Any]] = user
+        if documents:
+            content = [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": document.media_type,
+                        "data": base64.b64encode(document.data).decode("ascii"),
+                    },
+                    "title": document.filename,
+                }
+                for document in documents
+            ]
+            content.append({"type": "text", "text": user})
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_output_tokens,
             "system": system,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": content}],
             "thinking": {"type": "adaptive"},
         }
         if self.config.effort:
@@ -112,13 +139,41 @@ class AnthropicClient(BaseBackend):
         temperature: float | None = None,
         stop: list[str] | None = None,
     ) -> LLMResponse:
+        return self._generate(system, user, (), temperature=temperature, stop=stop)
+
+    def generate_with_documents(
+        self,
+        system: str,
+        user: str,
+        documents: tuple[DocumentInput, ...],
+        *,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
+    ) -> LLMResponse:
+        """Generate with native PDF content blocks."""
+        if not documents:
+            raise ValueError("documents must not be empty")
+        return self._generate(system, user, documents, temperature=temperature, stop=stop)
+
+    def _generate(
+        self,
+        system: str,
+        user: str,
+        documents: tuple[DocumentInput, ...],
+        *,
+        temperature: float | None,
+        stop: list[str] | None,
+    ) -> LLMResponse:
         del temperature  # rejected by current Claude models; see `capabilities`
         anthropic = _require_sdk()
         t0 = time.monotonic()
         client = self._client()
         while True:
             try:
-                message = self._stream(client, self._request_kwargs(system, user, stop))
+                message = self._stream(
+                    client,
+                    self._request_kwargs(system, user, stop, documents),
+                )
                 break
             except anthropic.BadRequestError as e:
                 # A workspace can lack access to the fallback beta. One retry

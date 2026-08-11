@@ -14,7 +14,6 @@ uv sync --all-extras --all-groups
 claude                    # enter /login in the interactive session
 
 autolean doctor
-autolean environment
 autolean workbench
 ```
 
@@ -147,13 +146,13 @@ so parsing needs no runtime download or writable grammar cache.
 can select `--no-mathlib --no-cslib`. A complete setup is:
 
 ```bash
-uv run autolean init my_project
+autolean init my_project
 cd my_project
 lake update
 lake exe cache get
 lake build
 cd ..
-uv run autolean environment --project my_project
+autolean environment --project my_project
 ```
 
 The lock and content hashes make validation replayable. Hosted model aliases
@@ -183,8 +182,8 @@ The current subscription profiles are:
   Luna.
 
 ```bash
-uv run autolean solve --model opus
-uv run autolean solve --model codex-luna
+autolean solve --model opus
+autolean solve --model codex-luna
 ```
 
 AutoLean requires Claude authentication reported as `claude.ai` with a
@@ -211,10 +210,10 @@ fields from being presented as effective controls.
 
 ```bash
 export ANTHROPIC_API_KEY=...
-uv run autolean solve --model opus-api
+autolean solve --model opus-api
 
 export OPENAI_API_KEY=...
-uv run autolean solve --model gpt-api
+autolean solve --model gpt-api
 ```
 
 Hosted profiles append `-api` to the Claude profile names and use `gpt-api`,
@@ -270,8 +269,8 @@ keeps `<|eom|>` available for the model's internal turn state.
 Run the semantic smoke test before a proof session:
 
 ```bash
-uv run autolean doctor --model muse-glimmer
-uv run autolean solve --model muse-glimmer --target TARGET --dry-run
+autolean doctor --model muse-glimmer
+autolean solve --model muse-glimmer --target TARGET --dry-run
 ```
 
 `muse-glimmer-bf16` pins the official BF16 revision
@@ -293,21 +292,43 @@ model strings are also accepted:
 
 ```bash
 ollama pull yinyaowenhua1314/deepseek-prover-v2-7b
-uv run autolean solve --model deepseek-prover
+autolean solve --model deepseek-prover
 
-uv run autolean solve \
+autolean solve \
   --backend openai_compat \
   --model my-server-model
 ```
+
+### Bounded model routing
+
+Profiles with a known stronger sibling expose that route in `autolean models`.
+The default `ask` policy offers one switch after two kernel-facing failures.
+Research-level targets may offer it after the first failure. A non-interactive
+run records the recommendation and leaves the model unchanged. `auto` is an
+explicit opt-in, and one invocation can switch at most once:
+
+```bash
+autolean solve --model codex-luna --escalation ask
+autolean solve --model sonnet --escalation auto --escalate-after 2
+autolean resume SESSION --escalate-to opus --escalation ask
+```
+
+Default routes stay on the active backend. `--escalate-to` authorizes an exact
+profile or raw model ID and can cross a provider boundary. Authentication,
+quota, network, project-structure, and Lake-configuration failures never
+trigger model escalation. A switch retains the original attempt budget and is
+written to the proof session with its failure evidence.
 
 ## Interactive workbench
 
 `autolean workbench` is the mathematician-facing interface. It keeps proof
 targets, model selection, and validation evidence on one screen. A profile can
 be selected from the registry, or a raw model ID can be paired with a backend
-and HTTP endpoint. Reasoning effort, output limit, and experiment cycles are
-session controls. Provider credentials stay in the environment and never
-enter the interface or its temporary program file.
+and HTTP endpoint. Reasoning effort, output limit, experiment cycles, and
+bounded model routing are session controls. Mathematical guidance is editable
+for each run, and `Escape` stops an active worker. Accepted work rescans the
+target list immediately. Provider credentials stay in the environment and
+never enter the interface or its temporary program file.
 
 The default `Validate` action runs the complete model-to-sandboxed-kernel loop
 with dry-run project semantics. `Accept proof` opens a confirmation dialog and
@@ -355,13 +376,15 @@ model: opus
 temperature: 0.0
 max_output_tokens: 32768
 max_retries_per_sorry: 5
+escalation_policy: ask
+escalation_after_failures: 2
 cycle_timeout_seconds: 120
 llm_timeout_seconds: 600
 max_proof_lines: 30
 
 ## Experiment Budget
 
-max_cycles: 0
+max_cycles: 5
 ```
 
 `temperature`, `effort`, stop sequences, seeds, and output limits apply only
@@ -396,27 +419,63 @@ updates the next bounded request, and leaves the source tree unchanged until a
 candidate passes the generated-code policy, sandboxed elaboration, source-range
 audit, axiom audit, and exact compare-and-swap edit.
 
+The public proof plan separates formalization, examples and special cases,
+invariants, obstructions, reductions, premises, candidate methods, partial
+results, completion criteria, checkpoints, and revision triggers. These are
+independently reviewable artifacts. The workflow applies Terence Tao's advice
+on [examples and special cases][tao-examples], [skeptical checking][tao-check],
+[partial progress][tao-progress], and [flexible plans][tao-plans].
+Research briefs bind definitions and semantic boundaries to the cited source;
+the [Gromov archive](https://www.ihes.fr/~gromov/) is one primary-source home
+used by the curated geometry work.
+
+[tao-examples]: https://terrytao.wordpress.com/career-advice/solving-mathematical-problems/
+[tao-check]: https://terrytao.wordpress.com/career-advice/be-sceptical-of-your-own-work/
+[tao-progress]: https://terrytao.wordpress.com/career-advice/on-the-importance-of-partial-progress/
+[tao-plans]: https://terrytao.wordpress.com/career-advice/be-flexible/
+
+The harness keeps planner, generator, evaluator, and acceptance responsibilities
+separate. Durable sessions, fixed budgets, explicit done conditions, and
+failure evidence follow the patterns in [Loop
+Engineering](https://addyosmani.com/blog/loop-engineering/) and [Agent Harness
+Engineering](https://addyosmani.com/blog/agent-harness-engineering/). Reusable
+skills remain bounded context following the
+[`agent-skills`](https://github.com/addyosmani/agent-skills) format.
+
+Every mutating workflow writes an atomic session record under
+`workspace/.autolean/sessions`. `autolean resume` continues the latest active
+session; an explicit session ID selects an older one. `--model`, `--backend`,
+`--guide`, model-routing controls, and `--max-cycles` can change at each
+continuation. The default budget is five cycles. `--overnight` and an explicit
+zero budget are the unbounded research modes.
+
+The agent can query the local project through the pinned
+[`codedb`](https://github.com/justrach/codedb) executable. Search is bounded,
+read-only, local to the Lean project, and included in prompt provenance. Lean
+elaboration is the authority for every indexed match.
+
 ## Commands
 
-- `autolean workbench`: choose a model and one proof target interactively.
-- `autolean solve`: run the selected proof loop.
-- `autolean solve --overnight`: use unlimited cycles and epoch resets.
-- `autolean targets`: list prioritized `sorry` targets.
-- `autolean inspect`: show the model-bound structural context for one target.
-- `autolean doctor`: prove a smoke theorem and run a trusted full build.
-- `autolean models`: show profiles and locally observable setup state.
-- `autolean environment`: print the installed proof-closure identity.
-- `autolean prove`: formalize a plain-English statement and prove that target.
-- `autolean verify`: extract, formalize, and prove claims from a paper.
-- `autolean build-library`: generate a scoped mathematical library file.
-- `autolean improve`: shorten or clarify one existing proof.
-- `autolean challenge`: generate and attempt one research challenge file.
-- `autolean results`: show persisted experiment records.
-- `autolean changes`: show proof changes.
-- `autolean init`: create a Lean project.
+The primary workflows compose around one project and one session store:
 
-`ui`, `run`, `scan`, `check`, and `diff` remain accepted as compatibility
-aliases. Help and diagnostics use the canonical task names above.
+- `autolean plan STATEMENT` produces a bounded, reviewable mathematical
+  strategy before source generation.
+- `autolean prove STATEMENT` plans, compiler-repairs one isolated Lean
+  statement, and starts a targeted proof session.
+- `autolean solve` works through existing `sorry` targets; `autolean resume`
+  continues a stored session with optional model and guidance changes.
+- `autolean verify SOURCE` acquires a paper, records its artifacts,
+  formalizes its claims, and starts a paper session.
+- `autolean problems` searches and suggests curated open work;
+  `autolean problems work ID` continues a proof-ready problem or creates a
+  source-faithful formalization brief.
+- `autolean export OUTPUT` creates a standalone Lean/Mathlib project with a
+  provenance manifest and companion LaTeX paper.
+
+`autolean workbench` presents these workflows interactively. `targets`,
+`inspect`, `sessions`, `models`, and `doctor` expose their read-only state and
+system checks. `init` creates a project. Compatibility and specialized
+commands remain callable while root help emphasizes this grammar.
 
 Generated workflows pass an exact target file to the agent. `prove` also uses
 an exact declaration name. Their model and backend overrides are carried into
@@ -435,12 +494,25 @@ formalization first.
 
 ## Paper ingestion and semantic boundary
 
-arXiv native HTML is parsed as a DOM, including structured theorem and proof
-environments and MathML `alttext`. PDF fallback uses PyMuPDF4LLM 1.28.2 for
-layout-aware Markdown, reading order, tables, and selective OCR. The Nix shell
-includes Tesseract for scanned documents. The exact HTML bytes or extracted
-Markdown sent to claim extraction are recorded by SHA-256 in the generated
-Lean source.
+`autolean verify` tries arXiv native HTML, a rendered-HTML fallback through the
+pinned [`lightpanda`](https://github.com/lightpanda-io/browser) executable,
+and PDF acquisition. HTML parsing preserves theorem/proof environments and
+MathML `alttext`. Lightpanda runs with private-network access, workers, and
+subframes disabled and obeys robots policy.
+
+The default PDF engine is PyMuPDF4LLM 1.28.2 with PyMuPDF Layout for reading
+order, tables, formulas, and selective OCR. `--pdf-engine paddleocr-vl` sends
+selected PDF pages to an explicitly configured PaddleOCR-VL service via
+`--paddleocr-url`. This path handles scans with interleaved text, formula,
+table, chart, and layout content.
+
+Acquisition writes extracted Markdown under `AutoLean/Papers` and the exact
+PDF under the ignored, content-addressed `.autolean/papers` store.
+`autolean verify SOURCE --extract-only` performs this step without acquiring a
+model. Hosted Anthropic and OpenAI backends receive the native PDF together
+with the page-addressed Markdown. Other backends receive the same bounded
+Markdown. Artifact and extractor-input SHA-256 values travel into generated
+source and session evidence.
 
 Lean proves the generated formal statement. It does not establish that a PDF,
 natural-language claim, or model-produced formalization faithfully represents
@@ -487,10 +559,11 @@ nix build path:.#default
 ### CI and releases
 
 GitHub Actions runs the Python suite on Python 3.11 through 3.14, audits the
-complete locked dependency graph, builds the Python distributions twice, runs
-the Nix sandbox checks, builds CSLib and the full Lean workspace, and records
-the proof-environment identity. The stable `Required` check covers every one
-of these obligations.
+complete locked dependency graph, builds the Python distributions twice,
+checks the Nix sandbox command policy, runs the eight generated-code attacks
+with Ubuntu's AppArmor-profiled Bubblewrap, builds CSLib and the full Lean
+workspace, and records the proof-environment identity. The stable `Required`
+check covers every one of these obligations.
 
 Each qualified `main` commit produces a private GitHub release. Its
 [Hashver](https://miniscruff.github.io/hashver/) identity has the form
@@ -513,25 +586,27 @@ AUTOLEAN_RUN_SANDBOX_E2E=1 \
   uv run --frozen pytest -q tests/test_lean_sandbox_e2e.py
 ```
 
-The canonical Linux sandbox check is a Nix derivation that runs the generated
-code tests under Bubblewrap. It proves that generated Lean cannot inherit a
-parent sentinel, read or write host test data, or reach a loopback service:
+The portable Nix check validates Linux sandbox command construction. The host
+suite proves that generated Lean cannot inherit a parent sentinel, read or
+write host test data, or reach a loopback service:
 
 ```bash
-nix build path:.#checks.aarch64-linux.generated-code-sandbox
+nix build path:.#checks.aarch64-linux.generated-code-sandbox-policy
+AUTOLEAN_BWRAP=/usr/bin/bwrap AUTOLEAN_RUN_SANDBOX_E2E=1 \
+  uv run pytest -q tests/test_lean_sandbox_e2e.py
 ```
 
 Linux systems also expose
 `packages.<system>.generated-code-sandbox-vm`, which runs the same suite in a
-minimal NixOS guest. The VM check is useful when KVM is available; the direct
-derivation is suitable for portable CI and remote Linux builders.
+minimal NixOS guest. The VM check is useful when KVM is available and provides
+an independently booted Linux policy boundary.
 
 [`nixos-shell`](https://github.com/Mic92/nixos-shell) is useful for interactive
 Linux exploration, including Linux-on-macOS with a suitable builder. Its
 convenience defaults mount the user's home and Nix profile and leave the
-firewall disabled. It is therefore a developer exploration tool, while the
-non-interactive Nix derivation above is the canonical qualification boundary.
-AutoLean does not require `nixos-shell` at runtime.
+firewall disabled. It is a developer exploration tool. CI and the NixOS VM
+package own the automated containment evidence. AutoLean has no runtime
+dependency on `nixos-shell`.
 
 ## License
 

@@ -329,6 +329,19 @@ def _resolve_lean(root: Path) -> Path:
     return Path(lean).resolve()
 
 
+def _resolve_bubblewrap() -> str | None:
+    configured = os.environ.get("AUTOLEAN_BWRAP")
+    if configured is None:
+        return shutil.which("bwrap")
+    path = Path(configured)
+    if not path.is_absolute():
+        raise LeanSandboxError("AUTOLEAN_BWRAP must name an absolute executable path")
+    resolved = path.resolve()
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise LeanSandboxError(f"AUTOLEAN_BWRAP is not executable: {path}")
+    return str(resolved)
+
+
 def _sandbox_quote(path: Path) -> str:
     value = str(path).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{value}"'
@@ -537,7 +550,11 @@ class LeanProject:
         ) as scratch_name:
             scratch = Path(scratch_name).resolve()
             try:
-                cmd, env = self._sandboxed_lean_command(scratch, content)
+                cmd, env = self._sandboxed_lean_command(
+                    scratch,
+                    content,
+                    relative_path=Path("AutoLeanInternal") / "Candidate.lean",
+                )
             except LeanSandboxError as e:
                 return BuildResult(success=False, stderr=str(e))
             return _run_lean_check(cmd, cwd=scratch, timeout=timeout, env=env)
@@ -724,7 +741,7 @@ class LeanProject:
         scratch: Path,
         content: str,
         *,
-        relative_path: Path = Path("candidate.lean"),
+        relative_path: Path = Path("AutoLeanInternal") / "Candidate.lean",
     ) -> tuple[list[str], dict[str, str]]:
         lean = _resolve_lean(self.root)
         if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -774,7 +791,7 @@ class LeanProject:
             profile.write_text(self._macos_sandbox_profile(lean, scratch), encoding="utf-8")
             return [str(sandbox), "-f", str(profile), *lean_args], env
         if host == "Linux":
-            bwrap = shutil.which("bwrap")
+            bwrap = _resolve_bubblewrap()
             if bwrap is None:
                 raise LeanSandboxError("secure Lean checks require bubblewrap (`bwrap`) on Linux")
             return self._bubblewrap_command(bwrap, lean, scratch, lean_args), env

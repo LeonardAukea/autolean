@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import click
 from rich.console import Console
@@ -13,14 +13,19 @@ from rich.panel import Panel
 from rich.text import Text
 
 from autolean import __version__
+from autolean.cli_extra import register_commands as _register_extra_commands
+from autolean.cli_sessions import register_commands as _register_session_commands
 from autolean.llm import BACKEND_NAMES, LLMBackend, LLMError, create_llm_client
 from autolean.provenance import ProofEnvironmentError
 
 if TYPE_CHECKING:
-    from autolean.agent import AutoLeanAgent
+    from autolean.agent import AgentRunResult, AutoLeanAgent
     from autolean.lean_interface import LeanProject
     from autolean.program import ProgramConfig
     from autolean.provenance import ProofEnvironment
+    from autolean.routing import EscalationDecision
+    from autolean.session import ProofSession, SessionStore
+    from autolean.strategy import ProofPlan
 
 console = Console()
 
@@ -58,10 +63,19 @@ COMMAND_ALIASES = {
 }
 COMMAND_SECTIONS = (
     ("Interactive", ("workbench",)),
-    ("Proof workflows", ("solve", "prove", "improve", "verify", "challenge", "build-library")),
-    ("Understand", ("targets", "inspect", "changes", "results")),
-    ("Project", ("doctor", "models", "environment", "init")),
-    ("Training", ("export-training", "finetune-config")),
+    (
+        "Proof workflows",
+        (
+            "plan",
+            "prove",
+            "solve",
+            "resume",
+            "verify",
+            "problems",
+        ),
+    ),
+    ("Understand", ("sessions", "targets", "inspect")),
+    ("Project", ("doctor", "models", "init", "export")),
 )
 
 
@@ -120,6 +134,74 @@ program_option = click.option(
     default="program.md",
     help="Path to program.md.",
 )
+pdf_engine_option = click.option(
+    "--pdf-engine",
+    type=click.Choice(["hybrid", "paddleocr-vl"]),
+    default="hybrid",
+    show_default=True,
+    help="PDF-to-Markdown engine. PaddleOCR-VL requires --paddleocr-url.",
+)
+paddleocr_url_option = click.option(
+    "--paddleocr-url",
+    type=str,
+    default=None,
+    help="Explicit PaddleOCR-VL 1.6 service endpoint.",
+)
+
+CommandFunction = TypeVar("CommandFunction", bound=Callable[..., object])
+
+
+def escalation_options(function: CommandFunction) -> CommandFunction:
+    """Add the shared, cost-aware model-routing controls."""
+    decorated = click.option(
+        "--escalation",
+        type=click.Choice(["never", "ask", "auto"]),
+        default=None,
+        help="Model switching policy after evidence-backed proof failures.",
+    )(function)
+    decorated = click.option(
+        "--escalate-to",
+        type=str,
+        default=None,
+        help="Explicit stronger model profile or model ID.",
+    )(decorated)
+    decorated = click.option(
+        "--escalate-after",
+        type=click.IntRange(min=1),
+        default=None,
+        help="Eligible failures before suggesting a stronger model.",
+    )(decorated)
+    return decorated
+
+
+def _confirm_model_escalation(decision: EscalationDecision) -> bool:
+    """Ask for a model switch only when the command owns a terminal."""
+    if not click.get_text_stream("stdin").isatty():
+        return False
+    return click.confirm(
+        f"Switch {decision.from_model} to {decision.to_model}?",
+        default=False,
+    )
+
+
+def _configure_escalation(
+    agent: AutoLeanAgent,
+    *,
+    escalation: str | None,
+    escalate_to: str | None,
+    escalate_after: int | None,
+) -> None:
+    """Apply explicit routing controls to one configured agent."""
+    from autolean.routing import EscalationPolicy
+
+    if escalation is not None:
+        agent.config.escalation_policy = EscalationPolicy(escalation)
+    elif escalate_to is not None and agent.config.escalation_policy is EscalationPolicy.NEVER:
+        agent.config.escalation_policy = EscalationPolicy.ASK
+    if escalate_to is not None:
+        agent.config.escalation_model = escalate_to
+    if escalate_after is not None:
+        agent.config.escalation_after_failures = escalate_after
 
 
 def _llm_for(
@@ -209,6 +291,7 @@ def _agent_for(
             resume=resume,
             target_filter=target_filter,
             target_file=target_file,
+            confirm_escalation=_confirm_model_escalation,
         )
         if model is not None or backend is not None:
             agent.llm.close()
@@ -220,14 +303,99 @@ def _agent_for(
         raise click.ClickException(f"Agent configuration failed: {error}") from error
 
 
-def _run_agent(agent: AutoLeanAgent) -> None:
-    """Run an owned agent and translate its terminal status for Click."""
+def _execute_agent(agent: AutoLeanAgent) -> AgentRunResult:
+    """Run and close an owned agent."""
     try:
-        result = agent.run()
+        return agent.run()
     finally:
         agent.close()
+
+
+def _run_agent(agent: AutoLeanAgent) -> None:
+    """Run an owned agent and translate its terminal status for Click."""
+    result = _execute_agent(agent)
     if not result.successful:
         raise click.ClickException(result.message or "Agent run failed.")
+
+
+def _remaining_session_targets(store: SessionStore, session: ProofSession) -> int:
+    """Count unresolved targets inside one session's exact execution scope."""
+    from autolean.scanner import count_sorries, scan_project
+
+    target_file = store.target_path(session)
+    if target_file is not None:
+        if not target_file.is_file():
+            raise click.ClickException(f"Session target does not exist: {target_file}")
+        return count_sorries(target_file.read_text(encoding="utf-8"))
+
+    targets = scan_project(store.project_root)
+    if session.target_filter:
+        targets = [target for target in targets if session.target_filter in (target.id, target.decl_name)]
+    return len(targets)
+
+
+def _run_session_agent(
+    agent: AutoLeanAgent,
+    store: SessionStore,
+    session: ProofSession,
+) -> ProofSession:
+    """Run an agent while preserving resumable workflow state."""
+    from autolean.session import SessionStatus
+
+    hints = dict.fromkeys([*agent.config.strategy_hints, *session.guidance])
+    agent.config.strategy_hints = list(hints)
+    agent.config.max_cycles = session.max_cycles
+    agent.config.escalation_policy = session.escalation_policy
+    agent.config.escalation_model = session.escalation_model or None
+    agent.config.escalation_after_failures = session.escalation_after_failures
+    running = store.save(
+        session.update(
+            status=SessionStatus.RUNNING,
+            model=agent.llm.config.model,
+            backend=agent.llm.config.backend,
+            message="",
+        )
+    )
+    console.print(f"[dim]Session:[/] {running.id}  [dim]resume with[/] autolean resume {running.id}")
+
+    try:
+        result = _execute_agent(agent)
+        remaining = _remaining_session_targets(store, running)
+    except Exception as error:
+        store.save(
+            running.update(
+                status=SessionStatus.FAILED,
+                model=agent.llm.config.model,
+                backend=agent.llm.config.backend,
+                model_transitions=(*running.model_transitions, *agent.model_transitions),
+                message=str(error),
+            )
+        )
+        raise
+
+    status = SessionStatus.COMPLETED if remaining == 0 else SessionStatus.PAUSED
+    if not result.successful:
+        status = SessionStatus.FAILED
+    finished = store.save(
+        running.update(
+            status=status,
+            model=agent.llm.config.model,
+            backend=agent.llm.config.backend,
+            model_transitions=(*running.model_transitions, *agent.model_transitions),
+            remaining_targets=remaining,
+            message=result.message,
+        )
+    )
+    if finished.status is SessionStatus.COMPLETED:
+        console.print(f"[bold green]Session complete:[/] {finished.id}")
+    else:
+        console.print(
+            f"[yellow]Session {finished.status.value}:[/] {remaining} target(s) remain\n"
+            f"  autolean resume {finished.id} --model {finished.model}"
+        )
+    if not result.successful:
+        raise click.ClickException(result.message or "Agent run failed.")
+    return finished
 
 
 def _accept_generated_source(
@@ -275,16 +443,15 @@ def main(ctx: click.Context) -> None:
     Quick start:
       autolean workbench                 # choose a model and proof target
       autolean prove "1 + 1 = 2"       # prove a theorem
-      autolean challenge collatz        # attempt an open problem
+      autolean problems work collatz    # continue an open-problem workspace
       autolean verify <arxiv-url>       # verify a paper
       autolean solve                    # prove all sorry targets
-      autolean build-library "topology" # create missing definitions
 
     \b
     Open problems:
-      autolean challenge               # list 11 famous unsolved problems
-      autolean challenge goldbach       # attempt Goldbach's conjecture
-      autolean challenge --difficulty accessible
+      autolean problems                  # list the curated catalog
+      autolean problems suggest          # choose bounded, formalized work
+      autolean problems work goldbach    # create or continue a workspace
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -313,6 +480,7 @@ def workbench(program: Path) -> None:
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output.")
 @model_option
 @backend_option
+@escalation_options
 @click.option(
     "--max-cycles", type=click.IntRange(min=0), default=None, help="Max experiment cycles (0 = unlimited)."
 )
@@ -333,6 +501,9 @@ def solve(
     verbose: bool,
     model: str | None,
     backend: str | None,
+    escalation: str | None,
+    escalate_to: str | None,
+    escalate_after: int | None,
     max_cycles: int | None,
     resume: bool,
     overnight: bool,
@@ -366,6 +537,12 @@ def solve(
         resume=resume,
         target_filter=target,
     )
+    _configure_escalation(
+        agent,
+        escalation=escalation,
+        escalate_to=escalate_to,
+        escalate_after=escalate_after,
+    )
 
     if max_cycles is not None:
         agent.config.max_cycles = max_cycles
@@ -374,12 +551,47 @@ def solve(
         agent.config.max_retries_per_sorry = 100
         agent.resume = True
 
-    _run_agent(agent)
+    if dry_run:
+        _run_agent(agent)
+        return
 
+    from autolean.session import SessionKind, SessionStore
 
-# ---------------------------------------------------------------------------
-# targets — find sorry targets
-# ---------------------------------------------------------------------------
+    store = SessionStore(agent.project.root)
+    session = (
+        store.find_workflow(
+            SessionKind.PROJECT,
+            target_filter=target or "",
+        )
+        if resume
+        else None
+    )
+    if session is None:
+        title = f"Project target {target}" if target else f"Project {agent.project.root.name}"
+        session = store.create(
+            kind=SessionKind.PROJECT,
+            title=title,
+            model=agent.llm.config.model,
+            backend=agent.llm.config.backend,
+            max_cycles=agent.config.max_cycles,
+            escalation_policy=agent.config.escalation_policy,
+            escalation_model=agent.config.escalation_model or "",
+            escalation_after_failures=agent.config.escalation_after_failures,
+            target_filter=target or "",
+            guidance=tuple(agent.config.strategy_hints),
+        )
+    else:
+        session = store.save(
+            session.update(
+                model=agent.llm.config.model,
+                backend=agent.llm.config.backend,
+                max_cycles=agent.config.max_cycles,
+                escalation_policy=agent.config.escalation_policy,
+                escalation_model=agent.config.escalation_model or "",
+                escalation_after_failures=agent.config.escalation_after_failures,
+            )
+        )
+    _run_session_agent(agent, store, session)
 
 
 @main.command("targets")
@@ -705,6 +917,31 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
     return failures
 
 
+def _doctor_research_tools() -> list[str]:
+    """Report the paper and indexed-context tools used by research workflows."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    from autolean.code_search import CodeDBSearchProvider
+    from autolean.paper import lightpanda_identity
+
+    failures: list[str] = []
+    console.print("\n[bold]Checking research tools...[/]")
+    try:
+        pdf_version = version("pymupdf4llm")
+        console.print(f"  [green]OK[/] PyMuPDF4LLM {pdf_version}")
+    except PackageNotFoundError:
+        failures.append("PyMuPDF4LLM is unavailable")
+        console.print("  [red]FAIL[/] PyMuPDF4LLM is unavailable")
+
+    lightpanda = lightpanda_identity()
+    lightpanda_style = "green]OK" if not lightpanda.endswith("unavailable") else "yellow]WARN"
+    console.print(f"  [{lightpanda_style}[/] {lightpanda}")
+    codedb = CodeDBSearchProvider().identity()
+    codedb_style = "green]OK" if not codedb.endswith("unavailable") else "yellow]WARN"
+    console.print(f"  [{codedb_style}[/] {codedb}")
+    return failures
+
+
 @main.command("doctor")
 @program_option
 @model_option
@@ -715,13 +952,14 @@ def doctor(program: Path, model: str | None, backend: str | None) -> None:
 
     config = parse_program(program)
     model_proof, failures = _doctor_model(config, model, backend)
+    failures.extend(_doctor_research_tools())
     failures.extend(_doctor_lean(program, config, model_proof))
 
     if failures:
         raise click.ClickException("Checks failed: " + "; ".join(failures))
 
 
-@main.command("environment")
+@main.command("environment", hidden=True)
 @click.option(
     "--project",
     "-d",
@@ -756,12 +994,56 @@ def environment_command(project: Path, as_json: bool) -> None:
         console.print(f"    {dependency}")
 
 
+@main.command("export")
+@click.argument(
+    "output",
+    type=click.Path(path_type=Path, file_okay=False, resolve_path=True),
+)
+@click.option("--title", default="AutoLean proof artifact", show_default=True)
+@click.option("--session", "session_id", default=None, help="Include one proof session record.")
+@program_option
+def export_command(output: Path, title: str, session_id: str | None, program: Path) -> None:
+    """Export a standalone Lean project and companion LaTeX paper."""
+    from autolean.export import ExportError, export_project
+    from autolean.lean_interface import LeanProject
+    from autolean.program import parse_program
+    from autolean.session import SessionError, SessionStore
+
+    config = parse_program(program)
+    project = LeanProject(program.parent / config.lean_project_path)
+    try:
+        environment = project.proof_environment()
+        store = SessionStore(project.root)
+        session = store.load(session_id).as_dict() if session_id else None
+        result = export_project(
+            project.root,
+            output,
+            title=title,
+            environment_sha256=environment.sha256,
+            session=session,
+        )
+    except (ExportError, OSError, ProofEnvironmentError, SessionError) as error:
+        raise click.ClickException(str(error)) from error
+    console.print(
+        Panel(
+            f"[bold green]Portable artifact created[/]\n"
+            f"Path:       {result.path}\n"
+            f"Lean files: {result.source_count}\n"
+            f"Manifest:   sha256:{result.manifest_sha256}\n\n"
+            "Build Lean:  cd project && lake build\n"
+            "Build paper: cd paper && latexmk -xelatex main.tex",
+            title="Export",
+            border_style="green",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # results — show experiment log
 # ---------------------------------------------------------------------------
 
 
-@main.command()
+@main.command(hidden=True)
 @click.option(
     "--file",
     "-f",
@@ -821,6 +1103,63 @@ def results(file: Path, tail: int) -> None:
     console.print(table)
 
 
+def _show_proof_plan(plan: ProofPlan) -> None:
+    """Display one reviewable proof plan and its content identity."""
+    console.print(
+        Panel(
+            Text(plan.render()),
+            title="Mathematical research plan",
+            subtitle=f"sha256:{plan.sha256[:16]}",
+            border_style="cyan",
+        )
+    )
+
+
+def _proof_plan(
+    statement: str,
+    llm: LLMBackend,
+    guidance: tuple[str, ...],
+) -> ProofPlan:
+    """Generate a plan and translate strategy errors for Click."""
+    from autolean.strategy import ProofStrategyError, generate_proof_plan
+
+    try:
+        return generate_proof_plan(statement, llm.generate, guidance=guidance)
+    except ProofStrategyError as error:
+        raise click.ClickException(f"Could not form a proof strategy: {error}") from error
+
+
+@main.command()
+@click.argument("statement")
+@model_option
+@backend_option
+@click.option(
+    "--guide",
+    multiple=True,
+    help="Add a mathematical constraint or preferred method.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output canonical plan JSON.")
+@program_option
+def plan(
+    statement: str,
+    model: str | None,
+    backend: str | None,
+    guide: tuple[str, ...],
+    as_json: bool,
+    program: Path,
+) -> None:
+    """Develop a reviewable strategy for a mathematical statement."""
+    from autolean.program import parse_program
+
+    config = parse_program(program)
+    with _connected_llm(model, backend, config) as llm:
+        proof_plan = _proof_plan(statement, llm, guide)
+    if as_json:
+        click.echo(proof_plan.to_json())
+    else:
+        _show_proof_plan(proof_plan)
+
+
 # ---------------------------------------------------------------------------
 # prove — natural language theorem → formalize → prove
 # ---------------------------------------------------------------------------
@@ -830,18 +1169,43 @@ def results(file: Path, tail: int) -> None:
 @click.argument("statement")
 @model_option
 @backend_option
+@escalation_options
 @click.option(
     "--max-attempts",
     type=click.IntRange(min=0),
-    default=0,
+    default=5,
+    show_default=True,
     help="Max proof attempts (0 = unlimited).",
+)
+@click.option(
+    "--formalization-repairs",
+    type=click.IntRange(min=0, max=5),
+    default=2,
+    show_default=True,
+    help="Compiler-guided repairs before proof search.",
+)
+@click.option(
+    "--guide",
+    multiple=True,
+    help="Add a mathematical constraint or preferred method.",
+)
+@click.option(
+    "--review-plan",
+    is_flag=True,
+    help="Review and optionally revise the strategy before formalization.",
 )
 @program_option
 def prove(
     statement: str,
     model: str | None,
     backend: str | None,
+    escalation: str | None,
+    escalate_to: str | None,
+    escalate_after: int | None,
     max_attempts: int,
+    formalization_repairs: int,
+    guide: tuple[str, ...],
+    review_plan: bool,
     program: Path,
 ) -> None:
     """Prove a theorem from natural language.
@@ -857,70 +1221,74 @@ def prove(
       autolean prove "if P implies Q and Q implies R then P implies R"
       autolean prove "the square root of 2 is irrational"
     """
-    from autolean.paper import Claim, formalize_claim
+    from autolean.challenges import match_open_problem
+
+    if problem := match_open_problem(statement):
+        from autolean.cli_extra import challenge
+
+        console.print(
+            f"[yellow]Recognized curated open problem:[/] {problem.name}\n"
+            "Opening its source-aware research workspace."
+        )
+        click.get_current_context().invoke(
+            challenge,
+            problem_id=problem.id,
+            field=None,
+            difficulty=None,
+            max_cycles=max_attempts,
+            model=model,
+            backend=backend,
+            escalation=escalation,
+            escalate_to=escalate_to,
+            escalate_after=escalate_after,
+            guide=guide,
+            program=program,
+        )
+        return
+
+    from autolean.lean_interface import LeanProject
     from autolean.program import parse_program
+    from autolean.theorem import FormalizationError, formalize_theorem, generated_theorem_path
 
     cfg = parse_program(program)
-
-    # Step 1: Formalize
-    console.print(f"[bold]Formalizing:[/] {statement}\n")
-    claim = Claim(label="User", statement=statement, lean_name="user_theorem")
-    with _connected_llm(model, backend, cfg) as llm, console.status("[dim]Formalizing..."):
-        formalize_claim(claim, llm.generate)
-
-    if not claim.lean_code:
-        raise click.ClickException("Could not formalize the statement; provide a more precise statement.")
-
-    console.print("[cyan]Lean 4 formalization:[/]")
-    for line in claim.lean_code.split("\n")[:10]:
-        console.print(f"  {line}")
-    console.print()
-
-    # Step 2: Write to workspace
     lean_root = program.parent / cfg.lean_project_path
-    target_file = lean_root / "AutoLean" / "UserTheorems.lean"
+    project = LeanProject(lean_root)
 
-    # Append to file (don't overwrite previous theorems)
-    header = "-- User theorems (auto-generated by autolean prove)\n\n"
-    existing = target_file.read_text(encoding="utf-8") if target_file.exists() else header
+    console.print(f"[bold]Planning:[/] {statement}\n")
+    with _connected_llm(model, backend, cfg) as llm:
+        proof_plan = _proof_plan(statement, llm, guide)
+        _show_proof_plan(proof_plan)
+        while review_plan and not click.confirm("Use this plan?", default=True):
+            revision = click.prompt("Additional guidance", type=str).strip()
+            proof_plan = _proof_plan(statement, llm, (*guide, revision))
+            _show_proof_plan(proof_plan)
 
-    # The target owns its imports, so a declaration cannot select new ones.
-    import re as _re
+        console.print("\n[bold]Formalizing and compiling the statement...[/]")
+        try:
+            theorem = formalize_theorem(
+                statement,
+                proof_plan,
+                llm.generate,
+                project,
+                max_repairs=formalization_repairs,
+            )
+        except FormalizationError as error:
+            raise click.ClickException(str(error)) from error
 
-    code_lines = [
-        line for line in claim.lean_code.split("\n") if not line.strip().startswith(("import ", "-- import"))
-    ]
-    clean_code = "\n".join(code_lines).strip()
+    console.print(
+        f"[green]Formalization compiled[/] after {theorem.attempts} "
+        f"attempt{'s' if theorem.attempts != 1 else ''}:"
+    )
+    console.print(Panel(Text(theorem.code), title="Lean 4 theorem", border_style="cyan"))
 
-    # Extract the Lean declaration name from the formalized code
-    _decl_match = _re.search(r"\b(?:theorem|lemma|def)\s+(\S+)", clean_code)
-    target_name = _decl_match.group(1).split(":")[0].split("(")[0].strip() if _decl_match else None
-
-    # Deduplicate: if a declaration with the same name already exists, suffix _N
-    if target_name and _re.search(rf"\b(?:theorem|lemma|def)\s+{_re.escape(target_name)}\b", existing):
-        n = 2
-        while _re.search(rf"\b(?:theorem|lemma|def)\s+{_re.escape(target_name)}_{n}\b", existing):
-            n += 1
-        new_name = f"{target_name}_{n}"
-        clean_code = _re.sub(
-            rf"\b(theorem|lemma|def)\s+{_re.escape(target_name)}\b",
-            rf"\1 {new_name}",
-            clean_code,
-            count=1,
-        )
-        console.print(f"[yellow]Name '{target_name}' already exists, using '{new_name}'[/]")
-        target_name = new_name
-
-    new_content = existing.rstrip() + "\n\n" + clean_code + "\n"
+    target_file = generated_theorem_path(lean_root, theorem.declaration_name)
     target_file = _accept_generated_source(
         lean_root,
         target_file,
-        new_content,
-        expected_content=existing if target_file.exists() else None,
+        theorem.source,
     )
     console.print(f"[green]Accepted {target_file}[/]\n")
 
-    # Step 3: Run agent on ONLY this target (not all sorries)
     attempts_label = "unlimited" if max_attempts == 0 else str(max_attempts)
     console.print(f"[bold]Attempting proof ({attempts_label} attempts)...[/]\n")
     agent = _agent_for(
@@ -928,13 +1296,36 @@ def prove(
         model=model,
         backend=backend,
         verbose=True,
-        target_filter=target_name,
+        target_filter=theorem.declaration_name,
         target_file=target_file,
     )
-    agent.config.max_cycles = max_attempts  # 0 = unlimited
+    _configure_escalation(
+        agent,
+        escalation=escalation,
+        escalate_to=escalate_to,
+        escalate_after=escalate_after,
+    )
+    agent.config.max_cycles = max_attempts
     if max_attempts > 0:
         agent.config.max_retries_per_sorry = max_attempts
-    _run_agent(agent)
+
+    from autolean.session import SessionKind, SessionStore
+
+    store = SessionStore(agent.project.root)
+    session = store.create(
+        kind=SessionKind.THEOREM,
+        title=statement,
+        model=agent.llm.config.model,
+        backend=agent.llm.config.backend,
+        max_cycles=max_attempts,
+        escalation_policy=agent.config.escalation_policy,
+        escalation_model=agent.config.escalation_model or "",
+        escalation_after_failures=agent.config.escalation_after_failures,
+        target_file=target_file,
+        target_filter=theorem.declaration_name,
+        guidance=guide,
+    )
+    _run_session_agent(agent, store, session)
 
 
 # ---------------------------------------------------------------------------
@@ -946,6 +1337,8 @@ def _prepare_paper(
     source: str,
     *,
     pages: str | None,
+    pdf_engine: str,
+    paddleocr_url: str | None,
     extract_only: bool,
     output: Path | None,
     model: str | None,
@@ -956,11 +1349,12 @@ def _prepare_paper(
     import re as _re
 
     from autolean.paper import (
+        PdfEngine,
         analyze_paper_structure,
-        extract_claims_via_llm,
+        extract_document_claims,
         formalize_claim,
+        materialize_paper,
         read_paper,
-        read_paper_text,
         render_verification_source,
     )
     from autolean.program import parse_program
@@ -978,28 +1372,58 @@ def _prepare_paper(
     console.print(f"[bold]Analyzing paper: {source}[/]\n")
     try:
         try:
-            claims, paper_title = read_paper(source, pages=pages)
+            document = read_paper(
+                source,
+                pages=pages,
+                pdf_engine=PdfEngine(pdf_engine),
+                paddleocr_url=paddleocr_url,
+            )
         except (OSError, ValueError, RuntimeError) as e:
             raise click.ClickException(f"Paper extraction failed: {e}") from e
 
+        lean_root = program.parent / cfg.lean_project_path
+        try:
+            paper_artifact = materialize_paper(document, lean_root)
+        except (OSError, ValueError) as error:
+            raise click.ClickException(f"Paper artifact could not be saved: {error}") from error
+        if paper_artifact.pdf_path is not None:
+            document.pdf_path = paper_artifact.pdf_path
+
+        if extract_only:
+            console.print(
+                f"[green]Extracted paper artifact[/]\n"
+                f"  Markdown: {paper_artifact.markdown_path}\n"
+                f"  PDF:      {paper_artifact.pdf_path or 'not available'}\n"
+                f"  Source:   sha256:{paper_artifact.input_sha256}\n"
+                f"  Text:     sha256:{paper_artifact.text_sha256}"
+            )
+            if document.claims:
+                console.print(f"\n[bold]Found {len(document.claims)} structured claims:[/]")
+                for index, claim in enumerate(document.claims, 1):
+                    console.print(f"  {index}. [bold]{claim.label}[/]: {claim.statement[:100]}")
+            return None, cfg
+
+        claims = document.claims
+        paper_title = document.title
         if not claims:
             console.print("[bold]Using model-based extraction fallback...[/]")
-            try:
-                text, paper_title = read_paper_text(source, pages=pages)
-            except (OSError, ValueError, RuntimeError) as e:
-                raise click.ClickException(f"Paper text extraction failed: {e}") from e
+            text = document.text
             if text and len(text.strip()) > 100:
-                from autolean.provenance import sha256_text
-
-                extracted_input_sha256 = sha256_text(text)
-                claims = extract_claims_via_llm(text, connected_llm().generate)
+                extracted_input_sha256 = document.input_sha256
+                claims = extract_document_claims(document, connected_llm())
 
         if not claims:
             raise click.ClickException("No claims were extracted; select a page range or another source.")
         if extracted_input_sha256:
             for claim in claims:
-                claim.input_ref = source
+                claim.input_ref = document.input_ref
                 claim.input_sha256 = extracted_input_sha256
+
+        if document.extractor:
+            console.print(
+                f"[dim]Extractor: {document.extractor} · "
+                f"sha256:{document.input_sha256[:16] or 'unavailable'}[/]"
+            )
 
         structure = analyze_paper_structure(claims)
         console.print(f"\n[bold]Found {len(claims)} claims:[/]")
@@ -1009,9 +1433,6 @@ def _prepare_paper(
         for index, claim in enumerate(claims, 1):
             proof_marker = " [dim](has proof)[/]" if claim.proof_sketch else ""
             console.print(f"  {index}. [bold]{claim.label}[/]: {claim.statement[:100]}...{proof_marker}")
-
-        if extract_only:
-            return None, cfg
 
         to_formalize = [claim for claim in claims if claim.kind != "remark"]
         console.print(f"\n[bold]Formalizing {len(to_formalize)} claims...[/]")
@@ -1033,7 +1454,6 @@ def _prepare_paper(
             "_",
             (paper_title or "Untitled").replace(" ", "_"),
         )
-        lean_root = program.parent / cfg.lean_project_path
         if output is None:
             output_path = lean_root / "AutoLean" / f"Paper_{safe_title}.lean"
         elif output.is_absolute():
@@ -1061,11 +1481,27 @@ def _prepare_paper(
 @main.command()
 @click.argument("source")
 @click.option("--pages", type=str, default=None, help="Page range (e.g., '1-5').")
+@pdf_engine_option
+@paddleocr_url_option
+@click.option("--extract-only", is_flag=True, help="Extract claims without formalizing them.")
+@click.option(
+    "--formalize-only",
+    is_flag=True,
+    help="Write the Lean project without running proof search.",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output Lean file inside the configured project.",
+)
 @click.option(
     "--max-cycles",
     type=click.IntRange(min=0),
-    default=20,
-    help="Proof attempts after formalization.",
+    default=5,
+    show_default=True,
+    help="Cycle budget after formalization (0 = unlimited).",
 )
 @model_option
 @backend_option
@@ -1073,41 +1509,71 @@ def _prepare_paper(
 def verify(
     source: str,
     pages: str | None,
+    pdf_engine: str,
+    paddleocr_url: str | None,
+    extract_only: bool,
+    formalize_only: bool,
+    output: Path | None,
     max_cycles: int,
     model: str | None,
     backend: str | None,
     program: Path,
 ) -> None:
     """Extract, formalize, and attempt the claims in a paper."""
-    output, _ = _prepare_paper(
+    if extract_only and formalize_only:
+        raise click.ClickException("Choose exactly one of --extract-only and --formalize-only.")
+    artifact, _ = _prepare_paper(
         source,
         pages=pages,
-        extract_only=False,
-        output=None,
+        pdf_engine=pdf_engine,
+        paddleocr_url=paddleocr_url,
+        extract_only=extract_only,
+        output=output,
         model=model,
         backend=backend,
         program=program,
     )
-    if output is None:  # pragma: no cover - fixed by extract_only=False
+    if extract_only:
+        return
+    if artifact is None:  # pragma: no cover - fixed by extract_only=False
         raise click.ClickException("Paper formalization produced no output file.")
-    if max_cycles == 0:
+    if formalize_only:
+        console.print(f"\n[dim]Continue:[/] autolean solve --program {program}")
         return
 
-    console.print(f"\n[bold]Attempting proofs ({max_cycles} cycles)...[/]\n")
+    cycles_label = "unlimited" if max_cycles == 0 else str(max_cycles)
+    console.print(f"\n[bold]Attempting proofs ({cycles_label} cycles)...[/]\n")
     agent = _agent_for(
         program,
         model=model,
         backend=backend,
         verbose=True,
-        target_file=output,
+        target_file=artifact,
     )
     agent.config.max_cycles = max_cycles
-    _run_agent(agent)
+
+    from autolean.session import SessionKind, SessionStore
+
+    store = SessionStore(agent.project.root)
+    session = store.create(
+        kind=SessionKind.PAPER,
+        title=source,
+        model=agent.llm.config.model,
+        backend=agent.llm.config.backend,
+        max_cycles=max_cycles,
+        escalation_policy=agent.config.escalation_policy,
+        escalation_model=agent.config.escalation_model or "",
+        escalation_after_failures=agent.config.escalation_after_failures,
+        target_file=artifact,
+    )
+    _run_session_agent(agent, store, session)
 
 
 @main.command("verify-paper", hidden=True)
 @click.argument("source")
 @click.option("--pages", type=str, default=None, help="Page range (e.g., '1-5').")
+@pdf_engine_option
+@paddleocr_url_option
 @click.option("--extract-only", is_flag=True, help="Extract claims only.")
 @click.option(
     "--output",
@@ -1122,6 +1588,8 @@ def verify(
 def verify_paper(
     source: str,
     pages: str | None,
+    pdf_engine: str,
+    paddleocr_url: str | None,
     extract_only: bool,
     output: Path | None,
     model: str | None,
@@ -1132,6 +1600,8 @@ def verify_paper(
     artifact, _ = _prepare_paper(
         source,
         pages=pages,
+        pdf_engine=pdf_engine,
+        paddleocr_url=paddleocr_url,
         extract_only=extract_only,
         output=output,
         model=model,
@@ -1199,8 +1669,10 @@ def _create_program(path: Path) -> bool:
         "effort: high\n"
         "max_output_tokens: 32768\n"
         "max_retries_per_sorry: 5\n"
+        "escalation_policy: ask\n"
+        "escalation_after_failures: 2\n"
         "cycle_timeout_seconds: 120\n"
-        "max_cycles: 0\n"
+        "max_cycles: 5\n"
     )
     try:
         with Path("program.md").open("x", encoding="utf-8") as handle:
@@ -1279,721 +1751,8 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# changes — show what the agent has changed
-# ---------------------------------------------------------------------------
-
-
-@main.command("changes")
-@click.option(
-    "--project",
-    "-d",
-    type=click.Path(exists=True, path_type=Path),
-    default="workspace",
-    help="Path to Lean project root.",
-)
-def diff(project: Path) -> None:
-    """Show what the agent has changed (git diff of .lean files)."""
-    project = project.resolve()
-
-    try:
-        result = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "diff", "--stat", "--", "*.lean"],
-            cwd=project,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        raise click.ClickException(f"Could not inspect Git changes: {e}") from e
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise click.ClickException(f"Git diff failed: {detail or 'no detail'}")
-    if result.stdout.strip():
-        console.print("[bold]Uncommitted Lean changes:[/]\n")
-        console.print(result.stdout)
-    else:
-        console.print("[dim]No uncommitted Lean changes.[/]")
-
-    try:
-        log_result = subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.fsmonitor=false",
-                "log",
-                "-n",
-                "50",
-                "--format=%s",
-                "--grep=^proof: Prove ",
-            ],
-            cwd=project,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        raise click.ClickException(f"Could not inspect proof history: {e}") from e
-    if log_result.returncode != 0:
-        detail = (log_result.stderr or log_result.stdout).strip()
-        raise click.ClickException(f"Git log failed: {detail or 'no detail'}")
-    proved = [entry for entry in log_result.stdout.strip().split("\n") if entry]
-    if proved:
-        console.print(f"\n[bold green]{len(proved)} recent proofs:[/]")
-        for entry in proved:
-            name = entry.removeprefix("proof: Prove ")
-            console.print(f"  [green]OK[/] {name}")
-
-
-# ---------------------------------------------------------------------------
-# export-training — export collected training data
-# ---------------------------------------------------------------------------
-
-
-@main.command("export-training")
-@click.option(
-    "--project",
-    "-d",
-    type=click.Path(exists=True, path_type=Path),
-    default="workspace",
-    help="Path to Lean project root.",
-)
-def export_training(project: Path) -> None:
-    """Export training data from previous runs (SFT, ShareGPT, DPO).
-
-    \b
-    Uses results.tsv + cached proof data to generate:
-      - SFT JSONL (instruction tuning with successful proofs)
-      - ShareGPT JSONL (Hermes/Axolotl compatible)
-      - DPO JSONL (preference pairs: good proof vs bad proof)
-
-    \b
-    Use the exported data to fine-tune Gemma or other models:
-      pip install unsloth
-      # See workspace/training_data/finetune_config.yaml
-    """
-    project = project.resolve()
-
-    # Read from existing training data files
-    td = project / "training_data"
-    if not td.exists() or not any(td.glob("*.jsonl")):
-        console.print("[yellow]No training data found. Run the agent first:[/]")
-        console.print("  uv run autolean solve --max-cycles 20")
-        return
-
-    # Show existing files
-    console.print("[bold]Training data files:[/]\n")
-    for f in sorted(td.glob("*.jsonl")):
-        with open(f, encoding="utf-8") as handle:
-            lines = sum(1 for _ in handle)
-        size = f.stat().st_size / 1024
-        console.print(f"  {f.name} ({lines} examples, {size:.1f} KB)")
-
-    # Show stats
-    console.print("\n[bold]Usage:[/]")
-    console.print("  Fine-tune with Unsloth:")
-    console.print(f"    unsloth train --data {td}/sft_*.jsonl --model gemma4:26b")
-    console.print("  Fine-tune with Axolotl:")
-    console.print(f"    axolotl train {td}/finetune_config.yaml")
-    console.print("  DPO training:")
-    console.print(f"    Use {td}/dpo_*.jsonl with TRL DPOTrainer")
-
-
-# ---------------------------------------------------------------------------
-# finetune-config — generate training configuration
-# ---------------------------------------------------------------------------
-
-
-@main.command("finetune-config")
-@click.option(
-    "--project",
-    "-d",
-    type=click.Path(exists=True, path_type=Path),
-    default="workspace",
-    help="Path to Lean project root.",
-)
-@click.option("--model", "-m", default="google/gemma-4-E2B", help="Base model for fine-tuning.")
-@click.option(
-    "--framework",
-    type=click.Choice(["unsloth", "axolotl", "trl"]),
-    default="axolotl",
-    help="Training framework.",
-)
-def finetune_config(project: Path, model: str, framework: str) -> None:
-    """Generate a fine-tuning config for Lean 4 proof models.
-
-    \b
-    Creates a ready-to-use config file for the specified framework.
-    Supports: Axolotl, Unsloth, HuggingFace TRL.
-    """
-    import yaml
-
-    project = project.resolve()
-    td = project / "training_data"
-    td.mkdir(parents=True, exist_ok=True)
-
-    sft_files = sorted(td.glob("sft_*.jsonl"))
-    dpo_files = sorted(td.glob("dpo_*.jsonl"))
-
-    if framework == "axolotl":
-        config = {
-            "base_model": model,
-            "model_type": "AutoModelForCausalLM",
-            "tokenizer_type": "AutoTokenizer",
-            "load_in_4bit": True,
-            "adapter": "qlora",
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "lora_dropout": 0.0,
-            "lora_target_modules": [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
-            ],
-            "datasets": [
-                {
-                    "path": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
-                    "type": "sharegpt",
-                    "conversation": "chatml",
-                },
-            ],
-            "sequence_len": 8192,
-            "micro_batch_size": 1,
-            "gradient_accumulation_steps": 8,
-            "num_epochs": 3,
-            "learning_rate": 2e-4,
-            "lr_scheduler": "cosine",
-            "warmup_ratio": 0.1,
-            "optimizer": "adamw_8bit",
-            "bf16": True,
-            "gradient_checkpointing": True,
-            "output_dir": str(td / "output"),
-            "logging_steps": 10,
-            "save_strategy": "epoch",
-            "wandb_project": "autolean-finetune",
-        }
-        config_path = td / "axolotl_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated Axolotl config:[/] {config_path}")
-        console.print(f"\n  Run: accelerate launch -m axolotl.cli.train {config_path}")
-
-    elif framework == "unsloth":
-        config = {
-            "model_name": model,
-            "max_seq_length": 8192,
-            "load_in_4bit": True,
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "dataset": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
-            "dataset_type": "messages",
-            "num_epochs": 3,
-            "learning_rate": 2e-4,
-            "batch_size": 1,
-            "gradient_accumulation": 8,
-            "output_dir": str(td / "output"),
-        }
-        config_path = td / "unsloth_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated Unsloth config:[/] {config_path}")
-        console.print("\n  pip install unsloth")
-        console.print(f"  python -m unsloth.train --config {config_path}")
-
-    elif framework == "trl":
-        config = {
-            "model_name": model,
-            "dataset_path": str(dpo_files[-1]) if dpo_files else "training_data/dpo.jsonl",
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "beta": 0.1,
-            "num_epochs": 1,
-            "learning_rate": 5e-6,
-            "batch_size": 1,
-            "gradient_accumulation_steps": 8,
-            "output_dir": str(td / "dpo_output"),
-        }
-        config_path = td / "trl_dpo_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated TRL DPO config:[/] {config_path}")
-        console.print("\n  pip install trl")
-        console.print(f"  Use DPOTrainer with config from {config_path}")
-
-    # Summary
-    console.print("\n[bold]Self-improving loop:[/]")
-    console.print("  1. Run agent:      uv run autolean solve --overnight")
-    console.print("  2. Export data:     uv run autolean export-training")
-    console.print(f"  3. Fine-tune:      {framework} train ...")
-    console.print("  4. Import model:   ollama create autolean-v1 -f Modelfile")
-    console.print("  5. Run again:      uv run autolean solve --model autolean-v1")
-
-
-# ---------------------------------------------------------------------------
-# build-library — create missing types/structures for a mathematical field
-# ---------------------------------------------------------------------------
-
-
-@main.command("build-library")
-@click.argument("topic")
-@click.option(
-    "--output",
-    "-o",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Output path inside the configured Lean project.",
-)
-@model_option
-@backend_option
-@click.option("--prove", is_flag=True, help="Immediately attempt proofs after generating.")
-@program_option
-def build_library(
-    topic: str,
-    output: Path | None,
-    model: str | None,
-    backend: str | None,
-    prove: bool,
-    program: Path,
-) -> None:
-    """Build a local Lean 4 library for a mathematical topic.
-
-    \b
-    Creates definitions, structures, and basic lemmas that supplement
-    mathlib for a specific domain. Fills gaps that mathlib doesn't cover.
-
-    \b
-    Examples:
-      autolean build-library "differential geometry"
-      autolean build-library "graph theory" --prove
-      autolean build-library "category theory basics" -o MyLib.lean
-      autolean build-library "finite automata"
-      autolean build-library "tropical geometry"
-    """
-    import re as _re
-
-    from autolean.library import generate_library_source
-    from autolean.program import parse_program
-
-    cfg = parse_program(program)
-    llm = _connected_llm(model, backend, cfg, timeout=600.0)
-
-    # Generate output path
-    safe_topic = _re.sub(r"[^a-zA-Z0-9]", "", topic.title().replace(" ", ""))
-    lean_root = program.parent / cfg.lean_project_path
-    if output is None:
-        output = lean_root / "AutoLean" / f"Lib{safe_topic}.lean"
-    elif not output.is_absolute():
-        output = lean_root / output
-
-    console.print(f"[bold]Building library for:[/] {topic}")
-    console.print(f"[bold]Output:[/] {output}\n")
-
-    try:
-        with console.status(f"[dim]Generating {topic} library..."):
-            content = generate_library_source(topic, llm.generate)
-    except LLMError as e:
-        raise click.ClickException(str(e)) from e
-    finally:
-        llm.close()
-    path = _accept_generated_source(lean_root, output, content, timeout=300)
-
-    from autolean.scanner import count_sorries
-
-    # Count generated declarations and proof targets.
-    n_defs = len(_re.findall(r"\b(?:def|structure|class|instance|theorem|lemma)\b", content))
-    n_sorrys = count_sorries(content)
-
-    console.print(f"[green]Generated {n_defs} definitions/theorems ({n_sorrys} sorry targets)[/]")
-    console.print(f"  File: {path}\n")
-
-    # Show preview
-    for line in content.split("\n")[:20]:
-        console.print(f"  [dim]{line}[/]")
-    if len(content.split("\n")) > 20:
-        console.print(f"  [dim]... ({len(content.split(chr(10))) - 20} more lines)[/]")
-
-    if prove and n_sorrys > 0:
-        console.print(f"\n[bold]Attempting to prove {n_sorrys} sorry targets...[/]\n")
-        agent = _agent_for(
-            program,
-            model=model,
-            backend=backend,
-            verbose=True,
-            target_file=path,
-        )
-        agent.config.max_cycles = n_sorrys * 3
-        _run_agent(agent)
-    elif n_sorrys > 0:
-        console.print(f"\n  Next: [cyan]uv run autolean solve[/] to attempt {n_sorrys} proofs")
-
-
-# ---------------------------------------------------------------------------
-# improve — simplify/deepen/beautify an existing proof
-# ---------------------------------------------------------------------------
-
-
-@main.command()
-@click.argument("file_path", type=click.Path(exists=True, path_type=Path))
-@click.argument("theorem_name")
-@click.option(
-    "--goal",
-    type=click.Choice(["shorter", "elegant", "faster", "readable"]),
-    default="elegant",
-    help="What to optimize for.",
-)
-@model_option
-@backend_option
-@click.option(
-    "--max-attempts",
-    type=click.IntRange(min=1),
-    default=5,
-    help="Max improvement attempts.",
-)
-@program_option
-def improve(
-    file_path: Path,
-    theorem_name: str,
-    goal: str,
-    model: str | None,
-    backend: str | None,
-    max_attempts: int,
-    program: Path,
-) -> None:
-    """Improve an existing proof — make it shorter, more elegant, or faster.
-
-    \b
-    Takes a .lean file and theorem name, reads the current proof,
-    asks the LLM to improve it, verifies the new version compiles,
-    and replaces the original if successful.
-
-    \b
-    Examples:
-      autolean improve workspace/AutoLean/Medium.lean medium_add_comm
-      autolean improve workspace/AutoLean/Medium.lean medium_add_comm --goal shorter
-      autolean improve my_project/Foo.lean my_theorem --goal elegant
-    """
-    import re
-
-    from autolean.lean_interface import LeanProject
-    from autolean.program import parse_program
-    from autolean.prompts import PROOF_GOLF_USER
-
-    cfg = parse_program(program)
-    file_path = file_path.resolve()
-
-    # Find the theorem and its proof in the file
-    content = file_path.read_text(encoding="utf-8")
-    lines = content.split("\n")
-
-    # Locate the theorem declaration
-    theorem_line = None
-    for i, line in enumerate(lines):
-        if re.search(rf"\b{re.escape(theorem_name)}\b", line) and re.match(
-            r"\s*(theorem|lemma|def)\s+", line
-        ):
-            theorem_line = i
-            break
-
-    if theorem_line is None:
-        raise click.ClickException(f"Theorem '{theorem_name}' was not found in {file_path}.")
-
-    # The current proof ends at the next declaration.
-    proof_start = None
-    proof_end = None
-    for i in range(theorem_line, len(lines)):
-        if "by" in lines[i] and proof_start is None:
-            proof_start = i + 1
-        elif proof_start is not None and i > proof_start:
-            stripped = lines[i].strip()
-            unindented = not lines[i].startswith((" ", "\t"))
-            if stripped and not stripped.startswith("--") and unindented:
-                proof_end = i
-                break
-    if proof_start is None:
-        raise click.ClickException(f"No tactic proof found for '{theorem_name}'.")
-    if proof_end is None:
-        proof_end = len(lines)
-
-    current_proof = "\n".join(lines[proof_start:proof_end])
-    decl_line = "\n".join(lines[theorem_line:proof_start])
-
-    console.print(f"[bold]Improving:[/] {theorem_name}")
-    console.print(f"[bold]Goal:[/] {goal}")
-    console.print("[bold]Current proof:[/]")
-    for line in current_proof.split("\n")[:10]:
-        console.print(f"  [dim]{line}[/]")
-    console.print()
-
-    # Find project root
-    lean_root = file_path.parent
-    while lean_root != lean_root.parent:
-        if (lean_root / "lakefile.lean").exists() or (lean_root / "lakefile.toml").exists():
-            break
-        lean_root = lean_root.parent
-    project = LeanProject(lean_root)
-    try:
-        proof_environment = project.proof_environment(refresh=True)
-    except (OSError, ProofEnvironmentError) as e:
-        raise click.ClickException(f"Proof environment identification failed: {e}") from e
-
-    from autolean.scanner import _find_enclosing_decl_details, _mask_lean_noncode
-
-    local_name, qualified_name, _ = _find_enclosing_decl_details(
-        _mask_lean_noncode(content).split("\n"),
-        theorem_line + 1,
-    )
-    if local_name != theorem_name or not qualified_name:
-        raise click.ClickException(f"Theorem '{theorem_name}' has no auditable source name.")
-
-    import textwrap
-
-    proof_indents = [len(line) - len(line.lstrip()) for line in lines[proof_start:proof_end] if line.strip()]
-    if not proof_indents:
-        raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
-    proof_indent = " " * min(proof_indents)
-
-    goal_prompts = {
-        "shorter": "Make this proof as SHORT as possible. Minimize the number of tactics and lines.",
-        "elegant": "Make this proof more ELEGANT and mathematically beautiful. Use clean, idiomatic Lean 4.",
-        "faster": "Make this proof FASTER for the Lean kernel to check. "
-        "Avoid slow tactics like simp on large goals.",
-        "readable": "Make this proof more READABLE. Use descriptive names, add comments, structure clearly.",
-    }
-
-    system = (
-        "You are a Lean 4 proof golf expert. "
-        f"{goal_prompts[goal]} "
-        "Output ONLY the improved tactic block. No explanation, no markdown."
-    )
-
-    from autolean.agent import clean_llm_proof
-    from autolean.generated_code import GeneratedCodeError, validate_generated_proof
-    from autolean.provenance import sha256_text
-
-    with _connected_llm(model, backend, cfg) as llm:
-        for attempt in range(1, max_attempts + 1):
-            console.print(f"[bold]Attempt {attempt}/{max_attempts}...[/]")
-
-            context = f"{decl_line}\n{current_proof}"
-            user_prompt = PROOF_GOLF_USER.format(
-                file_context=context,
-                decl_name=theorem_name,
-                line=theorem_line + 1,
-                current_proof=current_proof,
-            )
-
-            try:
-                with console.status("[dim]Generating improved proof..."):
-                    response = llm.generate(system, user_prompt)
-            except LLMError as e:
-                raise click.ClickException(f"Proof improvement failed: {e}") from e
-
-            new_proof = clean_llm_proof(response.text, tactic_mode=True)
-            try:
-                new_proof = validate_generated_proof(new_proof)
-            except GeneratedCodeError as e:
-                console.print(f"  [red]Generated proof rejected:[/] {e}")
-                continue
-
-            if not new_proof or textwrap.dedent(new_proof).strip() == textwrap.dedent(current_proof).strip():
-                console.print("  [yellow]No improvement generated.[/]")
-                continue
-
-            console.print("  [cyan]New proof:[/]")
-            for line in new_proof.split("\n")[:8]:
-                console.print(f"    [cyan]{line}[/]")
-
-            normalized_lines = textwrap.dedent(new_proof).strip("\n").split("\n")
-            replacement = [f"{proof_indent}{line}" if line else "" for line in normalized_lines]
-            new_lines = lines.copy()
-            new_lines[proof_start:proof_end] = replacement
-            new_content = "\n".join(new_lines)
-
-            with console.status("[dim]Verifying proof and axioms..."):
-                build = project.validate_candidate(
-                    file_path,
-                    new_content,
-                    timeout=120,
-                    declaration=qualified_name,
-                    declaration_line=theorem_line + 1,
-                    expected_environment=proof_environment.sha256,
-                )
-
-            if build.success:
-                try:
-                    project.write_file(
-                        file_path,
-                        new_content,
-                        expected_content=content,
-                    )
-                except OSError as e:
-                    raise click.ClickException(f"Source changed during proof improvement: {e}") from e
-                old_len = len(current_proof.strip().split("\n"))
-                new_len = len(normalized_lines)
-                axioms = ", ".join(build.axioms) if build.axioms else "none"
-                console.print(f"  [bold green]Improved![/] {old_len} lines -> {new_len} lines")
-                console.print(f"  Environment: sha256:{proof_environment.sha256}")
-                console.print(f"  Proof:       sha256:{sha256_text(new_proof)}")
-                console.print(f"  Axioms:      {axioms}")
-                if new_len < old_len:
-                    pct = (old_len - new_len) / old_len * 100
-                    console.print(f"  [green]Reduced by {old_len - new_len} lines ({pct:.0f}%)[/]")
-                return
-
-            detail = build.errors[0].message if build.errors else build.stderr or "unknown error"
-            console.print(f"  [red]Build failed:[/] {' '.join(detail.split())[:160]}")
-
-    raise click.ClickException(f"Could not improve after {max_attempts} attempts.")
-
-
-# ---------------------------------------------------------------------------
-# challenge — attempt an open mathematical problem
-# ---------------------------------------------------------------------------
-
-
-@main.command()
-@click.argument("problem_id", required=False)
-@click.option("--field", type=str, default=None, help="Filter by field (e.g., 'number theory').")
-@click.option(
-    "--difficulty",
-    type=click.Choice(["accessible", "hard", "very-hard", "millennium"]),
-    default=None,
-    help="Filter by difficulty.",
-)
-@click.option(
-    "--max-cycles",
-    type=click.IntRange(min=0),
-    default=50,
-    help="Max proof attempts (0 = unlimited).",
-)
-@model_option
-@backend_option
-@click.option(
-    "--program",
-    "-p",
-    type=click.Path(exists=True, path_type=Path),
-    default="program.md",
-    help="Path to program.md.",
-)
-def challenge(
-    problem_id: str | None,
-    field: str | None,
-    difficulty: str | None,
-    max_cycles: int,
-    model: str | None,
-    backend: str | None,
-    program: Path,
-) -> None:
-    """Take on an open mathematical problem.
-
-    \b
-    Without arguments, lists all available problems.
-    With a problem ID, generates the formalization and starts proving.
-
-    \b
-    Examples:
-      autolean challenge                        # list all problems
-      autolean challenge collatz                 # attempt Collatz conjecture
-      autolean challenge goldbach --max-cycles 100
-      autolean challenge --field "number theory" # filter by field
-      autolean challenge --difficulty accessible # show easiest problems
-    """
-    from autolean.challenges import (
-        OPEN_PROBLEMS,
-        print_problems_table,
-        render_challenge_source,
-    )
-    from autolean.program import parse_program
-
-    if problem_id is None:
-        print_problems_table(filter_field=field, filter_difficulty=difficulty)
-        return
-
-    # Find the problem
-    problem = next((p for p in OPEN_PROBLEMS if p.id == problem_id), None)
-    if not problem:
-        # Try partial match
-        needle = problem_id.lower()
-        matches = [p for p in OPEN_PROBLEMS if needle in p.id.lower() or needle in p.name.lower()]
-        if len(matches) == 1:
-            problem = matches[0]
-        elif matches:
-            console.print(f"[yellow]Multiple matches for '{problem_id}':[/]")
-            for m in matches:
-                console.print(f"  {m.id}: {m.name}")
-            raise click.ClickException(f"Problem ID '{problem_id}' is ambiguous.")
-        else:
-            raise click.ClickException(
-                f"Problem '{problem_id}' was not found; run `autolean challenge` to list IDs."
-            )
-
-    # Display problem info
-    diff_colors = {"accessible": "green", "hard": "yellow", "very-hard": "red", "millennium": "bold magenta"}
-    dc = diff_colors.get(problem.difficulty, "white")
-
-    console.print(
-        Panel(
-            f"[bold]{problem.name}[/bold]\n"
-            f"Field:      {problem.field}\n"
-            f"Difficulty: [{dc}]{problem.difficulty}[/{dc}]\n"
-            f"Formalization: {problem.formalization_status}\n"
-            f"\n{problem.description}\n"
-            + (f"\nBoundary: {problem.limitations}" if problem.limitations else "")
-            + (f"\nSub-results: {len(problem.sub_results)} provable lemma(s)" if problem.sub_results else "")
-            + (f"\nRef: {problem.references[0]}" if problem.references else ""),
-            title=f"Challenge: {problem.id}",
-            border_style=dc.split()[-1] if " " in dc else dc,
-            width=75,
-        )
-    )
-
-    if problem.formalization_status != "formalized":
-        raise click.ClickException(
-            "This challenge is a formalization scaffold. A source-faithful Lean "
-            "statement is required before proof attempts can start."
-        )
-
-    # Generate the challenge file
-    cfg = parse_program(program)
-    lean_root = program.parent / cfg.lean_project_path
-    filename = f"Challenge_{problem.id.replace('-', '_').title()}.lean"
-    path = lean_root / "AutoLean" / filename
-    path = _accept_generated_source(
-        lean_root,
-        path,
-        render_challenge_source(problem),
-        timeout=300,
-    )
-    console.print(f"\n[green]Accepted:[/] {path}")
-
-    # Count sorry targets
-    from autolean.scanner import count_sorries
-
-    n_sorry = count_sorries(path.read_text(encoding="utf-8"))
-    console.print(f"[cyan]{n_sorry} auditable sorry target(s)[/]")
-
-    # Ask if they want to start proving
-    console.print(f"\n[bold]Starting proof attempts ({max_cycles} cycles)...[/]\n")
-
-    agent = _agent_for(
-        program,
-        model=model,
-        backend=backend,
-        verbose=True,
-        target_file=path,
-    )
-    agent.config.max_cycles = max_cycles
-    _run_agent(agent)
-
+_register_extra_commands(main)
+_register_session_commands(main)
 
 # ---------------------------------------------------------------------------
 # Entry

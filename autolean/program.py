@@ -9,8 +9,10 @@ from pathlib import Path
 
 from autolean.llm import LLMConfig, validate_backend_config, validate_endpoint
 from autolean.models import DEFAULT_PROFILE, resolve_llm_config
+from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
 
 DEFAULT_MAX_PROOF_LINES = 30
+DEFAULT_MAX_CYCLES = 5
 
 
 def _require_positive(name: str, value: int | float) -> None:
@@ -43,8 +45,11 @@ class ProgramConfig:
     llm_timeout_seconds: float | None = None
     max_retries_per_sorry: int = 5
     cycle_timeout_seconds: int = 120
-    max_cycles: int = 0
+    max_cycles: int = DEFAULT_MAX_CYCLES
     max_proof_lines: int = DEFAULT_MAX_PROOF_LINES
+    escalation_policy: EscalationPolicy = EscalationPolicy.ASK
+    escalation_model: str | None = None
+    escalation_after_failures: int = DEFAULT_ESCALATION_AFTER
     goals: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     strategy_hints: list[str] = field(default_factory=list)
@@ -61,6 +66,9 @@ class ProgramConfig:
         if self.max_cycles < 0:
             raise ValueError("max_cycles must be non-negative")
         _require_positive("max_proof_lines", self.max_proof_lines)
+        _require_positive("escalation_after_failures", self.escalation_after_failures)
+        if self.escalation_model is not None and not self.escalation_model.strip():
+            raise ValueError("escalation_model must not be empty")
         _require_finite_range("temperature", self.temperature, 0, 2)
         if self.max_output_tokens is not None:
             _require_positive("max_output_tokens", self.max_output_tokens)
@@ -160,6 +168,21 @@ def parse_program(path: Path) -> ProgramConfig:
     config.cycle_timeout_seconds = extract_integer("cycle_timeout_seconds", config.cycle_timeout_seconds)
     config.max_cycles = extract_integer("max_cycles", config.max_cycles)
     config.max_proof_lines = extract_integer("max_proof_lines", config.max_proof_lines)
+    raw_escalation = (
+        extract_value("escalation_policy", config.escalation_policy.value) or config.escalation_policy.value
+    )
+    try:
+        config.escalation_policy = EscalationPolicy(raw_escalation)
+    except ValueError as error:
+        choices = ", ".join(policy.value for policy in EscalationPolicy)
+        raise ValueError(
+            f"program.md: escalation_policy must be one of {choices}, got {raw_escalation!r}"
+        ) from error
+    config.escalation_model = extract_value("escalation_model", None)
+    config.escalation_after_failures = extract_integer(
+        "escalation_after_failures",
+        config.escalation_after_failures,
+    )
 
     for key in ("max_output_tokens", "num_predict"):
         if extract_value(key, None) is not None:
