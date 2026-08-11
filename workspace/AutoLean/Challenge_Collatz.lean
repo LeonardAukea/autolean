@@ -30,7 +30,7 @@ theorem collatz_conjecture (n : Nat) (hn : n > 0) :
 theorem collatz_step_one : collatz_step 1 = 4 := by rfl
 
 -- Sub-result 2
-theorem collatz_step_two : collatz_step 2 = 1 := by sorry
+theorem collatz_step_two : collatz_step 2 = 1 := by rfl
 
 -- Sub-result 3
 theorem collatz_reaches_one_of_pow2 (k : Nat) : collatz_reaches_one (2^k) := by sorry
