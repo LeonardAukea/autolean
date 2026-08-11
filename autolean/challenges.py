@@ -1,22 +1,23 @@
-"""Open problems collection — famous unsolved problems formalized for AutoLean.
+"""Curated open-problem statements and formalization scaffolds.
 
 A curated list of open mathematical problems, ranging from accessible
 sub-results to millennium-level challenges. Each problem includes:
   - Natural language description
   - Difficulty rating
-  - Known sub-results that ARE provable
-  - Lean 4 formalization (statement only, proof is sorry)
+  - Known sub-results
+  - A formalized Lean statement or an explicitly labeled scaffold
 
-The agent can target these systematically. Even partial progress
-(proving sub-lemmas, formalizing statements) is valuable research output.
+Only source-faithful formalizations can enter the proof loop.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
@@ -24,17 +25,21 @@ console = Console()
 
 @dataclass
 class OpenProblem:
-    """A formalized open problem."""
+    """An open problem with a formalized statement or labeled scaffold."""
 
     id: str
     name: str
+    # `field` is an attribute name here, so the defaults below must spell out
+    # `dataclasses.field` rather than shadow it with a bare import.
     field: str
     difficulty: str  # "accessible" | "hard" | "very-hard" | "millennium"
     description: str
     lean_statement: str  # Lean 4 theorem statement with sorry
-    sub_results: list[str] = field(default_factory=list)  # provable lemmas
-    references: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
+    formalization_status: Literal["formalized", "scaffold"] = "formalized"
+    limitations: str = ""
+    sub_results: list[str] = dataclasses.field(default_factory=list)  # provable lemmas
+    references: list[str] = dataclasses.field(default_factory=list)
+    tags: list[str] = dataclasses.field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +53,10 @@ OPEN_PROBLEMS: list[OpenProblem] = [
         name="Collatz Conjecture",
         field="Number Theory",
         difficulty="very-hard",
-        description="For any positive integer n, the sequence n → n/2 (if even) or 3n+1 (if odd) eventually reaches 1.",
+        description=(
+            "For any positive integer n, the sequence n → n/2 (if even) or "
+            "3n+1 (if odd) eventually reaches 1."
+        ),
         lean_statement="""\
 def collatz_step (n : Nat) : Nat :=
   if n % 2 == 0 then n / 2 else 3 * n + 1
@@ -105,7 +113,6 @@ theorem goldbach_conjecture (n : Nat) (hn : n > 2) (he : n % 2 = 0) :
         references=["https://en.wikipedia.org/wiki/Goldbach%27s_conjecture"],
         tags=["number-theory", "primes", "additive"],
     ),
-
     # === ALGEBRA / GROUP THEORY ===
     OpenProblem(
         id="growth-gap",
@@ -127,25 +134,32 @@ theorem growth_gap_conjecture (γ : GrowthFn)
     IsExponentialGrowth γ := by
   sorry""",
         sub_results=[
-            "theorem poly_degree_mono (γ : GrowthFn) (d : Nat) : IsPolynomialGrowth γ d → IsPolynomialGrowth γ (d+1) := by sorry",
+            "theorem polynomial_growth_has_witness (γ : GrowthFn) "
+            "(h : HasPolynomialGrowth γ) : "
+            "∃ d C : Nat, C > 0 ∧ ∀ n, n > 0 → γ n ≤ C * n ^ d := by sorry",
         ],
+        formalization_status="scaffold",
+        limitations="The growth function is not connected to a finitely generated group.",
         references=["Gromov, Groups of polynomial growth (1981)"],
         tags=["group-theory", "geometric", "growth"],
     ),
-
     # === TOPOLOGY / GEOMETRY ===
     OpenProblem(
         id="filling-area",
         name="Gromov's Filling Area Conjecture",
         field="Metric Geometry",
         difficulty="hard",
-        description="The hemisphere has the least area among all surfaces that isometrically fill the circle.",
+        description=(
+            "The hemisphere has the least area among all surfaces that isometrically fill the circle."
+        ),
         lean_statement="""\
 -- Simplified version: filling area of the unit circle
 theorem filling_area_conjecture (area : Nat) (h : area > 0) :
     area ≥ 2 := by  -- π ≈ 2 in this simplified discrete version
   sorry""",
         sub_results=[],
+        formalization_status="scaffold",
+        limitations="The natural-number area surrogate is not Gromov's filling invariant.",
         references=["Gromov, Filling Riemannian manifolds (1983)"],
         tags=["geometry", "metric", "filling"],
     ),
@@ -158,18 +172,20 @@ theorem filling_area_conjecture (area : Nat) (h : area > 0) :
         lean_statement="""\
 -- Statement requires substantial differential topology infrastructure
 -- This is a placeholder formalization
-axiom SmoothManifold4 : Type
-axiom is_homotopy_sphere : SmoothManifold4 → Prop
-axiom is_diffeomorphic_to_S4 : SmoothManifold4 → Prop
+structure SmoothManifold4 where
+  Carrier : Type
+  isHomotopySphere : Prop
+  isDiffeomorphicToS4 : Prop
 
 theorem smooth_poincare_dim4 (M : SmoothManifold4) :
-    is_homotopy_sphere M → is_diffeomorphic_to_S4 M := by
+    M.isHomotopySphere → M.isDiffeomorphicToS4 := by
   sorry""",
         sub_results=[],
+        formalization_status="scaffold",
+        limitations="The structure records propositions without differential-topology semantics.",
         references=["https://en.wikipedia.org/wiki/Generalized_Poincar%C3%A9_conjecture"],
         tags=["topology", "smooth", "4-manifold"],
     ),
-
     # === COMBINATORICS ===
     OpenProblem(
         id="hadamard",
@@ -194,7 +210,6 @@ theorem hadamard_conjecture (n : Nat) (h : n % 4 = 0) (hn : n > 0) :
         references=["https://en.wikipedia.org/wiki/Hadamard_matrix"],
         tags=["combinatorics", "linear-algebra", "matrices"],
     ),
-
     # === ANALYSIS ===
     OpenProblem(
         id="riemann",
@@ -214,10 +229,11 @@ theorem riemann_hypothesis_chebyshev (x : Nat) (hx : x > 1) :
         sub_results=[
             "-- Prime number theorem: ψ(x) ~ x (proved, could formalize)",
         ],
+        formalization_status="scaffold",
+        limitations="The current Lean statement is True and does not express the hypothesis.",
         references=["https://en.wikipedia.org/wiki/Riemann_hypothesis"],
         tags=["number-theory", "analysis", "millennium"],
     ),
-
     # === ACCESSIBLE / FUN ===
     OpenProblem(
         id="perfect-odd",
@@ -235,7 +251,7 @@ theorem no_odd_perfect_number :
         sub_results=[
             "-- 6 is perfect: 1 + 2 + 3 = 6",
             "-- 28 is perfect: 1 + 2 + 4 + 7 + 14 = 28",
-            "-- No odd perfect number below 10^1500 (computational)",
+            "-- Structural bounds constrain any odd perfect number",
         ],
         references=["https://en.wikipedia.org/wiki/Perfect_number"],
         tags=["number-theory", "divisors", "accessible"],
@@ -245,7 +261,10 @@ theorem no_odd_perfect_number :
         name="Lonely Runner Conjecture",
         field="Combinatorics / Dynamics",
         difficulty="hard",
-        description="For k runners on a circular track with distinct speeds, each runner is at some point lonely (distance ≥ 1/(k+1) from all others).",
+        description=(
+            "For k runners on a circular track with distinct speeds, each runner "
+            "is at some point lonely (distance ≥ 1/(k+1) from all others)."
+        ),
         lean_statement="""\
 -- Simplified discrete version
 theorem lonely_runner (k : Nat) (speeds : Fin k → Nat)
@@ -255,8 +274,10 @@ theorem lonely_runner (k : Nat) (speeds : Fin k → Nat)
       True := by  -- real version needs modular arithmetic on [0,1)
   sorry""",
         sub_results=[
-            "-- Proved for k ≤ 7",
+            "-- Low-runner cases are established",
         ],
+        formalization_status="scaffold",
+        limitations="The current conclusion is True and omits circular distance.",
         references=["https://en.wikipedia.org/wiki/Lonely_runner_conjecture"],
         tags=["combinatorics", "dynamics", "accessible"],
     ),
@@ -265,15 +286,17 @@ theorem lonely_runner (k : Nat) (speeds : Fin k → Nat)
         name="Erdos-Straus Conjecture",
         field="Number Theory",
         difficulty="accessible",
-        description="For every integer n ≥ 2, 4/n can be written as 1/x + 1/y + 1/z for positive integers x, y, z.",
+        description=(
+            "For every integer n ≥ 2, 4/n can be written as 1/x + 1/y + 1/z for positive integers x, y, z."
+        ),
         lean_statement="""\
 theorem erdos_straus (n : Nat) (hn : n ≥ 2) :
     ∃ x y z : Nat, x > 0 ∧ y > 0 ∧ z > 0 ∧
       4 * x * y * z = n * (y * z + x * z + x * y) := by
   sorry""",
         sub_results=[
-            "-- True for n = 2: 4/2 = 1/1 + 1/2 + 1/∞... actually 4/2 = 2 = 1/1 + 1/1 + 0 (degenerate)",
-            "-- Verified computationally for n up to 10^17",
+            "-- The n = 2 case has witnesses x = 1, y = 2, z = 2",
+            "-- Finite computation supplies bounded instances",
         ],
         references=["https://en.wikipedia.org/wiki/Erd%C5%91s%E2%80%93Straus_conjecture"],
         tags=["number-theory", "fractions", "accessible"],
@@ -311,6 +334,7 @@ def print_problems_table(filter_field: str | None = None, filter_difficulty: str
     table.add_column("Problem", min_width=25)
     table.add_column("Field", min_width=15)
     table.add_column("Difficulty", min_width=12)
+    table.add_column("Formalization", min_width=13)
     table.add_column("Sub-results", justify="right", min_width=12)
 
     for p in problems:
@@ -320,6 +344,7 @@ def print_problems_table(filter_field: str | None = None, filter_difficulty: str
             p.name,
             p.field,
             f"[{style}]{p.difficulty}[/{style}]",
+            p.formalization_status,
             str(len(p.sub_results)),
         )
 
@@ -330,29 +355,29 @@ def print_problems_table(filter_field: str | None = None, filter_difficulty: str
     )
 
 
-def generate_challenge_file(problem: OpenProblem, output_dir: str = "workspace/AutoLean") -> str:
-    """Generate a .lean file for an open problem with sub-results as sorry targets."""
-    from pathlib import Path
-
-    filename = f"Challenge_{problem.id.replace('-', '_').title()}.lean"
-    path = Path(output_dir) / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
+def render_challenge_source(problem: OpenProblem) -> str:
+    """Render a complete Lean source file for one curated challenge."""
+    from autolean.generated_code import safe_lean_comment_text
 
     lines = [
-        f"/-!",
-        f"# Challenge: {problem.name}",
-        f"",
-        f"Field: {problem.field}",
-        f"Difficulty: {problem.difficulty}",
-        f"",
-        f"{problem.description}",
-        f"",
+        "import Mathlib",
+        "",
+        "/-!",
+        f"# Challenge: {safe_lean_comment_text(problem.name)}",
+        "",
+        f"Field: {safe_lean_comment_text(problem.field)}",
+        f"Difficulty: {safe_lean_comment_text(problem.difficulty)}",
+        f"Formalization: {problem.formalization_status}",
+        "",
+        safe_lean_comment_text(problem.description),
+        safe_lean_comment_text(problem.limitations) if problem.limitations else "",
+        "",
         f"Generated by: autolean challenge {problem.id}",
-        f"-/",
-        f"",
-        f"-- Main conjecture",
+        "-/",
+        "",
+        "-- Main conjecture",
         problem.lean_statement,
-        f"",
+        "",
     ]
 
     if problem.sub_results:
@@ -366,8 +391,16 @@ def generate_challenge_file(problem: OpenProblem, output_dir: str = "workspace/A
     if problem.references:
         lines.append("-- References")
         for ref in problem.references:
-            lines.append(f"-- {ref}")
+            lines.append(f"-- {safe_lean_comment_text(ref)}")
 
-    content = "\n".join(lines)
-    path.write_text(content, encoding="utf-8")
-    return str(path)
+    return "\n".join(lines)
+
+
+def generate_challenge_file(problem: OpenProblem, output_dir: str | Path = "workspace/AutoLean") -> Path:
+    """Write one rendered challenge source and return its path."""
+    filename = f"Challenge_{problem.id.replace('-', '_').title()}.lean"
+    path = Path(output_dir) / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    path.write_text(render_challenge_source(problem), encoding="utf-8")
+    return path

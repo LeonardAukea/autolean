@@ -16,6 +16,7 @@ placeholders with valid proofs.
 8. Do NOT add imports — work with what is already imported.
 9. Do NOT invent tactic names. Only use tactics that exist in Lean 4 + Mathlib.
 10. Do NOT add `import` or `open` statements — output ONLY tactics.
+11. Stop as soon as every goal is closed. Never append a tactic after a closer.
 
 ## CRITICAL: Tactics That DO NOT Exist
 

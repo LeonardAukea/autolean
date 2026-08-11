@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Sorry Target
@@ -25,6 +24,7 @@ class SorryTarget:
     context_after: str  # lines below for LLM context
     tactic_mode: bool = True  # True if sorry is inside a `by` block
     rel_path: str = ""  # relative path from project root (set by scan_project)
+    qualified_decl_name: str = ""  # source-qualified name used for axiom audits
 
     @property
     def id(self) -> str:
@@ -63,7 +63,7 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
             if j < 0:
                 break
             prev = lines[j].rstrip()
-            # Check if this line ends with `by` or contains `by` followed by nothing meaningful
+            # A trailing `by` means the placeholder is already in tactic mode.
             if re.search(r"\bby\s*$", prev):
                 return True
             if re.search(r":=\s*$", prev):
@@ -80,24 +80,26 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
     if re.search(r"\bby\b", before_sorry):
         return True
 
-    # Check for `:= sorry` pattern (term mode)
-    if re.search(r":=\s*sorry", target):
-        return False
-
-    # Default: tactic mode (by far the most common case)
-    return True
+    # `:= sorry` is term mode; everything else defaults to tactic mode,
+    # which is by far the most common shape.
+    return not re.search(r":=\s*sorry", target)
 
 
 # ---------------------------------------------------------------------------
 # Declaration finder
 # ---------------------------------------------------------------------------
 
-# Matches theorem/lemma/def/instance/example declarations
+# This bounded scanner discovers common source targets. Lean's parser validates
+# the declaration name and source range before any generated proof is accepted.
 _DECL_RE = re.compile(
-    r"^((?:private|protected|noncomputable|unsafe)\s+)*"
-    r"(theorem|lemma|def|instance|example|abbrev)\s+(\S+)?",
-    re.MULTILINE,
+    r"^\s*(?:@\[[^\]\r\n]*\]\s*)*"
+    r"(?:(?:private|protected|noncomputable|unsafe|partial|local)\s+)*"
+    r"(theorem|lemma|def|instance|example|abbrev|opaque)\b"
+    r"(?:\s+(«[^»]+»|[^\s:({\[]+))?"
 )
+_NAMESPACE_RE = re.compile(r"^\s*namespace(?:\s+([^\s]+))?\s*$")
+_SECTION_RE = re.compile(r"^\s*section(?:\s+[^\s]+)?\s*$")
+_END_RE = re.compile(r"^\s*end(?:\s+[^\s]+)?\s*$")
 
 
 def _find_enclosing_decl(lines: list[str], sorry_line: int) -> tuple[str, int]:
@@ -105,51 +107,136 @@ def _find_enclosing_decl(lines: list[str], sorry_line: int) -> tuple[str, int]:
 
     Returns (declaration_name, declaration_line_number).
     """
+    masked = _mask_lean_noncode("\n".join(lines)).split("\n")
+    name, _qualified, line = _find_enclosing_decl_details(masked, sorry_line)
+    return name, line
+
+
+def _find_enclosing_decl_details(
+    masked_lines: list[str],
+    sorry_line: int,
+) -> tuple[str, str, int]:
+    """Return local name, fully qualified name, and declaration line."""
+    scopes: list[tuple[str, str]] = []
     best_name = "<unknown>"
+    best_qualified = ""
     best_line = 1
 
-    # Build the full text once for finditer
-    full_text = "\n".join(lines)
+    for line_num, line in enumerate(masked_lines[:sorry_line], start=1):
+        namespace = _NAMESPACE_RE.match(line)
+        if namespace:
+            scopes.append(("namespace", namespace.group(1) or ""))
+            continue
+        if _SECTION_RE.match(line):
+            scopes.append(("section", ""))
+            continue
+        if _END_RE.match(line):
+            if scopes:
+                scopes.pop()
+            continue
 
-    for m in _DECL_RE.finditer(full_text):
-        # Convert character offset to line number
-        line_num = full_text[: m.start()].count("\n") + 1
-        if line_num <= sorry_line:
-            name = m.group(3) or m.group(2)  # example has no name
-            best_name = name.split(":")[0].split("(")[0].strip()  # clean up
-            best_line = line_num
+        declaration = _DECL_RE.match(line)
+        if declaration is None:
+            continue
+        kind, parsed_name = declaration.groups()
+        if kind == "example" or not parsed_name:
+            best_name = f"<{kind}@{line_num}>"
+            best_qualified = ""
         else:
-            break
+            best_name = parsed_name
+            namespaces = [name for scope, name in scopes if scope == "namespace" and name]
+            if parsed_name.startswith("_root_."):
+                best_qualified = parsed_name.removeprefix("_root_.")
+            else:
+                best_qualified = ".".join([*namespaces, parsed_name])
+        best_line = line_num
 
-    return best_name, best_line
+    return best_name, best_qualified, best_line
 
 
 # ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 
-# Match sorry token (not in comments or strings)
+# Match a sorry token in masked Lean source.
 _SORRY_RE = re.compile(r"\bsorry\b")
 
-# Simple check for single-line comments
-_COMMENT_RE = re.compile(r"--.*$")
 
+def _mask_lean_noncode(source: str) -> str:
+    """Blank comments and strings while preserving offsets and newlines.
 
-def _is_in_comment(line: str, col: int) -> bool:
-    """Check if position is inside a single-line comment."""
-    m = _COMMENT_RE.search(line)
-    return bool(m and m.start() < col)
-
-
-def _is_in_string(line: str, col: int) -> bool:
-    """Rough check if position is inside a string literal."""
-    in_string = False
+    Lean block comments nest. Keeping every source offset stable lets the
+    scanner use positions from the masked text to edit the original bytes.
+    """
+    result = list(source)
     i = 0
-    while i < min(col, len(line)):
-        if line[i] == '"' and (i == 0 or line[i - 1] != "\\"):
-            in_string = not in_string
+    block_depth = 0
+    in_string = False
+    line_comment = False
+
+    while i < len(source):
+        char = source[i]
+        pair = source[i : i + 2]
+
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            else:
+                result[i] = " "
+            i += 1
+            continue
+
+        if block_depth:
+            if pair == "/-":
+                result[i] = result[i + 1] = " "
+                block_depth += 1
+                i += 2
+                continue
+            if pair == "-/":
+                result[i] = result[i + 1] = " "
+                block_depth -= 1
+                i += 2
+                continue
+            if char != "\n":
+                result[i] = " "
+            i += 1
+            continue
+
+        if in_string:
+            if char == "\\" and i + 1 < len(source):
+                result[i] = " "
+                if source[i + 1] != "\n":
+                    result[i + 1] = " "
+                i += 2
+                continue
+            if char == '"':
+                in_string = False
+            if char != "\n":
+                result[i] = " "
+            i += 1
+            continue
+
+        if pair == "--":
+            result[i] = result[i + 1] = " "
+            line_comment = True
+            i += 2
+            continue
+        if pair == "/-":
+            result[i] = result[i + 1] = " "
+            block_depth = 1
+            i += 2
+            continue
+        if char == '"':
+            result[i] = " "
+            in_string = True
         i += 1
-    return in_string
+
+    return "".join(result)
+
+
+def count_sorries(source: str) -> int:
+    """Count actual placeholders outside Lean comments and strings."""
+    return len(_SORRY_RE.findall(_mask_lean_noncode(source)))
 
 
 CONTEXT_WINDOW = 40  # lines of context above/below sorry
@@ -167,6 +254,7 @@ def scan_file(
     """
     content = path.read_text(encoding="utf-8")
     lines = content.split("\n")
+    masked_lines = _mask_lean_noncode(content).split("\n")
     targets: list[SorryTarget] = []
 
     # Compute relative path once
@@ -177,21 +265,18 @@ def scan_file(
         except ValueError:
             rel_path = path.name
 
-    for i, line in enumerate(lines):
-        for m in _SORRY_RE.finditer(line):
+    for i, masked_line in enumerate(masked_lines):
+        for m in _SORRY_RE.finditer(masked_line):
             col = m.start()
 
-            # Skip sorry in comments and strings
-            if _is_in_comment(line, col):
-                continue
-            if _is_in_string(line, col):
-                continue
-
             line_num = i + 1  # 1-indexed
-            decl_name, decl_line = _find_enclosing_decl(lines, line_num)
+            decl_name, qualified_name, decl_line = _find_enclosing_decl_details(
+                masked_lines,
+                line_num,
+            )
 
             # Determine if sorry is in tactic mode or term mode
-            tactic = _is_tactic_mode(lines, line_num)
+            tactic = _is_tactic_mode(masked_lines, line_num)
 
             # Extract context window
             ctx_start = max(0, decl_line - 1)  # from declaration start
@@ -211,6 +296,7 @@ def scan_file(
                     context_after=context_after,
                     tactic_mode=tactic,
                     rel_path=rel_path,
+                    qualified_decl_name=qualified_name,
                 )
             )
 
@@ -242,13 +328,13 @@ _DIFFICULTY_KEYWORDS: dict[str, int] = {
     "medium": 5,
     "hard": 7,
     "advanced": 8,
-    "gromov": 9,     # open-problem territory
+    "gromov": 9,  # open-problem territory
     "conjecture": 10,
-    "veil": 6,       # distributed systems (medium-hard)
+    "veil": 6,  # distributed systems (medium-hard)
 }
 
 
-def _difficulty_score(t: SorryTarget) -> int:
+def difficulty_score(t: SorryTarget) -> int:
     """Estimate difficulty from path/name heuristics. Lower = easier."""
     name = (t.rel_path + t.decl_name).lower()
     for keyword, score in _DIFFICULTY_KEYWORDS.items():
@@ -272,8 +358,11 @@ def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
     for t in targets:
         file_counts[t.file] = file_counts.get(t.file, 0) + 1
 
-    return sorted(targets, key=lambda t: (
-        _difficulty_score(t),
-        file_counts[t.file],
-        t.line,
-    ))
+    return sorted(
+        targets,
+        key=lambda t: (
+            difficulty_score(t),
+            file_counts[t.file],
+            t.line,
+        ),
+    )

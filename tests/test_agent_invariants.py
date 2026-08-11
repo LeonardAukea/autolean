@@ -1,0 +1,223 @@
+"""Whole-agent invariants that span storage, providers, and Lean."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from autolean.agent import AutoLeanAgent
+from autolean.lean_interface import BuildResult, Diagnostic
+from autolean.llm import (
+    BaseBackend,
+    LLMConfig,
+    LLMRateLimitError,
+    LLMResponse,
+)
+from autolean.provenance import ProofEnvironment, sha256_text
+from autolean.scanner import SorryTarget
+from autolean.tracker import Outcome
+
+
+class FakeBackend(BaseBackend):
+    calls: int = 0
+    error: Exception | None = None
+    last_user: str = ""
+    text: str = "trivial"
+
+    def ping(self) -> bool:
+        return True
+
+    def generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
+    ) -> LLMResponse:
+        del system, temperature, stop
+        self.calls += 1
+        self.last_user = user
+        if self.error is not None:
+            raise self.error
+        return LLMResponse(
+            text=self.text,
+            model=self.config.model,
+            input_tokens=42,
+            output_tokens=1,
+        )
+
+
+def _project(tmp_path: Path) -> tuple[Path, Path, SorryTarget]:
+    workspace = tmp_path / "workspace"
+    source = workspace / "AutoLean" / "Target.lean"
+    source.parent.mkdir(parents=True)
+    (workspace / "lakefile.lean").write_text("import Lake\nopen Lake DSL\npackage test\n")
+    source.write_text("theorem target : True := by\n  sorry\n")
+    program = tmp_path / "program.md"
+    program.write_text(
+        "## Mode\n\nsorry-elimination\n\n"
+        "## Lean Project Path\n\nworkspace\n\n"
+        "## LLM Configuration\nmodel: gemma4:26b\n"
+        "max_retries_per_sorry: 1\nmax_cycles: 1\n"
+    )
+    target = SorryTarget(
+        file=source,
+        line=2,
+        col=2,
+        decl_name="target",
+        decl_line=1,
+        context_before="theorem target : True := by",
+        context_after="",
+        rel_path="AutoLean/Target.lean",
+        qualified_decl_name="target",
+    )
+    return program, source, target
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def _prepare_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AutoLeanAgent, FakeBackend]:
+    program, source, target = _project(tmp_path)
+    backend = FakeBackend(LLMConfig(model="test", backend="ollama"))
+    monkeypatch.setattr("autolean.agent.create_llm_client", lambda config: backend)
+    monkeypatch.setattr("autolean.agent.scan_project", lambda root: [target])
+    monkeypatch.setattr("autolean.agent.prioritize_targets", lambda targets: targets)
+    monkeypatch.setattr("autolean.search.search_relevant_lemmas", lambda goal, name: [])
+    agent = AutoLeanAgent(program, dry_run=True)
+    monkeypatch.setattr(
+        agent.project,
+        "check_file",
+        lambda *args, **kwargs: BuildResult(success=True),
+    )
+    monkeypatch.setattr(
+        agent.project,
+        "get_goal_via_hole_punch",
+        lambda *args, **kwargs: "⊢ True",
+    )
+    monkeypatch.setattr(
+        agent.project,
+        "proof_environment",
+        lambda **kwargs: ProofEnvironment(
+            sha256="a" * 64,
+            lean_version="Lean 4.33.0",
+            lean_toolchain="leanprover/lean4:v4.33.0",
+            manifest_sha256="b" * 64,
+            artifact_count=1,
+            dependencies=(),
+        ),
+    )
+    monkeypatch.setattr(
+        agent.project,
+        "validate_candidate",
+        lambda *args, **kwargs: BuildResult(
+            success=True,
+            duration_seconds=0.1,
+            axioms=(),
+        ),
+    )
+    assert source.exists()
+    return agent, backend
+
+
+def test_dry_run_preserves_the_complete_project_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    before = _snapshot(tmp_path)
+    result = agent.run()
+    assert result.successful
+    assert _snapshot(tmp_path) == before
+    assert agent.tracker.cycle == 1
+    assert agent.tracker.records[-1].outcome == Outcome.VALIDATED
+    assert agent.tracker.records[-1].environment_sha256 == "a" * 64
+
+
+def test_terminal_provider_error_stops_after_one_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    backend.error = LLMRateLimitError("weekly quota exhausted")
+    agent.config.max_cycles = 0
+    result = agent.run()
+    assert not result.successful
+    assert "weekly quota exhausted" in result.message
+    assert backend.calls == 1
+
+
+def test_dry_run_rechecks_a_prefix_after_redundant_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    backend.text = "trivial\nexact True.intro"
+    candidates: list[str] = []
+
+    def validate_candidate(_path: Path, content: str, **_kwargs: object) -> BuildResult:
+        candidates.append(content)
+        if len(candidates) == 1:
+            return BuildResult(
+                success=False,
+                diagnostics=[
+                    Diagnostic(
+                        file="AutoLean/Target.lean",
+                        line=3,
+                        col=2,
+                        severity="error",
+                        message="No goals to be solved",
+                    )
+                ],
+            )
+        return BuildResult(success=True, duration_seconds=0.1, axioms=())
+
+    monkeypatch.setattr(agent.project, "validate_candidate", validate_candidate)
+    result = agent.run()
+
+    assert result.successful
+    assert len(candidates) == 2
+    assert "exact True.intro" in candidates[0]
+    assert "exact True.intro" not in candidates[1]
+    record = agent.tracker.records[-1]
+    assert record.outcome == Outcome.VALIDATED
+    assert record.proof_sha256 == sha256_text("trivial")
+
+
+def test_program_guidance_reaches_the_model_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    agent.config.goals = ["Expose the main mathematical step."]
+    agent.config.constraints = ["Use only declarations already in scope."]
+    result = agent.run()
+    assert result.successful
+    assert "## Program Goals" in backend.last_user
+    assert "Expose the main mathematical step." in backend.last_user
+    assert "## Program Constraints" in backend.last_user
+    assert "Use only declarations already in scope." in backend.last_user
+
+
+def test_structural_context_and_prompt_identity_reach_the_experiment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+
+    result = agent.run()
+
+    assert result.successful
+    assert "## Lean source structure (advisory)" in backend.last_user
+    assert "target: theorem target" in backend.last_user
+    assert "syntax_path: declaration > theorem > by > sorry" in backend.last_user
+    record = agent.tracker.records[-1]
+    assert record.llm_input_tokens == 42
+    assert len(record.prompt_sha256) == 64
+    assert len(record.structural_context_sha256) == 64

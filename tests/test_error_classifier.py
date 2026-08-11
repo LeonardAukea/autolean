@@ -1,11 +1,10 @@
-"""Tests for autolean.error_classifier — error classification and retry hints."""
+"""Tests for error classification and retry hints."""
 
 from __future__ import annotations
 
 import pytest
 
 from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
-
 
 # ---------------------------------------------------------------------------
 # classify_error
@@ -121,9 +120,7 @@ class TestRetryHintFor:
         assert len(hint) > 0
 
     @pytest.mark.parametrize("category", list(ErrorCategory))
-    def test_all_categories_return_nonempty_string(
-        self, category: ErrorCategory
-    ) -> None:
+    def test_all_categories_return_nonempty_string(self, category: ErrorCategory) -> None:
         """Every ErrorCategory produces a non-empty retry hint."""
         hint = retry_hint_for(category, "some error message")
         assert isinstance(hint, str)

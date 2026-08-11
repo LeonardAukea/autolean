@@ -15,7 +15,6 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,7 +48,15 @@ def convert_to_gemma_tuner_format(
     Returns number of examples converted.
     """
     count = 0
-    with open(sft_jsonl) as f_in, open(output_csv, "w", newline="") as f_out:
+    with (
+        open(sft_jsonl, encoding="utf-8") as f_in,
+        open(
+            output_csv,
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as f_out,
+    ):
         writer = csv.writer(f_out)
         writer.writerow(["prompt", "response"])
 
@@ -68,20 +75,20 @@ def convert_to_gemma_tuner_format(
     return count
 
 
+def _count_lines(path: Path) -> int:
+    """Count records in a JSONL file — one example per line."""
+    with open(path, encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
 def check_finetune_readiness(training_data_dir: Path) -> FinetuneStatus:
     """Check if we have enough data to trigger fine-tuning."""
     sft_files = sorted(training_data_dir.glob("sft_*.jsonl"))
 
-    positive = 0
-    negative = 0
-    for f in sft_files:
-        for line in open(f):
-            positive += 1
+    positive = sum(_count_lines(f) for f in sft_files)
 
     dpo_files = sorted(training_data_dir.glob("dpo_*.jsonl"))
-    for f in dpo_files:
-        for line in open(f):
-            negative += 1
+    negative = sum(_count_lines(f) for f in dpo_files)
 
     latest_sft = sft_files[-1] if sft_files else None
     ready = positive >= FINETUNE_THRESHOLD
@@ -128,7 +135,7 @@ def trigger_local_finetune(
     # Check if gemma-tuner is available
     gemma_tuner = Path("gemma-tuner-multimodal")
     if gemma_tuner.exists():
-        console.print(f"[bold]Starting local fine-tuning with gemma-tuner...[/]")
+        console.print("[bold]Starting local fine-tuning with gemma-tuner...[/]")
         # Generate config
         config = {
             "model_name": base_model,
@@ -139,7 +146,7 @@ def trigger_local_finetune(
             "batch_size": 1,
         }
         config_path = training_data_dir / "gemma_tuner_config.json"
-        config_path.write_text(json.dumps(config, indent=2))
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
         console.print(f"  Config: {config_path}")
         console.print(f"  Data: {csv_path} ({n} examples)")
@@ -150,13 +157,13 @@ def trigger_local_finetune(
     # Fallback: generate Axolotl config
     console.print(f"[bold]Fine-tuning data ready ({n} examples).[/]")
     console.print(f"  Data CSV: {csv_path}")
-    console.print(f"\n  Option 1 (gemma-tuner):")
-    console.print(f"    git clone https://github.com/mattmireles/gemma-tuner-multimodal")
+    console.print("\n  Option 1 (gemma-tuner):")
+    console.print("    git clone https://github.com/mattmireles/gemma-tuner-multimodal")
     console.print(f"    cd gemma-tuner-multimodal && python finetune.py --data {csv_path}")
-    console.print(f"\n  Option 2 (Axolotl):")
-    console.print(f"    uv run autolean finetune-config --framework axolotl")
-    console.print(f"    accelerate launch -m axolotl.cli.train ...")
-    console.print(f"\n  After training, import to Ollama:")
+    console.print("\n  Option 2 (Axolotl):")
+    console.print("    uv run autolean finetune-config --framework axolotl")
+    console.print("    accelerate launch -m axolotl.cli.train ...")
+    console.print("\n  After training, import to Ollama:")
     console.print(f"    ollama create {output_name} -f Modelfile")
-    console.print(f"    uv run autolean run --model {output_name}")
+    console.print(f"    uv run autolean solve --model {output_name}")
     return True

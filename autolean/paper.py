@@ -9,18 +9,28 @@ Workflow:
 
 Text extraction strategies (tried in order):
   1. arXiv native HTML — structured theorem environments, proofs, math
-  2. pymupdf — local PDF text extraction (fallback for non-arXiv)
+  2. PyMuPDF4LLM — layout-aware PDF Markdown and selective OCR
   3. arXiv API abstract — minimal but always works
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass, field
-from html.parser import HTMLParser
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+import httpx
 from rich.console import Console
+
+from autolean.generated_code import (
+    GeneratedCodeError,
+    safe_lean_comment_text,
+    validate_generated_declarations,
+)
+from autolean.llm import GenerateFn, LLMError
 
 console = Console()
 
@@ -40,6 +50,8 @@ class Claim:
     lean_code: str = ""  # Formalized Lean 4 code
     proof_sketch: str = ""  # Proof from the paper (if available)
     kind: str = ""  # "theorem", "lemma", "definition", "proposition", etc.
+    input_ref: str = ""  # source delivered to the extractor
+    input_sha256: str = ""  # exact extractor input bytes
 
 
 # ---------------------------------------------------------------------------
@@ -49,23 +61,29 @@ class Claim:
 
 def _extract_arxiv_id(source: str) -> str | None:
     """Extract arXiv ID from a URL or raw ID string."""
-    source = source.strip().rstrip("/").removesuffix(".pdf")
+    source = source.strip().split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    source = source.removesuffix(".pdf")
     for prefix in [
-        "https://arxiv.org/abs/", "https://arxiv.org/pdf/",
-        "http://arxiv.org/abs/", "http://arxiv.org/pdf/",
+        "https://arxiv.org/abs/",
+        "https://arxiv.org/pdf/",
+        "http://arxiv.org/abs/",
+        "http://arxiv.org/pdf/",
         "https://arxiv.org/html/",
         "https://ar5iv.labs.arxiv.org/html/",
     ]:
         if source.startswith(prefix):
-            return source[len(prefix):].split("v")[0]  # strip version suffix
+            identifier = source[len(prefix) :]
+            return identifier if _is_arxiv_id(identifier) else None
 
     # Bare ID like "2604.07408" or "math/0411045"
-    if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", source):
-        return source.split("v")[0]
-    if re.match(r"^[a-z-]+/\d{7}$", source):
-        return source
+    return source if _is_arxiv_id(source) else None
 
-    return None
+
+def _is_arxiv_id(value: str) -> bool:
+    return bool(
+        re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", value)
+        or re.fullmatch(r"[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?", value)
+    )
 
 
 def fetch_arxiv(arxiv_id_or_url: str, output_dir: Path | None = None) -> Path:
@@ -80,7 +98,6 @@ def fetch_arxiv(arxiv_id_or_url: str, output_dir: Path | None = None) -> Path:
         return output_path
 
     console.print(f"  Downloading [cyan]{pdf_url}[/]...")
-    import httpx
     with httpx.stream("GET", pdf_url, follow_redirects=True, timeout=120.0) as resp:
         resp.raise_for_status()
         with open(output_path, "wb") as f:
@@ -107,22 +124,21 @@ def extract_claims_from_html(arxiv_id: str, *, timeout: float = 60.0) -> list[Cl
     Returns list of Claims with label, statement, kind, and proof_sketch.
     Returns empty list if HTML is unavailable or has no theorem environments.
     """
-    import httpx
-
-    # Try arxiv.org/html/ (native rendering — best structure)
-    for url in [
-        f"https://arxiv.org/html/{arxiv_id}v1",
-        f"https://arxiv.org/html/{arxiv_id}",
-    ]:
+    versioned = re.search(r"v\d+$", arxiv_id) is not None
+    identifiers = [arxiv_id] if versioned else [f"{arxiv_id}v1", arxiv_id]
+    for identifier in identifiers:
+        url = f"https://arxiv.org/html/{identifier}"
         console.print(f"  Fetching: [cyan]{url}[/]...")
         try:
             resp = httpx.get(url, follow_redirects=True, timeout=timeout)
             if resp.status_code == 200 and len(resp.text) > 10000:
                 claims = _parse_arxiv_html_theorems(resp.text)
                 if claims:
-                    console.print(
-                        f"  [green]Extracted {len(claims)} theorem environments from HTML[/]"
-                    )
+                    digest = hashlib.sha256(resp.content).hexdigest()
+                    for claim in claims:
+                        claim.input_ref = str(resp.url)
+                        claim.input_sha256 = digest
+                    console.print(f"  [green]Extracted {len(claims)} theorem environments from HTML[/]")
                     return claims
         except httpx.HTTPError as e:
             console.print(f"  [dim]{url}: {e}[/]")
@@ -141,143 +157,166 @@ def _parse_arxiv_html_theorems(html: str) -> list[Claim]:
     Proof blocks are separate divs that follow theorem blocks.
     We match them by proximity in the HTML.
     """
-    claims: list[Claim] = []
+    from bs4 import BeautifulSoup, Tag
 
-    # Step 1: Find all theorem blocks and their positions
-    theorem_pattern = re.compile(
-        r'<div[^>]*class="ltx_theorem\s+ltx_theorem_(\w+)"[^>]*>(.*?)</div>',
-        re.DOTALL,
-    )
-    theorem_blocks = [(m.start(), m.end(), m.group(1), m.group(2))
-                      for m in theorem_pattern.finditer(html)]
-
-    # Step 2: Find all proof blocks and their positions
-    proof_pattern = re.compile(
-        r'<div[^>]*class="ltx_proof"[^>]*>(.*?)</div>',
-        re.DOTALL,
-    )
-    proof_blocks = [(m.start(), m.end(), m.group(1))
-                    for m in proof_pattern.finditer(html)]
-
-    # Step 3: Match proofs to theorems (a proof belongs to the closest
-    # preceding theorem/lemma/proposition)
-    proof_map: dict[int, str] = {}  # theorem_index -> proof_text
-    for p_start, p_end, p_text in proof_blocks:
-        # Find the closest preceding theorem
-        best_idx = -1
-        best_dist = float("inf")
-        for i, (t_start, t_end, t_kind, t_block) in enumerate(theorem_blocks):
-            if t_end <= p_start:
-                dist = p_start - t_end
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = i
-        # Only match if proof is within ~500 chars of theorem end
-        if best_idx >= 0 and best_dist < 500:
-            proof_text = _strip_html(p_text).strip()
-            if proof_text.lower().startswith("proof"):
-                proof_text = proof_text[5:].strip().lstrip(".").strip()
-            # Remove trailing QED symbol
-            proof_text = proof_text.rstrip("∎").strip()
-            proof_map[best_idx] = proof_text
-
-    # Step 4: Build claims
-    for i, (t_start, t_end, kind, block) in enumerate(theorem_blocks):
-        # Extract label from ltx_tag
-        tag_match = re.search(
-            r'class="ltx_tag[^"]*"[^>]*>(.*?)</span>',
-            block, re.DOTALL,
-        )
-        if tag_match:
-            label = _strip_html(tag_match.group(1)).strip().rstrip(".")
+    soup = BeautifulSoup(html, "html.parser")
+    ordered: list[tuple[str, Tag, str]] = []
+    for node in soup.find_all("div"):
+        raw_classes = node.get("class")
+        if isinstance(raw_classes, str):
+            classes = {raw_classes}
+        elif raw_classes is None:
+            classes = set()
         else:
-            label = kind.capitalize()
+            classes = {str(value) for value in raw_classes}
+        theorem_class = next(
+            (name for name in classes if name.startswith("ltx_theorem_")),
+            None,
+        )
+        if "ltx_theorem" in classes and theorem_class is not None:
+            ordered.append(("theorem", node, theorem_class.removeprefix("ltx_theorem_")))
+        elif "ltx_proof" in classes:
+            ordered.append(("proof", node, ""))
 
-        # Extract statement
-        statement = _strip_html(block).strip()
-        if statement.lower().startswith(label.lower()):
-            statement = statement[len(label):].strip().lstrip(".").strip()
+    claims: list[Claim] = []
+    for index, (node_type, node, kind) in enumerate(ordered):
+        if node_type != "theorem":
+            continue
 
-        # Get matched proof
-        proof_sketch = proof_map.get(i, "")
+        proof_sketch = ""
+        for next_type, next_node, _ in ordered[index + 1 :]:
+            if next_type == "theorem":
+                break
+            proof_sketch = _html_fragment_text(next_node, remove_tags=True)
+            proof_sketch = re.sub(r"^Proof\.?\s*", "", proof_sketch, flags=re.IGNORECASE)
+            proof_sketch = proof_sketch.rstrip("∎").strip()
+            break
 
-        lean_name = _to_lean_name(label)
+        fragment = BeautifulSoup(str(node), "html.parser")
+        theorem = fragment.find("div")
+        if theorem is None:
+            continue
+        label_node = theorem.select_one(".ltx_tag")
+        label = (
+            _html_fragment_text(label_node).rstrip(".") if isinstance(label_node, Tag) else kind.capitalize()
+        )
+        if label_node is not None:
+            label_node.decompose()
+        for proof in theorem.select(".ltx_proof"):
+            proof.decompose()
+        statement = _html_fragment_text(theorem)
 
         if statement and len(statement) > 10:
-            claims.append(Claim(
-                label=label,
-                statement=statement[:1000],
-                lean_name=lean_name,
-                kind=kind,
-                proof_sketch=proof_sketch[:500] if proof_sketch else "",
-            ))
+            claims.append(
+                Claim(
+                    label=label,
+                    statement=statement[:1000],
+                    lean_name=_to_lean_name(label),
+                    kind=kind,
+                    proof_sketch=proof_sketch[:500],
+                )
+            )
 
     return claims
 
 
 def _strip_html(text: str) -> str:
     """Remove HTML tags and normalize whitespace, preserving math notation."""
-    # Replace <math> content with a placeholder that preserves the alt text
-    text = re.sub(r'<math[^>]*alttext="([^"]*)"[^>]*>.*?</math>', r' \1 ', text, flags=re.DOTALL)
-    # Replace remaining <math> with inline text
-    text = re.sub(r'<math[^>]*>(.*?)</math>', lambda m: _strip_html(m.group(1)), text, flags=re.DOTALL)
-    # Strip all remaining tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # Decode HTML entities
-    text = text.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-    text = text.replace('&#x27;', "'").replace('&quot;', '"')
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    from bs4 import BeautifulSoup
+
+    return _html_fragment_text(BeautifulSoup(text, "html.parser"))
+
+
+def _html_fragment_text(fragment: Any, *, remove_tags: bool = False) -> str:
+    """Extract normalized text while preserving LaTeX carried by MathML."""
+    from bs4 import BeautifulSoup, Tag
+
+    root = BeautifulSoup(str(fragment), "html.parser")
+    for math in root.find_all("math"):
+        assert isinstance(math, Tag)
+        alt = math.get("alttext") or math.get("alt") or math.get_text(" ", strip=True)
+        math.replace_with(f" {alt} ")
+    if remove_tags:
+        for tag in root.select(".ltx_tag"):
+            tag.decompose()
+    return " ".join(root.stripped_strings)
 
 
 # ---------------------------------------------------------------------------
-# PDF extraction (pymupdf fallback)
+# PDF extraction
 # ---------------------------------------------------------------------------
 
 
 def read_pdf(path: Path, pages: str | None = None) -> str:
-    """Extract text from a PDF file using pymupdf."""
+    """Extract layout-aware Markdown with selective OCR."""
     try:
-        import fitz  # pymupdf
-    except ImportError:
+        import pymupdf
+        import pymupdf4llm
+    except ImportError as e:
         raise ImportError(
-            "pymupdf is required for PDF reading.\n"
-            "Install it with: uv pip install pymupdf"
-        )
+            "PyMuPDF4LLM is required for PDF reading.\n"
+            "Install the layout and OCR stack with: uv sync --extra pdf"
+        ) from e
 
-    doc = fitz.open(str(path))
+    with pymupdf.open(str(path)) as document:
+        page_indices = _parse_page_selection(pages, len(document))
 
-    page_indices: list[int] = []
-    if pages:
-        for part in pages.split(","):
-            part = part.strip()
-            if "-" in part:
-                start, end = part.split("-", 1)
-                page_indices.extend(range(int(start) - 1, int(end)))
-            else:
-                page_indices.append(int(part) - 1)
-    else:
-        page_indices = list(range(len(doc)))
+    chunks = pymupdf4llm.to_markdown(
+        str(path),
+        pages=page_indices,
+        page_chunks=True,
+        show_progress=False,
+        use_ocr=True,
+        force_ocr=False,
+        write_images=False,
+        embed_images=False,
+    )
+    if not isinstance(chunks, list):
+        raise RuntimeError("PyMuPDF4LLM returned an unexpected document shape")
 
-    text_parts = []
-    for i in page_indices:
-        if 0 <= i < len(doc):
-            page = doc[i]
-            text = page.get_text("text", sort=True)
-            if text.strip():
-                text_parts.append(f"--- Page {i + 1} ---\n{text}")
+    text_parts: list[str] = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            raise RuntimeError("PyMuPDF4LLM returned a malformed page chunk")
+        metadata = chunk.get("metadata")
+        text = chunk.get("text")
+        if not isinstance(metadata, dict) or not isinstance(text, str):
+            raise RuntimeError("PyMuPDF4LLM page metadata is incomplete")
+        page_number = metadata.get("page_number")
+        if not isinstance(page_number, int):
+            raise RuntimeError("PyMuPDF4LLM omitted the page number")
+        if text.strip():
+            text_parts.append(f"--- Page {page_number} ---\n{text.strip()}")
 
-    doc.close()
     result = "\n\n".join(text_parts)
 
     if not result.strip():
         console.print(
-            "  [yellow]pymupdf extracted no text (scanned PDF?).[/]\n"
-            "  Consider using --pages to target specific pages."
+            "  [yellow]PyMuPDF4LLM extracted no text.[/]\n"
+            "  Check the OCR runtime or select relevant pages with --pages."
         )
 
     return result
+
+
+def _parse_page_selection(pages: str | None, page_count: int) -> list[int] | None:
+    """Parse one-indexed page ranges into canonical zero-indexed order."""
+    if pages is None:
+        return None
+    selected: set[int] = set()
+    for raw_part in pages.split(","):
+        part = raw_part.strip()
+        if not part:
+            raise ValueError("page selection contains an empty item")
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if match is None:
+            raise ValueError(f"invalid page selection: {part!r}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start < 1 or end < start or end > page_count:
+            raise ValueError(f"page range {part!r} is outside this {page_count}-page document")
+        selected.update(range(start - 1, end))
+    return sorted(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +357,7 @@ first, then state the theorem.
 
 def extract_claims_via_llm(
     text: str,
-    llm_generate: object,
+    llm_generate: GenerateFn,
     *,
     max_text_chars: int = 12000,
 ) -> list[Claim]:
@@ -329,17 +368,14 @@ def extract_claims_via_llm(
     console.print(f"  Sending {len(truncated):,} chars to LLM for claim extraction...")
 
     try:
-        response = llm_generate(  # type: ignore
+        response = llm_generate(
             "You are a mathematical paper analyst. Extract all theorems precisely.",
             prompt,
         )
-    except Exception as e:
+    except LLMError as e:
         error_msg = str(e).lower()
         if "timeout" in error_msg or "timed out" in error_msg:
-            console.print(
-                "[yellow]LLM timed out. Try --pages to limit input, "
-                "or use a faster model.[/]"
-            )
+            console.print("[yellow]LLM timed out. Try --pages to limit input, or use a faster model.[/]")
         else:
             console.print(f"[red]LLM error: {e}[/]")
         return []
@@ -357,7 +393,12 @@ def _smart_truncate(text: str, max_chars: int) -> str:
 
     remaining = text[first_portion:]
     theorem_keywords = [
-        "theorem", "lemma", "proposition", "corollary", "conjecture", "definition",
+        "theorem",
+        "lemma",
+        "proposition",
+        "corollary",
+        "conjecture",
+        "definition",
     ]
 
     paragraphs = remaining.split("\n\n")
@@ -390,17 +431,22 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
     # Pattern: N. [Type X.Y]: statement
     for m in re.finditer(
         r"(\d+)\.\s*\[([^\]]+)\]\s*:?\s*(.*?)(?=\n\d+\.\s*\[|$)",
-        raw, re.DOTALL,
+        raw,
+        re.DOTALL,
     ):
         label = m.group(2).strip()
         statement = m.group(3).strip()
         lean_name = _to_lean_name(label)
         kind = label.split()[0].lower() if label else "claim"
         if statement:
-            claims.append(Claim(
-                label=label, statement=statement[:500],
-                lean_name=lean_name, kind=kind,
-            ))
+            claims.append(
+                Claim(
+                    label=label,
+                    statement=statement[:500],
+                    lean_name=lean_name,
+                    kind=kind,
+                )
+            )
 
     if claims:
         return claims
@@ -411,17 +457,22 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
         r"((?:Theorem|Lemma|Proposition|Corollary|Claim|Definition|Conjecture)"
         r"(?:\s*[\d.()]+)?)"
         r":?\s*(.*?)(?=\n\d+\.\s*(?:Theorem|Lemma|Prop|Cor|Claim|Def|Conj)|$)",
-        raw, re.DOTALL | re.IGNORECASE,
+        raw,
+        re.DOTALL | re.IGNORECASE,
     ):
         label = m.group(2).strip()
         statement = m.group(3).strip()
         lean_name = _to_lean_name(label)
         kind = label.split()[0].lower() if label else "claim"
         if statement:
-            claims.append(Claim(
-                label=label, statement=statement[:500],
-                lean_name=lean_name, kind=kind,
-            ))
+            claims.append(
+                Claim(
+                    label=label,
+                    statement=statement[:500],
+                    lean_name=lean_name,
+                    kind=kind,
+                )
+            )
 
     if claims:
         return claims
@@ -444,10 +495,13 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
             statement = content
 
         if statement:
-            claims.append(Claim(
-                label=label, statement=statement[:500],
-                lean_name=_to_lean_name(label),
-            ))
+            claims.append(
+                Claim(
+                    label=label,
+                    statement=statement[:500],
+                    lean_name=_to_lean_name(label),
+                )
+            )
         i += 2
 
     return claims
@@ -480,23 +534,23 @@ def read_paper(
         paper_title = f"arXiv:{arxiv_id}"
 
         # Strategy 1: Structured HTML extraction (no LLM needed)
-        console.print(f"[bold]Strategy 1:[/] arXiv HTML structured extraction")
+        console.print("[bold]Strategy 1:[/] arXiv HTML structured extraction")
         claims = extract_claims_from_html(arxiv_id)
         if claims:
             return claims, paper_title
 
         # Strategy 2: PDF + LLM extraction
-        console.print(f"[bold]Strategy 2:[/] PDF download + LLM extraction")
+        console.print("[bold]Strategy 2:[/] PDF download + LLM extraction")
         try:
             pdf_path = fetch_arxiv(source)
             text = read_pdf(pdf_path, pages=pages)
             if text.strip():
                 return [], paper_title  # return empty claims + title; caller uses LLM
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, ImportError, httpx.HTTPError) as e:
             console.print(f"  [yellow]PDF failed: {e}[/]")
 
         # Strategy 3: arXiv abstract
-        console.print(f"[bold]Strategy 3:[/] arXiv API abstract")
+        console.print("[bold]Strategy 3:[/] arXiv API abstract")
         abstract = _fetch_arxiv_abstract(arxiv_id)
         if abstract:
             return [], paper_title
@@ -527,7 +581,7 @@ def read_paper_text(source: str, pages: str | None = None) -> tuple[str, str]:
             text = read_pdf(pdf_path, pages=pages)
             if text.strip():
                 return text, paper_title
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, ImportError, httpx.HTTPError) as e:
             console.print(f"  [yellow]PDF failed: {e}[/]")
 
         abstract = _fetch_arxiv_abstract(arxiv_id)
@@ -544,30 +598,29 @@ def read_paper_text(source: str, pages: str | None = None) -> tuple[str, str]:
 
 def _fetch_arxiv_abstract(arxiv_id: str) -> str | None:
     """Fetch paper abstract from the arXiv API."""
-    import httpx
-
-    api_url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
+    api_url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
     try:
         resp = httpx.get(api_url, timeout=30.0)
         resp.raise_for_status()
-
-        title_match = re.search(r"<title>(.*?)</title>", resp.text, re.DOTALL)
-        title = title_match.group(1).strip() if title_match else "Unknown"
-        if title == "ArXiv Query:":
-            titles = re.findall(r"<title>(.*?)</title>", resp.text, re.DOTALL)
-            title = titles[1].strip() if len(titles) > 1 else "Unknown"
-
-        summary_match = re.search(r"<summary>(.*?)</summary>", resp.text, re.DOTALL)
-        summary = summary_match.group(1).strip() if summary_match else ""
-
-        authors = re.findall(r"<name>(.*?)</name>", resp.text)
+        root = ET.fromstring(resp.content)
+        namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        entry = root.find("atom:entry", namespace)
+        if entry is None:
+            return None
+        title = " ".join((entry.findtext("atom:title", "Unknown", namespace)).split())
+        summary = " ".join((entry.findtext("atom:summary", "", namespace)).split())
+        authors = [
+            " ".join(name.text.split())
+            for name in entry.findall("atom:author/atom:name", namespace)
+            if name.text
+        ]
 
         if summary:
             text = f"Title: {title}\nAuthors: {', '.join(authors[:5])}\n\nAbstract:\n{summary}"
             console.print(f"  [green]Got abstract ({len(summary)} chars)[/]")
             return text
 
-    except Exception as e:
+    except (httpx.HTTPError, ET.ParseError) as e:
         console.print(f"  [yellow]arXiv API failed: {e}[/]")
 
     return None
@@ -580,7 +633,7 @@ def _fetch_arxiv_abstract(arxiv_id: str) -> str | None:
 
 def formalize_claim(
     claim: Claim,
-    llm_generate: object,
+    llm_generate: GenerateFn,
     system: str = "You are a Lean 4 formalization expert using Mathlib4.",
 ) -> Claim:
     """Formalize a single claim into Lean 4 code."""
@@ -596,17 +649,15 @@ def formalize_claim(
     )
 
     try:
-        response = llm_generate(system, prompt)  # type: ignore
-        code = response.text.strip()
-    except Exception as e:
+        response = llm_generate(system, prompt)
+        code = re.sub(r"^```(?:lean4?|)\s*\n?", "", response.text.strip())
+        code = re.sub(r"\n?```\s*$", "", code)
+        code = "\n".join(
+            line for line in code.splitlines() if not line.strip().startswith(("import ", "-- import"))
+        )
+        claim.lean_code = validate_generated_declarations(code)
+    except (LLMError, GeneratedCodeError) as e:
         console.print(f"  [yellow]Formalization failed for {claim.label}: {e}[/]")
-        return claim
-
-    # Clean markdown fences
-    code = re.sub(r"^```(?:lean4?|)\s*\n?", "", code)
-    code = re.sub(r"\n?```\s*$", "", code)
-
-    claim.lean_code = code.strip()
     return claim
 
 
@@ -615,54 +666,49 @@ def formalize_claim(
 # ---------------------------------------------------------------------------
 
 
-def create_verification_file(
+def render_verification_source(
     claims: list[Claim],
-    output_path: Path,
     paper_title: str = "Unknown Paper",
-) -> Path:
-    """Write a .lean file with sorry'd formalizations of paper claims."""
+) -> str:
+    """Render complete Lean source for formalized paper claims."""
+    safe_title = safe_lean_comment_text(paper_title)
     parts = [
         "/-!",
-        f"# Verification: {paper_title}",
+        f"# Verification: {safe_title}",
         "",
         "Auto-generated from paper by AutoLean verify.",
         "Each theorem corresponds to a claim in the paper.",
-        "Proofs are sorry — the agent will attempt them.",
-        "-/",
-        "",
+        "Pending theorems contain explicit sorry targets for the agent.",
     ]
+    inputs = sorted({(claim.input_ref, claim.input_sha256) for claim in claims if claim.input_sha256})
+    for reference, digest in inputs:
+        parts.append(f"Extractor input: {safe_lean_comment_text(reference or 'inline')}")
+        parts.append(f"Extractor input SHA-256: {digest}")
+    parts.extend(["-/", "", "import Mathlib", ""])
 
-    # Collect unique imports
-    imports = set()
     for c in claims:
-        for line in c.lean_code.split("\n"):
-            if line.strip().startswith("import ") or line.strip().startswith("-- import"):
-                imports.add(line.strip().removeprefix("-- "))
-
-    for imp in sorted(imports):
-        parts.append(imp)
-    if imports:
-        parts.append("")
-
-    for i, c in enumerate(claims, 1):
-        # Header comment with label and statement
-        parts.append(f"-- [{c.label}]: {c.statement[:120]}")
+        label = safe_lean_comment_text(c.label)
+        statement = safe_lean_comment_text(c.statement)
+        parts.append(f"-- [{label}]: {statement[:120]}")
         if c.proof_sketch:
-            parts.append(f"-- Proof sketch: {c.proof_sketch[:100]}...")
+            sketch = safe_lean_comment_text(c.proof_sketch)
+            parts.append(f"-- Proof sketch: {sketch[:100]}...")
 
         if c.lean_code:
+            validated_code = validate_generated_declarations(c.lean_code)
             code_lines = [
-                l for l in c.lean_code.split("\n")
-                if not l.strip().startswith("import ") and not l.strip().startswith("-- import")
+                line
+                for line in validated_code.split("\n")
+                if not line.strip().startswith(("import ", "-- import"))
             ]
             parts.append("\n".join(code_lines))
         else:
-            parts.append(f"-- Could not formalize: {c.statement[:80]}")
-            parts.append(f"-- theorem {c.lean_name} : sorry := sorry")
+            lean_name = safe_lean_comment_text(c.lean_name)
+            parts.append(f"-- Formalization pending: {statement[:80]}")
+            parts.append(f"-- theorem {lean_name} : sorry := sorry")
         parts.append("")
 
-    output_path.write_text("\n".join(parts), encoding="utf-8")
-    return output_path
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +716,7 @@ def create_verification_file(
 # ---------------------------------------------------------------------------
 
 
-def analyze_paper_structure(claims: list[Claim]) -> dict:
+def analyze_paper_structure(claims: list[Claim]) -> dict[str, Any]:
     """Analyze the structure of extracted claims.
 
     Returns a summary dict with counts by kind, proof coverage, etc.

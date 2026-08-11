@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from enum import Enum
+from enum import StrEnum
 
 
-class ErrorCategory(str, Enum):
+class ErrorCategory(StrEnum):
     """Categories of Lean build errors.
 
     Each category suggests a different retry strategy for the LLM.
@@ -31,14 +31,15 @@ class ErrorCategory(str, Enum):
     OTHER = "other"
 
 
-# Structural errors that should not be retried with LLM — the problem is
-# in the file structure, not in the proof.  Inspired by autokernel's
-# "keep workspace clean" principle: detect corruption, don't mask it.
-STRUCTURAL_ERRORS: frozenset[ErrorCategory] = frozenset({
-    ErrorCategory.DUPLICATE_DECLARATION,
-    ErrorCategory.FILE_STRUCTURE_ERROR,
-    ErrorCategory.LAKE_CONFIG_ERROR,
-})
+# Structural errors arise in imports, syntax, or declaration shape and cannot
+# be repaired by changing one proof body.
+STRUCTURAL_ERRORS: frozenset[ErrorCategory] = frozenset(
+    {
+        ErrorCategory.DUPLICATE_DECLARATION,
+        ErrorCategory.FILE_STRUCTURE_ERROR,
+        ErrorCategory.LAKE_CONFIG_ERROR,
+    }
+)
 
 
 def classify_error(message: str) -> ErrorCategory:

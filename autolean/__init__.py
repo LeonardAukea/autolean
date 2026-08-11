@@ -1,7 +1,3 @@
-"""AutoLean — Autonomous Lean 4 proof agent.
-
-Overnight sorry elimination, autoformalization, and proof golf.
-Inspired by Karpathy's autoresearch and RightNow-AI's autokernel.
-"""
+"""Sandboxed, content-addressed Lean 4 proof automation."""
 
 __version__ = "0.5.0"

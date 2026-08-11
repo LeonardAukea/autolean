@@ -6,23 +6,27 @@ import json
 from pathlib import Path
 
 from autolean.finetune import (
+    FINETUNE_THRESHOLD,
     check_finetune_readiness,
     convert_to_gemma_tuner_format,
-    FINETUNE_THRESHOLD,
 )
 
 
 class TestConvertToGemmaTuner:
-
     def test_converts_sft_to_csv(self, tmp_path: Path) -> None:
         sft = tmp_path / "sft.jsonl"
-        sft.write_text(json.dumps({
-            "messages": [
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "prove this"},
-                {"role": "assistant", "content": "rfl"},
-            ]
-        }) + "\n")
+        sft.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "prove this"},
+                        {"role": "assistant", "content": "rfl"},
+                    ]
+                }
+            )
+            + "\n"
+        )
 
         csv_path = tmp_path / "out.csv"
         n = convert_to_gemma_tuner_format(sft, csv_path)
@@ -37,12 +41,17 @@ class TestConvertToGemmaTuner:
     def test_skips_incomplete_messages(self, tmp_path: Path) -> None:
         sft = tmp_path / "sft.jsonl"
         # Only 2 messages, not 3
-        sft.write_text(json.dumps({
-            "messages": [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"},
-            ]
-        }) + "\n")
+        sft.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": "hello"},
+                    ]
+                }
+            )
+            + "\n"
+        )
 
         csv_path = tmp_path / "out.csv"
         n = convert_to_gemma_tuner_format(sft, csv_path)
@@ -50,7 +59,6 @@ class TestConvertToGemmaTuner:
 
 
 class TestCheckFinetuneReadiness:
-
     def test_not_ready_when_empty(self, tmp_path: Path) -> None:
         td = tmp_path / "training_data"
         td.mkdir()
@@ -65,11 +73,18 @@ class TestCheckFinetuneReadiness:
         # Write FINETUNE_THRESHOLD examples
         with open(sft, "w") as f:
             for i in range(FINETUNE_THRESHOLD):
-                f.write(json.dumps({"messages": [
-                    {"role": "system", "content": "s"},
-                    {"role": "user", "content": f"q{i}"},
-                    {"role": "assistant", "content": f"a{i}"},
-                ]}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "messages": [
+                                {"role": "system", "content": "s"},
+                                {"role": "user", "content": f"q{i}"},
+                                {"role": "assistant", "content": f"a{i}"},
+                            ]
+                        }
+                    )
+                    + "\n"
+                )
 
         status = check_finetune_readiness(td)
         assert status.ready

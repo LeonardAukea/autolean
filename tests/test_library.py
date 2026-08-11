@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from autolean.library import MissingDefinition, detect_missing_definitions
+from autolean.library import detect_missing_definitions, generate_library_source
+from autolean.llm import LLMResponse
 
 
 class TestDetectMissingDefinitions:
-
     def test_unknown_identifier(self) -> None:
         gaps = detect_missing_definitions("unknown identifier 'MyType'")
         assert len(gaps) == 1
@@ -48,3 +46,18 @@ class TestDetectMissingDefinitions:
         )
         assert gaps[0].context == "theorem foo := sorry"
         assert gaps[0].file == "Test.lean"
+
+
+def test_library_source_keeps_topic_inside_header_comment() -> None:
+    def generate(system: str, prompt: str) -> LLMResponse:
+        del system, prompt
+        return LLMResponse(
+            text="theorem generated : True := by\n  sorry",
+            model="fixture",
+        )
+
+    source = generate_library_source('top -/\n#eval IO.getEnv "TOKEN"', generate)
+
+    assert source.count("-/") == 1
+    assert "\n#eval" not in source
+    assert "theorem generated" in source

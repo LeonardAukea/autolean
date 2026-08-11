@@ -1,11 +1,12 @@
 # AutoLean Program
 
-> This file is your interface to the AutoLean agent. Edit it to steer what the agent
-> works on overnight. The agent reads this file at startup and follows the goals below.
+> This file configures one AutoLean run. Typed settings and generated-code
+> policy are enforced. Goals, constraints, and strategy hints are advisory
+> context included in every model request.
 
 ## Mode
 
-<!-- Pick ONE: sorry-elimination | autoformalize | proof-golf -->
+<!-- The autonomous agent supports sorry-elimination. -->
 sorry-elimination
 
 ## Lean Project Path
@@ -17,19 +18,14 @@ workspace
 
 <!-- Describe what you want the agent to accomplish. Be specific. -->
 
-1. Find all `sorry` placeholders in .lean files under the project.
-2. For each sorry, attempt to fill in a valid proof.
-3. Prioritize sorries in files with fewer remaining sorries (low-hanging fruit first).
-4. If a sorry cannot be resolved after 5 attempts, skip it and move to the next.
+1. Produce complete proofs for the selected `sorry` targets.
+2. Prefer proofs that expose the mathematical argument clearly.
 
 ## Constraints
 
-- Do NOT modify any import statements.
-- Do NOT add new dependencies to lakefile.lean.
-- Do NOT delete existing theorems or definitions.
-- Do NOT change theorem statements — only fill in proofs.
-- Keep proofs readable: prefer named tactics over term-mode when possible.
-- Maximum proof length: 30 lines per sorry.
+- Preserve imports, dependencies, declarations, and theorem statements exactly.
+- Return only the proof body for the selected placeholder.
+- Keep proofs readable and prefer named tactics where they clarify intent.
 
 ## Strategy Hints
 
@@ -39,19 +35,33 @@ workspace
 - For goals involving natural numbers, try `omega` or `Nat.recAux`.
 - For algebraic goals, try `ring` or `field_simp` then `ring`.
 - For logical goals, try `tauto` or `aesop`.
-- If the goal has hypotheses, try `exact h`, `assumption`, or `contradiction`.
+- When a hypothesis exactly matches the goal, try `exact h` or `assumption`.
 - For inductive types, try `cases` or `induction` on the relevant variable.
-- When automation fails, decompose: `constructor`, `intro`, `apply`, then recurse.
+- When automation fails, decompose with `constructor`, `intro`, and `apply`.
 
 ## LLM Configuration
 
-<!-- Which Ollama model to use -->
-model: gemma4:26b
-temperature: 0.4
+<!--
+Run `autolean models` to see every profile and its local setup state.
+Subscription profiles include fable, opus, sonnet, codex, codex-terra, and
+codex-luna. Hosted profiles append `-api`. Local profiles include muse-glimmer,
+gemma4, and deepseek-prover. A raw model string also works, for example
+`gemma4:26b`.
+
+backend: overrides the profile's backend with one of
+claude_cli, codex_cli, anthropic, openai, ollama, openai_compat, muse_glimmer.
+endpoint: optional HTTP base URL for a self-hosted inference server.
+effort: optional reasoning-depth override for capable models.
+temperature: sampling value for backends that advertise support.
+-->
+model: opus
+temperature: 0.0
 max_retries_per_sorry: 5
 cycle_timeout_seconds: 120
+llm_timeout_seconds: 600
+max_proof_lines: 30
 
 ## Experiment Budget
 
-<!-- Stop after this many total cycles (0 = unlimited, run until interrupted) -->
+<!-- A zero budget runs until interrupted. -->
 max_cycles: 0
