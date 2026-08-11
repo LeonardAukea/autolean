@@ -30,7 +30,7 @@ theorem twin_prime_3 : IsTwinPrime 3 := by trivial
 theorem twin_prime_5 : IsTwinPrime 5 := by trivial
 
 -- Sub-result 3
-theorem twin_prime_11 : IsTwinPrime 11 := by sorry
+theorem twin_prime_11 : IsTwinPrime 11 := by trivial
 
 -- References
 -- https://en.wikipedia.org/wiki/Twin_prime
