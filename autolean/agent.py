@@ -13,6 +13,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
 from autolean.error_classifier import (
     STRUCTURAL_ERRORS,
@@ -93,6 +94,7 @@ class AgentRunResult:
 # Common Lean tactic keywords for detecting tactic-like lines
 _TACTIC_KEYWORDS = {
     "simp",
+    "simpa",
     "ring",
     "omega",
     "decide",
@@ -1127,12 +1129,16 @@ class AutoLeanAgent:
         if proof_lines <= 5 or self.verbose:
             console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
             for pline in proof.splitlines()[:12]:
-                console.print(f"    [cyan]{pline}[/]")
+                console.print(Text(f"    {pline}", style="cyan"))
             if proof_lines > 12:
                 console.print(f"    [dim]... ({proof_lines - 12} more lines)[/]")
         else:
             first = proof.splitlines()[0].strip()
-            console.print(f"  [bold]Proof[/] ({proof_lines} lines): [cyan]{first}[/] ...")
+            summary = Text("  Proof", style="bold")
+            summary.append(f" ({proof_lines} lines): ")
+            summary.append(first, style="cyan")
+            summary.append(" ...")
+            console.print(summary)
 
         # Construct the candidate without changing the accepted source.
         try:

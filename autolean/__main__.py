@@ -29,6 +29,14 @@ if TYPE_CHECKING:
 
 console = Console()
 
+AUTOLEAN_BANNER = r"""
+ ______     __  __     ______   ______     __         ______     ______     __   __
+/\  __ \   /\ \/\ \   /\__  _\ /\  __ \   /\ \       /\  ___\   /\  __ \   /\ "-.\ \
+\ \  __ \  \ \ \_\ \  \/_/\ \/ \ \ \/\ \  \ \ \____  \ \  __\   \ \  __ \  \ \ \-.  \
+ \ \_\ \_\  \ \_____\    \ \_\  \ \_____\  \ \_____\  \ \_____\  \ \_\ \_\  \ \_\\"\_\
+  \/_/\/_/   \/_____/     \/_/   \/_____/   \/_____/   \/_____/   \/_/\/_/   \/_/ \/_/
+""".strip("\n")
+
 DEFAULT_LEAN_TOOLCHAIN = "leanprover/lean4:v4.33.0"
 LEAN_LIBRARY_RELEASE = "v4.33.0"
 
@@ -81,6 +89,12 @@ COMMAND_SECTIONS = (
 
 class AutoLeanGroup(click.Group):
     """Click group with stable aliases and task-oriented help sections."""
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        if ctx.parent is None:
+            banner = click.style(AUTOLEAN_BANNER, fg="cyan", bold=True)
+            formatter.write(f"{banner}\n\n")
+        super().format_help(ctx, formatter)
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         return super().get_command(ctx, COMMAND_ALIASES.get(cmd_name, cmd_name))

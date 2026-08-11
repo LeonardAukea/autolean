@@ -89,6 +89,23 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  dependency-review:
+    name: Dependency review
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+          github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
   nix:
     name: Lean and Nix closure
     runs-on: ubuntu-24.04
@@ -104,6 +121,27 @@ jobs:
           df -h /
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Check workflows and local documentation links
+        run: |
+          nix develop . --command actionlint .github/workflows/*.yml
+          nix develop . --command cffconvert --validate -i CITATION.cff
+          nix develop . --command lychee --offline --include-fragments \
+            README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs
+      - name: Check repository boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracked_runtime="$(git ls-files -- \
+            workspace/.overnight.pid \
+            'workspace/AutoLean/Generated/**' \
+            workspace/AutoLean/UserTheorems.lean \
+            'workspace/skills/*.json' \
+            'workspace/training_data/**' \
+            'workspace/workspace/**')"
+          if test -n "$tracked_runtime"; then
+            printf 'mutable runtime state is tracked:\n%s\n' "$tracked_runtime"
+            exit 1
+          fi
       - name: Install host sandbox
         run: |
           sudo apt-get update
@@ -193,6 +231,34 @@ jobs:
             <(cd "$build_root/first" && sha256sum ./* | sort) \
             <(cd "$build_root/second" && sha256sum ./* | sort)
           mv "$build_root/first" dist
+      - name: Audit source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdist="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          while IFS= read -r member; do
+            case "$member" in
+              */.beads/* | \
+              */.claude/* | \
+              */.codedb/* | \
+              */.reviews/* | \
+              */.sentrux/* | \
+              */codedb.snapshot | \
+              */docs/assets/* | \
+              */workspace/.autolean/* | \
+              */workspace/.lake/* | \
+              */workspace/AutoLean/Generated/* | \
+              */workspace/AutoLean/UserTheorems.lean | \
+              */workspace/logs/* | \
+              */workspace/skills/* | \
+              */workspace/training_data/* | \
+              */workspace/workspace/*)
+                echo "source distribution contains $member"
+                exit 1
+                ;;
+            esac
+          done < <(tar -tzf "$sdist")
       - name: Test the built wheel
         shell: bash
         run: |
@@ -211,7 +277,7 @@ jobs:
   required:
     name: Required
     if: ${{ !cancelled() }}
-    needs: [python, security, nix, package]
+    needs: [python, security, dependency-review, nix, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -221,14 +287,23 @@ jobs:
           PACKAGE_RESULT: ${{ needs.package.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
           test "$PYTHON_RESULT" = success
           test "$SECURITY_RESULT" = success
           test "$NIX_RESULT" = success
           test "$PACKAGE_RESULT" = success
+          if test "$EVENT_NAME" = pull_request \
+            && test "$REPOSITORY_VISIBILITY" = public; then
+            test "$DEPENDENCY_REVIEW_RESULT" = success
+          else
+            test "$DEPENDENCY_REVIEW_RESULT" = skipped
+          fi
 
   release:
-    name: Private GitHub release
+    name: GitHub release
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: [required]
     runs-on: ubuntu-24.04

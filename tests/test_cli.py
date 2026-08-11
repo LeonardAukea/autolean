@@ -13,7 +13,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from autolean.__main__ import _run_agent, main
+from autolean.__main__ import AUTOLEAN_BANNER, _run_agent, main
 from autolean.routing import EscalationPolicy
 
 PYTHAGOREAN_FORMALIZATION = (
@@ -125,6 +125,7 @@ class TestCLIBasics:
     def test_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["--help"])
         assert result.exit_code == 0
+        assert result.output.startswith(AUTOLEAN_BANNER)
         assert "prove" in result.output
         assert "verify" in result.output
         assert "solve" in result.output
@@ -136,6 +137,13 @@ class TestCLIBasics:
         assert "improve" in result.output
         assert "Proof workflows" in result.output
         assert "Understand" in result.output
+
+    def test_help_colors_the_banner_in_a_terminal(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--help"], color=True)
+
+        assert result.exit_code == 0
+        assert result.output.startswith("\x1b[36m\x1b[1m")
+        assert AUTOLEAN_BANNER in result.output
 
     def test_run_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["solve", "--help"])
@@ -170,6 +178,7 @@ class TestCLIBasics:
     def test_prove_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["prove", "--help"])
         assert result.exit_code == 0
+        assert AUTOLEAN_BANNER not in result.output
         assert "STATEMENT" in result.output
         assert "--max-attempts" in result.output
         assert "--formalization-repairs" in result.output

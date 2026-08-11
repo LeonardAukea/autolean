@@ -37,6 +37,11 @@ class TestCleanLlmProof:
         """A provider may wrap a one-word proof in inline Markdown."""
         assert clean_llm_proof("`trivial`") == "trivial"
 
+    def test_simpa_proof_is_preserved(self) -> None:
+        proof = "simpa [pow_two] using norm_add_sq_eq_norm_sq_add_norm_sq_real h"
+
+        assert clean_llm_proof(proof) == proof
+
     def test_leading_by_stripped_in_tactic_mode(self) -> None:
         """A leading `by` is stripped when tactic_mode=True."""
         raw = "by\n  simp"

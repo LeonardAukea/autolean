@@ -877,11 +877,17 @@ def read_paper(
         console.print("[bold]Strategy 1:[/] arXiv HTML structured extraction")
         claims = extract_claims_from_html(arxiv_id)
         if claims:
+            pdf_path: Path | None = None
+            try:
+                pdf_path = fetch_arxiv(source)
+            except (OSError, httpx.HTTPError) as error:
+                console.print(f"  [yellow]Native PDF unavailable: {error}[/]")
             return PaperDocument(
                 title=paper_title,
                 claims=claims,
                 input_ref=claims[0].input_ref,
                 input_sha256=claims[0].input_sha256,
+                pdf_path=pdf_path,
                 extractor="arxiv-html",
             )
 

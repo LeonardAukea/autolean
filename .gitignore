@@ -22,6 +22,13 @@ progress.md
 *.log
 workspace/logs/
 .overnight.pid
+workspace/.codedb/
+workspace/training_data/
+workspace/skills/*.json
+workspace/AutoLean/Generated/
+workspace/AutoLean/UserTheorems.lean
+workspace/AutoLean/Challenge_*.lean
+workspace/workspace/
 
 # Lean build artifacts (in workspace)
 workspace/**/build/
@@ -36,12 +43,16 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Beads local database state
+# Beads task state
+.beads/
 .dolt/
-.beads/*.db
 .beads-credential-key
-.beads/proxieddb/
 
 # Local review and structural-analysis reports
 .reviews/
 .sentrux/
+
+# Local agent and code-intelligence state
+.claude/settings.local.json
+.codedb/
+codedb.snapshot

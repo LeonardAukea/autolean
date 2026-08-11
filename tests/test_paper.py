@@ -21,6 +21,7 @@ from autolean.paper import (
     _parse_page_selection,
     extract_document_claims,
     materialize_paper,
+    read_paper,
     read_pdf,
     render_verification_source,
 )
@@ -158,6 +159,28 @@ def test_lightpanda_arxiv_fetch_blocks_private_networks(
     assert "--disable-subframes" in arguments
     assert "--obey-robots" in arguments
     assert html.startswith("<html>")
+
+
+def test_structured_arxiv_extraction_keeps_the_native_pdf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF fixture")
+    claim = Claim(
+        label="Theorem 1",
+        statement="Every proposition implies itself.",
+        input_ref="https://arxiv.org/html/2606.07588v1",
+        input_sha256="a" * 64,
+    )
+    monkeypatch.setattr("autolean.paper.extract_claims_from_html", lambda _: [claim])
+    monkeypatch.setattr("autolean.paper.fetch_arxiv", lambda _: pdf)
+
+    document = read_paper("https://arxiv.org/html/2606.07588v1")
+
+    assert document.extractor == "arxiv-html"
+    assert document.claims == [claim]
+    assert document.pdf_path == pdf
 
 
 def test_html_parser_handles_nested_blocks_and_math_alttext() -> None:

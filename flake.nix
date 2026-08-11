@@ -465,14 +465,18 @@
           name = "autolean";
           packages =
             (with pkgs; [
+              actionlint
+              cffconvert
               cvc5
               curl
               jq
+              lychee
               ollama
               ripgrep
               tmux
               tesseract
               uv
+              vhs
               z3
               zstd
             ])
