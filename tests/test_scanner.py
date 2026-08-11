@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from autolean.scanner import (
-    SorryTarget,
     _find_enclosing_decl,
     _is_tactic_mode,
+    count_sorries,
     prioritize_targets,
     scan_file,
 )
-
 
 # ---------------------------------------------------------------------------
 # scan_file
@@ -54,19 +51,71 @@ class TestScanFile:
         names = [t.decl_name for t in targets]
         assert names == ["t1", "t2", "t3"]
 
-    def test_rel_path_populated_with_project_root(
-        self, lean_file_one_sorry: Path, tmp_path: Path
-    ) -> None:
+    def test_rel_path_populated_with_project_root(self, lean_file_one_sorry: Path, tmp_path: Path) -> None:
         targets = scan_file(lean_file_one_sorry, project_root=tmp_path)
         assert len(targets) == 1
         assert targets[0].rel_path == "One.lean"
 
-    def test_rel_path_empty_without_project_root(
-        self, lean_file_one_sorry: Path
-    ) -> None:
+    def test_rel_path_empty_without_project_root(self, lean_file_one_sorry: Path) -> None:
         targets = scan_file(lean_file_one_sorry)
         assert len(targets) == 1
         assert targets[0].rel_path == ""
+
+    def test_nested_block_comments_and_multiline_strings_are_masked(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "Masked.lean"
+        source.write_text(
+            "/- outer sorry /- nested sorry -/ done -/\n"
+            'def message := "first line\nsorry in a string"\n'
+            "namespace Outer\n"
+            "theorem actual : True := by\n"
+            "  sorry\n"
+            "end Outer\n",
+            encoding="utf-8",
+        )
+
+        targets = scan_file(source)
+
+        assert len(targets) == 1
+        assert targets[0].decl_name == "actual"
+        assert targets[0].qualified_decl_name == "Outer.actual"
+        assert count_sorries(source.read_text()) == 1
+
+    def test_quoted_declaration_name_is_qualified(self, tmp_path: Path) -> None:
+        source = tmp_path / "Quoted.lean"
+        source.write_text(
+            "namespace Outer\nsection\ntheorem «name with spaces» : True := by\n  sorry\nend\nend Outer\n",
+            encoding="utf-8",
+        )
+
+        target = scan_file(source)[0]
+
+        assert target.decl_name == "«name with spaces»"
+        assert target.qualified_decl_name == "Outer.«name with spaces»"
+
+    def test_attribute_prefixed_declaration_is_the_audit_target(self, tmp_path: Path) -> None:
+        source = tmp_path / "Attributed.lean"
+        source.write_text(
+            "theorem preceding : True := by\n  trivial\n\n@[simp] theorem attributed : True := by\n  sorry\n",
+            encoding="utf-8",
+        )
+
+        target = scan_file(source)[0]
+
+        assert target.decl_name == "attributed"
+        assert target.qualified_decl_name == "attributed"
+        assert target.decl_line == 4
+
+    def test_anonymous_example_has_no_auditable_name(self, tmp_path: Path) -> None:
+        source = tmp_path / "Example.lean"
+        source.write_text("example : True := by\n  sorry\n", encoding="utf-8")
+
+        target = scan_file(source)[0]
+
+        assert target.decl_name == "<example@1>"
+        assert target.qualified_decl_name == ""
 
 
 # ---------------------------------------------------------------------------

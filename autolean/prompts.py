@@ -14,11 +14,25 @@ placeholders with valid proofs.
 6. Do NOT use `sorry` in your output — that defeats the purpose.
 7. Do NOT use `native_decide` unless the type is decidable and small.
 8. Do NOT add imports — work with what is already imported.
+9. Do NOT invent tactic names. Only use tactics that exist in Lean 4 + Mathlib.
+10. Do NOT add `import` or `open` statements — output ONLY tactics.
+11. Stop as soon as every goal is closed. Never append a tactic after a closer.
+
+## CRITICAL: Tactics That DO NOT Exist
+
+Never use these — they look plausible but will cause "unknown tactic" errors:
+- `field_norm` (use `field_simp; ring`)
+- `nat_cast` (doesn't exist)
+- `finish` (doesn't exist — this is not Isabelle)
+- `tidy` (doesn't exist — this is not Lean 3)
+- `library_search` (use `exact?` in Lean 4, but DO NOT output it)
+- `suggest` (doesn't exist)
+- `hint` (doesn't exist)
 
 ## Tactic Cheat Sheet (try in this order)
 
 - Trivial closers: `trivial`, `rfl`, `decide`, `norm_num`
-- Arithmetic: `omega`, `ring`, `field_simp; ring`, `positivity`
+- Arithmetic: `omega`, `ring`, `field_simp; ring`, `positivity`, `linarith`, `norm_cast`, `push_cast`
 - Simplification: `simp`, `simp [lemma]`, `simp_all`
 - Logic: `tauto`, `aesop`, `contradiction`, `exact absurd h₁ h₂`
 - Structure: `constructor`, `intro h`, `obtain ⟨a, b⟩ := h`

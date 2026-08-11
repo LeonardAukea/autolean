@@ -1,129 +1,89 @@
-"""The autonomous agent loop — the heart of AutoLean.
-
-Inspired by Karpathy's autoresearch and RightNow-AI's autokernel:
-  edit → build → evaluate → keep/revert → log → repeat
-
-All LLM inference is LOCAL (Ollama at localhost). No external LLM APIs.
-External tool calls are limited to:
-  - Loogle/LeanSearch (database lookups for mathlib lemmas)
-  - lake build (Lean compiler verification)
-"""
+"""Autonomous Lean 4 proof search with sandboxed candidate acceptance."""
 
 from __future__ import annotations
 
+import logging
 import re
 import signal
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
-from autolean.error_classifier import ErrorCategory, classify_error, retry_hint_for
-from autolean.lean_interface import FAST_TACTICS, STANDARD_TACTICS, LeanProject
-from autolean.llm_client import LLMBackend, LLMConfig, create_llm_client
+from autolean.error_classifier import (
+    STRUCTURAL_ERRORS,
+    ErrorCategory,
+    classify_error,
+    retry_hint_for,
+)
+from autolean.generated_code import (
+    GeneratedCodeError,
+    validate_generated_closed_declarations,
+    validate_generated_proof,
+)
+from autolean.lean_interface import (
+    COMPOUND_TACTICS,
+    FAST_TACTICS,
+    STANDARD_TACTICS,
+    BuildResult,
+    LeanProject,
+)
+from autolean.llm import (
+    LLMAuthenticationError,
+    LLMBackend,
+    LLMError,
+    LLMRateLimitError,
+    LLMTransientError,
+    create_llm_client,
+)
+from autolean.program import parse_program
 from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
-from autolean.scanner import SorryTarget, prioritize_targets, scan_project
-from autolean.tracker import ExperimentRecord, ExperimentTracker, Outcome
+from autolean.proof_loop import (
+    EscalationDecision,
+    EscalationRouter,
+    ModelTransition,
+    ProofContextBuilder,
+)
+from autolean.provenance import ProofEnvironmentError, sha256_text
+from autolean.scanner import (
+    SorryTarget,
+    count_sorries,
+    difficulty_score,
+    prioritize_targets,
+    scan_project,
+)
+from autolean.structure import LeanStructureProvider
+from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
 
 console = Console()
+log = logging.getLogger("autolean")
 
 # Temperature escalation per retry attempt (capped at 1.0)
 TEMP_ESCALATION_STEP = 0.1
 TEMP_MAX = 1.0
 
-# Maximum proof lines before we reject without building
-DEFAULT_MAX_PROOF_LINES = 50
+# Skip a target after this many consecutive failures in one error category.
+MAX_REPEATED_ERRORS = 3
+MAX_REDUNDANT_TAIL_REPAIRS = 3
 
 
-# ---------------------------------------------------------------------------
-# Program.md parser
-# ---------------------------------------------------------------------------
+def _has_redundant_tail(build: BuildResult) -> bool:
+    """Return whether Lean rejected only a tactic after all goals closed."""
+    errors = build.errors
+    return len(errors) == 1 and "No goals to be solved" in errors[0].message
 
 
-@dataclass
-class ProgramConfig:
-    """Parsed configuration from program.md."""
+@dataclass(frozen=True)
+class AgentRunResult:
+    """Terminal status for one agent invocation."""
 
-    mode: str = "sorry-elimination"
-    lean_project_path: str = "workspace"
-    model: str = "gemma4:26b"
-    temperature: float = 0.4
-    max_retries_per_sorry: int = 5
-    cycle_timeout_seconds: int = 120
-    max_cycles: int = 0  # 0 = unlimited
-    max_proof_lines: int = DEFAULT_MAX_PROOF_LINES
-    goals: list[str] = field(default_factory=list)
-    constraints: list[str] = field(default_factory=list)
-    strategy_hints: list[str] = field(default_factory=list)
-
-
-def parse_program(path: Path) -> ProgramConfig:
-    """Parse a program.md file into structured config."""
-    content = path.read_text(encoding="utf-8")
-    cfg = ProgramConfig()
-
-    # Extract mode
-    mode_match = re.search(r"## Mode\s*\n.*?\n(\S+)", content)
-    if mode_match:
-        cfg.mode = mode_match.group(1).strip()
-
-    # Extract lean project path
-    path_match = re.search(r"## Lean Project Path\s*\n.*?\n(\S+)", content)
-    if path_match:
-        cfg.lean_project_path = path_match.group(1).strip()
-
-    # Extract LLM config key: value pairs
-    def _extract_kv(key: str, default: str) -> str:
-        m = re.search(rf"{key}:\s*(\S+)", content)
-        return m.group(1) if m else default
-
-    cfg.model = _extract_kv("model", cfg.model)
-
-    try:
-        cfg.temperature = float(_extract_kv("temperature", str(cfg.temperature)))
-    except ValueError:
-        pass
-    try:
-        cfg.max_retries_per_sorry = int(_extract_kv("max_retries_per_sorry", str(cfg.max_retries_per_sorry)))
-    except ValueError:
-        pass
-    try:
-        cfg.cycle_timeout_seconds = int(_extract_kv("cycle_timeout_seconds", str(cfg.cycle_timeout_seconds)))
-    except ValueError:
-        pass
-    try:
-        cfg.max_cycles = int(_extract_kv("max_cycles", str(cfg.max_cycles)))
-    except ValueError:
-        pass
-
-    # Extract list sections
-    def extract_list(header: str) -> list[str]:
-        pattern = rf"## {header}\s*\n.*?\n((?:\d+\..*?\n?)+)"
-        m = re.search(pattern, content, re.DOTALL)
-        if m:
-            return [
-                line.strip().lstrip("0123456789.-) ").strip()
-                for line in m.group(1).strip().split("\n")
-                if line.strip() and not line.strip().startswith("<!--")
-            ]
-        return []
-
-    cfg.goals = extract_list("Goals")
-    cfg.constraints = extract_list("Constraints")
-
-    # Extract strategy hints (using - prefix)
-    hints_match = re.search(r"## Strategy Hints\s*\n.*?\n((?:- .*?\n?)+)", content, re.DOTALL)
-    if hints_match:
-        cfg.strategy_hints = [
-            line.strip().lstrip("- ").strip()
-            for line in hints_match.group(1).strip().split("\n")
-            if line.strip().startswith("-")
-        ]
-
-    return cfg
+    successful: bool
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -133,17 +93,76 @@ def parse_program(path: Path) -> ProgramConfig:
 
 # Common Lean tactic keywords for detecting tactic-like lines
 _TACTIC_KEYWORDS = {
-    "simp", "ring", "omega", "decide", "norm_num", "trivial", "rfl",
-    "exact", "apply", "intro", "intros", "constructor", "cases", "rcases",
-    "induction", "have", "let", "show", "calc", "conv", "rw", "rewrite",
-    "unfold", "dsimp", "field_simp", "push_neg", "contradiction",
-    "exfalso", "assumption", "tauto", "aesop", "linarith", "positivity",
-    "ext", "funext", "use", "exists", "obtain", "refine", "by_contra",
-    "by_cases", "split", "left", "right", "next", "case", "first",
-    "try", "repeat", "all_goals", "any_goals", "focus",
-    "by", "do", "return", "match", "if", "then", "else", "where",
-    "|", "·", ".", "<;>",
+    "simp",
+    "simpa",
+    "ring",
+    "omega",
+    "decide",
+    "norm_num",
+    "trivial",
+    "rfl",
+    "exact",
+    "apply",
+    "intro",
+    "intros",
+    "constructor",
+    "cases",
+    "rcases",
+    "induction",
+    "have",
+    "let",
+    "show",
+    "calc",
+    "conv",
+    "rw",
+    "rewrite",
+    "unfold",
+    "dsimp",
+    "field_simp",
+    "push_neg",
+    "contradiction",
+    "exfalso",
+    "assumption",
+    "tauto",
+    "aesop",
+    "linarith",
+    "positivity",
+    "ext",
+    "funext",
+    "use",
+    "exists",
+    "obtain",
+    "refine",
+    "by_contra",
+    "by_cases",
+    "split",
+    "left",
+    "right",
+    "next",
+    "case",
+    "first",
+    "try",
+    "repeat",
+    "all_goals",
+    "any_goals",
+    "focus",
+    "by",
+    "do",
+    "return",
+    "match",
+    "if",
+    "then",
+    "else",
+    "where",
+    "|",
+    "·",
+    ".",
+    "<;>",
 }
+_WRAPPED_PROOF = re.compile(
+    r"^\s*(?:theorem|lemma|example)\b.*?:=\s*by\b(?P<body>.*)$",
+    re.DOTALL,
+)
 
 
 def _is_tactic_line(line: str) -> bool:
@@ -162,9 +181,43 @@ def _is_tactic_line(line: str) -> bool:
     if stripped.startswith("|") or stripped.startswith("·"):
         return True
     # Lines with := or => are likely tactic fragments
-    if ":=" in stripped or "=>" in stripped:
-        return True
-    return False
+    return ":=" in stripped or "=>" in stripped
+
+
+def _unwrap_markdown_code(text: str) -> str:
+    """Remove a Markdown wrapper around one Lean completion."""
+    fenced = re.search(r"```(?:lean4?|)\s*\n(.*?)```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    inline = re.fullmatch(r"`([^`\r\n]+)`", text)
+    if inline:
+        return inline.group(1).strip()
+    text = re.sub(r"^```(?:lean4?|)\s*\n?", "", text)
+    return re.sub(r"\n?```\s*$", "", text)
+
+
+def _strip_blank_edges(lines: list[str]) -> list[str]:
+    """Remove blank lines at both edges while preserving proof indentation."""
+    start = next((index for index, line in enumerate(lines) if line.strip()), len(lines))
+    end = next(
+        (index for index, line in enumerate(reversed(lines)) if line.strip()),
+        len(lines),
+    )
+    return lines[start : len(lines) - end]
+
+
+def _trim_explanatory_prose(lines: list[str]) -> list[str]:
+    """Keep the tactic-shaped suffix of a prose-prefixed completion."""
+    if not lines or _is_tactic_line(lines[0]):
+        return lines
+    tactic_start = next(
+        (index for index, line in enumerate(lines) if line.strip() and _is_tactic_line(line)),
+        len(lines),
+    )
+    tactics = lines[tactic_start:]
+    while tactics and not _is_tactic_line(tactics[-1]):
+        tactics.pop()
+    return tactics
 
 
 def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
@@ -182,44 +235,18 @@ def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
         tactic_mode: If True, the sorry is inside a `by` block, so
             a leading `by` in the output should be stripped.
     """
-    text = raw.strip()
+    text = _unwrap_markdown_code(raw.strip())
 
-    # Strategy 1: If there's a fenced code block, extract it
-    fenced = re.search(r"```(?:lean4?|)\s*\n(.*?)```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-    else:
-        # Remove partial fences
-        text = re.sub(r"^```(?:lean4?|)\s*\n?", "", text)
-        text = re.sub(r"\n?```\s*$", "", text)
+    wrapped = _WRAPPED_PROOF.match(text)
+    if wrapped:
+        body = wrapped.group("body")
+        text = body.lstrip("\r\n") if body.startswith(("\r", "\n")) else body.lstrip(" \t")
 
-    # Remove leading/trailing blank lines
-    lines = text.split("\n")
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    # Strategy 2: If lines mix English and tactics, extract only tactic lines
-    # Detect if the output starts with English prose (not a tactic keyword)
-    if lines and not _is_tactic_line(lines[0]):
-        # Find the first tactic-like line
-        tactic_start = None
-        for i, line in enumerate(lines):
-            if _is_tactic_line(line) and line.strip():
-                tactic_start = i
-                break
-        if tactic_start is not None:
-            lines = lines[tactic_start:]
-        # Trim trailing English text
-        while lines and not _is_tactic_line(lines[-1]):
-            lines.pop()
+    lines = _trim_explanatory_prose(_strip_blank_edges(text.split("\n")))
 
     # Strip leading `by` only in tactic mode (sorry is already inside `by`)
     if tactic_mode and lines and lines[0].strip() == "by":
-        lines = lines[1:]
-        while lines and not lines[0].strip():
-            lines.pop(0)
+        lines = _strip_blank_edges(lines[1:])
 
     return "\n".join(lines)
 
@@ -240,13 +267,20 @@ class AutoLeanAgent:
         verbose: bool = False,
         resume: bool = False,
         target_filter: str | None = None,
+        target_file: Path | None = None,
+        confirm_escalation: Callable[[EscalationDecision], bool] | None = None,
     ):
         self.program_path = program_path.resolve()
         self.dry_run = dry_run
         self.verbose = verbose
         self.resume = resume
         self.target_filter = target_filter  # Only process targets matching this decl_name
+        self.target_file = target_file.resolve() if target_file is not None else None
         self._interrupted = False
+        self._terminal_failure: str | None = None
+        self._consecutive_llm_errors = 0
+        self._environment_sha256 = ""
+        self._model_router = EscalationRouter(confirm_escalation)
 
         # Parse program.md
         self.config = parse_program(self.program_path)
@@ -255,42 +289,69 @@ class AutoLeanAgent:
         lean_root = self.program_path.parent / self.config.lean_project_path
         self.project = LeanProject(lean_root)
 
-        # Initialize LLM client via backend factory (P3.4)
-        llm_cfg = LLMConfig(
-            model=self.config.model,
-            temperature=self.config.temperature,
-        )
-        self.llm: LLMBackend = create_llm_client(llm_cfg)
+        # Backend chosen by program.md; overridable by the caller afterwards.
+        self.llm: LLMBackend = create_llm_client(self.config.llm_config())
 
         # Initialize tracker
-        self.tracker = ExperimentTracker(project_root=self.project.root)
+        self.tracker = ExperimentTracker(
+            project_root=self.project.root,
+            persist=not self.dry_run,
+        )
 
         # Track attempts per target
         self._attempts: dict[str, int] = {}
         self._failed_proofs: dict[str, list[str]] = {}
         self._last_error: dict[str, tuple[ErrorCategory, str]] = {}
 
-        # Cache goal states per target (P0.3: avoids double builds)
+        # Consecutive equal error categories stop an unproductive target.
+        self._error_history: dict[str, list[ErrorCategory]] = {}
+
+        # File health cache: files known to have structural (non-sorry) errors.
+        # Targets in these files are skipped until the file is repaired.
+        self._unhealthy_files: dict[Path, str] = {}  # file -> reason
+
+        # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
-        self._search_cache: dict[str, str] = {}  # lemma search results per target
+        self._prompt_sha256: dict[str, str] = {}
+        self._structural_context_sha256: dict[str, str] = {}
+        self._indexed_context_sha256: dict[str, str] = {}
+        self._strategy_sha256: dict[str, str] = {}
+        self._response_input_tokens: dict[str, int] = {}
+        self.structure = LeanStructureProvider()
+        self.proof_context = ProofContextBuilder(self.project.root, self._step)
 
         # Track initial sorry count for coverage metric
         self._initial_sorry_count: int = 0
 
-        # P3.3: Resume state
+        # Target identities already accepted by a persisted session.
         self._proved_ids: set[str] = set()
 
         # Self-improving loop: data collection + skill memory
         from autolean.collector import TrainingDataCollector
         from autolean.skills import SkillMemory
-        self.collector = TrainingDataCollector(
-            output_dir=self.project.root / "training_data"
-        )
+
+        self.collector = TrainingDataCollector(output_dir=self.project.root / "training_data")
         self.skill_memory = SkillMemory(
-            skills_dir=self.project.root / "skills"
+            skills_dir=self.project.root / "skills",
+            persist=not self.dry_run,
         )
 
-    # -- Resume loading (P3.3) ----------------------------------------------
+    def close(self) -> None:
+        """Release the backend owned by this agent."""
+        self.llm.close()
+
+    @property
+    def model_transitions(self) -> tuple[ModelTransition, ...]:
+        """Return the authorized model switches made by this invocation."""
+        return self._model_router.transitions
+
+    def __enter__(self) -> AutoLeanAgent:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # -- Resume loading -----------------------------------------------------
 
     def _load_resume_state(self) -> None:
         """Load attempt counts and proved IDs from a previous results.tsv."""
@@ -300,7 +361,7 @@ class AutoLeanAgent:
             console.print("[yellow]No results.tsv found — starting fresh.[/]")
             return
 
-        with open(self.tracker.results_file) as f:
+        with open(self.tracker.results_file, encoding="utf-8") as f:
             reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
                 tid = row.get("target_id", "")
@@ -319,6 +380,90 @@ class AutoLeanAgent:
             f"{len(self._attempts)} attempted from previous session.[/]"
         )
 
+    # -- File health --------------------------------------------------------
+
+    def _check_file_health(self, lean_file: Path) -> str | None:
+        """Check if a file has non-sorry structural errors.
+
+        Returns None if the file is healthy (only sorry warnings),
+        or an error description if the file is structurally broken.
+
+        This prevents wasting LLM retries on targets in corrupted files
+        (e.g., imports inserted mid-file by gap-filling).
+        """
+        if lean_file in self._unhealthy_files:
+            return self._unhealthy_files[lean_file]
+
+        result = self.project.check_file(lean_file, timeout=60, untrusted=True)
+        for diag in result.errors:
+            cat = classify_error(diag.message)
+            if cat in STRUCTURAL_ERRORS:
+                reason = f"{cat.value}: {diag.message[:120]}"
+                self._unhealthy_files[lean_file] = reason
+                return reason
+        return None
+
+    def _should_bail_repeated_error(self, target_id: str) -> bool:
+        """Return whether one failure category exhausted its retry budget."""
+        history = self._error_history.get(target_id, [])
+        if len(history) < MAX_REPEATED_ERRORS:
+            return False
+        # Check if the last N errors are all the same category
+        recent = history[-MAX_REPEATED_ERRORS:]
+        return len(set(recent)) == 1
+
+    def _record_error_category(self, target_id: str, category: ErrorCategory) -> None:
+        """Track error category for repeated-error detection."""
+        self._error_history.setdefault(target_id, []).append(category)
+
+    def _consider_model_escalation(
+        self,
+        target: SorryTarget,
+        record: ExperimentRecord,
+    ) -> None:
+        """Offer or perform one evidence-backed model switch."""
+        route = self._model_router.route(
+            target_id=target.id,
+            outcome=record.outcome.value,
+            category=record.error_category,
+            policy=self.config.escalation_policy,
+            current_model=self.llm.config.model,
+            current_backend=self.llm.config.backend,
+            difficulty=difficulty_score(target),
+            after_failures=self.config.escalation_after_failures,
+            explicit_target=self.config.escalation_model,
+            endpoint=self.config.endpoint,
+            timeout=self.config.llm_timeout_seconds,
+            max_output_tokens=self.config.max_output_tokens,
+            effort=self.config.effort,
+            create_backend=create_llm_client,
+        )
+        if route.decision is not None:
+            console.print(
+                Panel(
+                    f"Current:  {route.decision.from_model} ({route.decision.from_backend})\n"
+                    f"Next:     {route.decision.to_model} ({route.decision.to_backend})\n"
+                    f"Evidence: {route.decision.reason}",
+                    title="Model escalation",
+                    border_style="yellow",
+                )
+            )
+        if route.notice:
+            console.print(f"[yellow]{route.notice}[/]")
+        if route.backend is None or route.transition is None:
+            return
+        assert route.decision is not None
+        previous = self.llm
+        self.llm = route.backend
+        previous.close()
+        self.config.model = route.decision.to_profile
+        self.config.backend = route.decision.to_backend
+        self._consecutive_llm_errors = 0
+        console.print(
+            f"[bold cyan]Model switched:[/] {route.transition.from_model} → "
+            f"{route.transition.to_model}; the total attempt budget is unchanged."
+        )
+
     # -- Signal handling ----------------------------------------------------
 
     def _handle_interrupt(self, signum: int, frame: object) -> None:
@@ -326,32 +471,49 @@ class AutoLeanAgent:
             console.print("\n[red]Force quit.[/]")
             raise SystemExit(1)
         self._interrupted = True
-        console.print(
-            "\n[yellow]Interrupt received. Finishing current cycle, then stopping...[/]"
-        )
+        console.print("\n[yellow]Interrupt received. Finishing current cycle, then stopping...[/]")
 
     # -- Core loop ----------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self) -> AgentRunResult:
         """Main entry point — the autonomous loop."""
-        import logging
         from autolean.tracker import setup_logging
 
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
-        # Setup structured logging (audit trail)
-        log_file = setup_logging(self.project.root / "logs", verbose=self.verbose)
-        log = logging.getLogger("autolean")
-        log.info("Config: model=%s temp=%.2f retries=%d timeout=%ds",
-                 self.config.model, self.config.temperature,
-                 self.config.max_retries_per_sorry, self.config.cycle_timeout_seconds)
+        try:
+            self.config.validate()
+        except ValueError as e:
+            message = f"Invalid agent configuration: {e}"
+            console.print(f"[red]{message}[/]")
+            return AgentRunResult(False, message)
+
+        try:
+            environment = self.project.proof_environment()
+        except (OSError, ProofEnvironmentError) as e:
+            message = f"Proof environment identification failed: {e}"
+            console.print(f"[red]{message}[/]")
+            return AgentRunResult(False, message)
+        self._environment_sha256 = environment.sha256
+
+        if not self.dry_run:
+            setup_logging(self.project.root / "logs", verbose=self.verbose)
+        llm_cfg = self.llm.config
+        log.info(
+            "Config: model=%s backend=%s retries=%d timeout=%ds",
+            llm_cfg.model,
+            llm_cfg.backend,
+            self.config.max_retries_per_sorry,
+            self.config.cycle_timeout_seconds,
+        )
 
         console.print(
             Panel(
                 f"[bold]AutoLean Agent[/]\n"
                 f"Mode:             {self.config.mode}\n"
-                f"Model:            {self.config.model}\n"
+                f"Model:            {llm_cfg.model}  [dim]({llm_cfg.backend})[/dim]\n"
                 f"Project:          {self.project.root}\n"
+                f"Environment:      sha256:{environment.sha256[:16]}\n"
                 f"Max retries:      {self.config.max_retries_per_sorry}\n"
                 f"Max cycles:       {self.config.max_cycles or '∞'}\n"
                 f"Self-correction:  [green]ON[/green] (error-informed retries)\n"
@@ -362,59 +524,69 @@ class AutoLeanAgent:
             )
         )
 
-        # Check LLM connectivity
-        if not self.llm.ping():
-            console.print("[red]Cannot connect to Ollama. Is it running?[/]")
-            console.print(f"  Expected: {self.llm.config.base_url}")
-            console.print(f"  Model: {self.llm.config.model}")
-            console.print("\n  Try: ollama serve &")
-            return
+        try:
+            connected = self.llm.ping()
+        except LLMError as e:
+            message = f"Backend preflight failed: {e}"
+            console.print(f"[red]{message}[/]")
+            return AgentRunResult(False, message)
+        if not connected:
+            message = f"Backend '{llm_cfg.backend}' did not pass preflight for model '{llm_cfg.model}'."
+            console.print(f"[red]{message}[/]")
+            console.print("  Run [cyan]autolean models[/] to see what is ready.")
+            return AgentRunResult(False, message)
 
-        console.print("[green]LLM connected.[/]")
+        console.print("[green]Backend preflight passed.[/]")
 
         # Setup git branch
         if not self.dry_run:
             try:
                 self.tracker.setup_branch()
-            except Exception as e:
-                console.print(f"[yellow]Git branch setup: {e}[/]")
+            except GitError as e:
+                message = f"Git branch setup failed: {e}"
+                console.print(f"[red]{message}[/]")
+                return AgentRunResult(False, message)
 
-        # Initial build check
-        console.print("\n[bold]Initial build check...[/]")
-        with console.status("[dim]Building...", spinner="dots"):
-            build = self.project.build(timeout=self.config.cycle_timeout_seconds)
-        if not build.success:
-            n_errors = len(build.errors)
-            console.print(
-                f"[yellow]Project has {n_errors} build error(s) before we start.[/]"
-            )
-            if self.verbose:
-                for d in build.errors[:5]:
-                    console.print(f"  {d}")
-        else:
-            console.print(f"[green]Project builds clean ({build.duration_seconds:.1f}s).[/]")
-
-        # P0.4: Scan ONCE before the loop (not every cycle)
+        # Rescan only a file whose accepted source changes.
         targets = scan_project(self.project.root)
         targets = prioritize_targets(targets)
 
         # Apply target filter (from `prove` command or --target flag)
         if self.target_filter:
-            targets = [
-                t for t in targets
-                if self.target_filter in t.decl_name or self.target_filter in t.id
-            ]
+            targets = [t for t in targets if self.target_filter == t.decl_name or self.target_filter == t.id]
             console.print(
-                f"\n[cyan]Target filter:[/] '{self.target_filter}' — "
-                f"{len(targets)} matching target(s)."
+                f"\n[cyan]Target filter:[/] '{self.target_filter}' — {len(targets)} matching target(s)."
             )
+        if self.target_file is not None:
+            targets = [target for target in targets if target.file.resolve() == self.target_file]
+            console.print(f"\n[cyan]Target file:[/] {self.target_file.name} — {len(targets)} target(s).")
 
         self._initial_sorry_count = len(targets)
         console.print(f"\n[bold]Found {len(targets)} sorry target(s).[/]")
 
         if not targets:
             console.print("[green]No sorries found — nothing to do![/]")
-            return
+            return AgentRunResult(True)
+
+        # Every target source is elaborated inside the generated-code sandbox.
+        # Direct Lean invocation writes compiler artifacts only to scratch.
+        target_files = sorted({target.file.resolve() for target in targets})
+        console.print("\n[bold]Initial sandboxed Lean check...[/]")
+        for target_file in target_files:
+            with console.status(f"[dim]Checking {target_file.name}...", spinner="dots"):
+                build = self.project.check_file(
+                    target_file,
+                    timeout=self.config.cycle_timeout_seconds,
+                    untrusted=True,
+                )
+            if not build.success:
+                detail = build.stderr or (str(build.errors[0]) if build.errors else "unknown error")
+                console.print(f"[red]Sandboxed Lean check failed for {target_file.name}:[/] {detail[:300]}")
+                return AgentRunResult(
+                    False,
+                    f"Sandboxed Lean check failed for {target_file.name}: {detail[:300]}",
+                )
+        console.print(f"[green]{len(target_files)} target file(s) checked.[/]")
 
         for t in targets[:10]:
             mode_label = "tactic" if t.tactic_mode else "term"
@@ -425,36 +597,63 @@ class AutoLeanAgent:
         # -- Deterministic tactic pre-search (before LLM) -------------------
         # Try standard tactics on all targets. This instantly solves trivial
         # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
-        console.print(f"\n[bold]Tactic pre-search ({len(FAST_TACTICS)} fast tactics)...[/]")
+        # Fast tactics precede the more expensive compound tactics.
+        extra_standard = [t for t in STANDARD_TACTICS if t not in FAST_TACTICS]
+        all_presearch = [*FAST_TACTICS, *extra_standard, *COMPOUND_TACTICS]
+        if self.dry_run:
+            # Pre-search keeps whatever it proves, which a dry run must not do.
+            console.print("\n[yellow]DRY RUN — skipping tactic pre-search.[/]")
+            all_presearch = []
+        else:
+            console.print(
+                f"\n[bold]Tactic pre-search ({len(all_presearch)} tactics: "
+                f"{len(FAST_TACTICS)} fast + {len(extra_standard)} standard + "
+                f"{len(COMPOUND_TACTICS)} compound)...[/]"
+            )
         presearch_proved = 0
-        presearch_targets = list(targets)  # copy to iterate while modifying
+        presearch_targets = (
+            [target for target in targets if target.qualified_decl_name] if all_presearch else []
+        )
         for t in presearch_targets:
             if self._interrupted:
                 break
-            self._step(f"Trying standard tactics on {t.decl_name}...")
+            self._step(f"Trying {len(all_presearch)} tactics on {t.decl_name}...")
             tactic = self.project.try_tactics_fast(
-                t.file, t.line, t.col,
-                tactics=FAST_TACTICS,
+                t.file,
+                t.line,
+                t.col,
+                tactics=all_presearch,
                 timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
             )
             if tactic:
                 # Apply the winning tactic permanently
                 original = self.project.read_file(t.file)
                 new_content = self.project.replace_sorry_at(
-                    t.file, t.line, tactic, original_content=original
+                    t.file,
+                    t.line,
+                    tactic,
+                    original_content=original,
+                    col=t.col,
                 )
-                self.project.write_file(t.file, new_content)
-                presearch_proved += 1
-                console.print(
-                    f"  [bold green]PROVED (tactic search):[/bold green] "
-                    f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
+                audit = self.project.validate_candidate(
+                    t.file,
+                    new_content,
+                    timeout=self.config.cycle_timeout_seconds,
+                    declaration=t.qualified_decl_name,
+                    declaration_line=t.line,
+                    expected_environment=self._environment_sha256,
                 )
-
+                if not audit.success:
+                    detail = audit.stderr or (
+                        audit.errors[0].message if audit.errors else "axiom audit failed"
+                    )
+                    self._step(f"Tactic proof rejected: {detail[:160]}", "red")
+                    continue
                 # Record as success
                 cycle = self.tracker.next_cycle()
                 record = ExperimentRecord(
                     cycle=cycle,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     target_id=t.id,
                     decl_name=t.decl_name,
                     file=str(t.file.relative_to(self.project.root)),
@@ -465,9 +664,39 @@ class AutoLeanAgent:
                     llm_tokens=0,
                     llm_tok_per_sec=0.0,
                     proof_length=len(tactic.splitlines()),
+                    environment_sha256=self._environment_sha256,
+                    proof_sha256=sha256_text(tactic),
+                    axioms=",".join(audit.axioms) if audit.axioms else "none",
+                    model="deterministic-tactic-search",
+                    backend="lean",
                 )
+                try:
+                    self.project.write_file(
+                        t.file,
+                        new_content,
+                        expected_content=original,
+                    )
+                    self.tracker.commit_success(record)
+                except (GitError, OSError) as e:
+                    try:
+                        self.project.write_file(
+                            t.file,
+                            original,
+                            expected_content=new_content,
+                        )
+                    except OSError as restore_error:
+                        message = f"Could not accept tactic proof: {e}; rollback stopped: {restore_error}"
+                        console.print(f"[red]{message}[/]")
+                        return AgentRunResult(False, message)
+                    message = f"Could not accept tactic proof: {e}"
+                    console.print(f"[red]{message}[/]")
+                    return AgentRunResult(False, message)
+                presearch_proved += 1
                 self.tracker.log(record)
-                self.tracker.commit_success(record)
+                console.print(
+                    f"  [bold green]PROVED (tactic search):[/bold green] "
+                    f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
+                )
 
                 # Self-improving loop
                 self.collector.record_attempt(record, tactic)
@@ -475,40 +704,35 @@ class AutoLeanAgent:
                     theorem_name=t.decl_name,
                     theorem_statement=t.context_before[:200],
                     proof=tactic,
-                    goal_state="",
                 )
 
                 # Remove from targets
                 targets = [x for x in targets if x.id != t.id]
 
         if presearch_proved:
-            console.print(
-                f"\n[green]Tactic pre-search proved {presearch_proved} target(s).[/green]"
-            )
+            console.print(f"\n[green]Tactic pre-search proved {presearch_proved} target(s).[/green]")
             # Rescan affected files
             affected_files = {t.file for t in presearch_targets if t.id not in {x.id for x in targets}}
             for f in affected_files:
                 targets = [t for t in targets if t.file != f]
                 from autolean.scanner import scan_file
+
                 new_targets = scan_file(f, project_root=self.project.root)
                 targets.extend(new_targets)
             targets = prioritize_targets(targets)
             self._initial_sorry_count = len(targets) + presearch_proved
         else:
-            console.print(f"[dim]  No targets solved by standard tactics.[/dim]")
+            console.print("[dim]  No targets solved by standard tactics.[/dim]")
 
         if not targets:
             console.print("[green]All targets solved by tactic pre-search![/]")
             self._print_final_report(targets, time.monotonic())
-            return
+            return AgentRunResult(True)
 
-        # P3.3: Resume from previous session
+        # Restore target state from a persisted session.
         if self.resume:
             self._load_resume_state()
-            proved_ids = {
-                tid for tid, attempts in self._attempts.items()
-                if tid in self._proved_ids
-            }
+            proved_ids = {tid for tid, attempts in self._attempts.items() if tid in self._proved_ids}
             targets = [t for t in targets if t.id not in proved_ids]
             console.print(
                 f"[cyan]Resumed:[/] {len(proved_ids)} already proved, "
@@ -516,27 +740,28 @@ class AutoLeanAgent:
             )
 
         # -- Main loop ------------------------------------------------------
-        console.print(f"\n[bold green]Starting autonomous loop...[/]\n")
+        console.print("\n[bold green]Starting autonomous loop...[/]\n")
         session_start = time.monotonic()
 
+        run_cycles = 0
         while not self._interrupted:
-            cycle = self.tracker.next_cycle()
-
-            # Check cycle budget
-            if self.config.max_cycles > 0 and cycle > self.config.max_cycles:
+            # The cycle budget belongs to this invocation. The tracker keeps a
+            # monotonic experiment number across resumed runs.
+            if self.config.max_cycles > 0 and run_cycles >= self.config.max_cycles:
                 console.print(f"\n[yellow]Reached max_cycles ({self.config.max_cycles}). Stopping.[/]")
                 break
+            cycle = self.tracker.next_cycle()
+            run_cycles += 1
 
-            # P0.4: Filter active targets from persistent list (no rescan)
+            # Retry state filters the stable target set for this epoch.
             active_targets = [
-                t for t in targets
-                if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
+                t for t in targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
             ]
 
             if not active_targets:
                 if self.config.max_cycles == 0 and targets:
-                    # Overnight mode: reset retry counts and start a new epoch.
-                    # Bump temperature slightly for variety in new epoch.
+                    # Overnight mode resets bounded target histories for a new
+                    # experiment epoch. Backend sampling policy stays stable.
                     epoch = max(self._attempts.values()) // self.config.max_retries_per_sorry + 1
                     console.print(
                         f"\n[cyan]Epoch {epoch}:[/] All retries exhausted. "
@@ -547,13 +772,9 @@ class AutoLeanAgent:
                         self._failed_proofs.pop(t.id, None)
                         self._last_error.pop(t.id, None)
                         self._goal_cache.pop(t.id, None)
-                    self.config.temperature = min(
-                        self.config.temperature + 0.05, 1.0
-                    )
+                        self._error_history.pop(t.id, None)
                     continue
-                console.print(
-                    f"\n[green]All targets either proved or exhausted retries. Done![/]"
-                )
+                console.print("\n[green]All targets either proved or exhausted retries. Done![/]")
                 break
 
             target = active_targets[0]
@@ -568,14 +789,14 @@ class AutoLeanAgent:
             record = self._try_fill_sorry(cycle, target, attempt_num)
             self.tracker.log(record)
 
-            # On success, rescan the modified file (line numbers may have shifted
-            # due to multi-line proof insertion) and update the target list.
-            if record.outcome == Outcome.SUCCESS:
+            # Accepted proof and gap edits can shift every later source line.
+            if record.outcome in (Outcome.SUCCESS, Outcome.GAP_FILLED):
                 changed_file = target.file
                 # Remove ALL targets from the changed file
                 targets = [t for t in targets if t.file != changed_file]
                 # Rescan just that file for remaining sorrys
                 from autolean.scanner import scan_file
+
                 new_targets = scan_file(changed_file, project_root=self.project.root)
                 targets.extend(new_targets)
                 targets = prioritize_targets(targets)
@@ -587,18 +808,17 @@ class AutoLeanAgent:
             # -- Rich status output --
             summary = self.tracker.summary()
             proved = summary.get("success", 0)
-            remaining = len([
-                t for t in targets
-                if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
-            ])
+            remaining = len(
+                [t for t in targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry]
+            )
             elapsed = time.monotonic() - session_start
             rate = proved / (elapsed / 3600) if elapsed > 0 else 0
             coverage = proved / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
 
             # Outcome with color
-            if record.outcome == Outcome.SUCCESS:
+            if record.outcome in (Outcome.SUCCESS, Outcome.VALIDATED):
                 icon, style = "✓", "bold green"
-            elif record.outcome == Outcome.SKIPPED:
+            elif record.outcome in (Outcome.SKIPPED, Outcome.GAP_FILLED):
                 icon, style = "→", "yellow"
             else:
                 icon, style = "✗", "red"
@@ -610,7 +830,7 @@ class AutoLeanAgent:
             )
 
             # Show build error details (DX improvement)
-            if record.error_summary and record.outcome != Outcome.SUCCESS:
+            if record.error_summary and record.outcome in FAILURE_OUTCOMES:
                 err_lines = record.error_summary.strip().split("\n")
                 for eline in err_lines[:4]:
                     console.print(f"    [dim red]{eline[:120]}[/dim red]")
@@ -629,46 +849,115 @@ class AutoLeanAgent:
                 f"{rate:.1f}/hr | "
                 f"{elapsed / 60:.0f}m elapsed"
             )
+            self._consider_model_escalation(target, record)
 
         # -- Session complete — full report -----------------------------------
         self._print_final_report(targets, session_start)
+        if self._terminal_failure is not None:
+            return AgentRunResult(False, self._terminal_failure)
+        if self._interrupted:
+            return AgentRunResult(False, "Agent interrupted before completion.")
+        return AgentRunResult(True)
 
     # -- Single sorry attempt -----------------------------------------------
 
     def _step(self, msg: str, style: str = "dim") -> None:
-        """Print a timestamped agent step — always visible for full observability."""
+        """Print a timestamped agent step."""
         from datetime import datetime
+
         ts = datetime.now().strftime("%H:%M:%S")
         console.print(f"  [dim]{ts}[/dim] [{style}]{msg}[/{style}]")
 
-    def _try_fill_sorry(
-        self, cycle: int, target: SorryTarget, attempt: int
-    ) -> ExperimentRecord:
+    def _try_fill_sorry(self, cycle: int, target: SorryTarget, attempt: int) -> ExperimentRecord:
         """Try to fill a single sorry target. Returns the experiment record."""
         t0 = time.monotonic()
         file_path = target.file
         original_content = self.project.read_file(file_path)
+
+        if not target.qualified_decl_name:
+            self._attempts[target.id] = self.config.max_retries_per_sorry
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.SKIPPED,
+                error_summary="A named declaration is required for the axiom audit",
+                error_category="axiom_audit_unavailable",
+            )
+
+        # -- Pre-flight: structural error bail-out --------------------------
+        # A proof body cannot repair a structural error in its source file.
+        file_issue = self._check_file_health(file_path)
+        if file_issue:
+            self._step(f"SKIP: file has structural error: {file_issue[:80]}", "red")
+            # Exhaust retries so the loop moves on
+            self._attempts[target.id] = self.config.max_retries_per_sorry
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.SKIPPED,
+                error_summary=f"File structural error: {file_issue}",
+                error_category=classify_error(file_issue).value,
+            )
+
+        # Repeated failures in one category exhaust this target early.
+        if self._should_bail_repeated_error(target.id):
+            history = self._error_history.get(target.id, [])
+            repeated_cat = history[-1].value if history else "unknown"
+            self._step(
+                f"SKIP: same error ({repeated_cat}) repeated {MAX_REPEATED_ERRORS}x — bailing out",
+                "red",
+            )
+            self._attempts[target.id] = self.config.max_retries_per_sorry
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.SKIPPED,
+                error_summary=f"Repeated error bail-out: {repeated_cat} x{MAX_REPEATED_ERRORS}",
+                error_category=repeated_cat,
+            )
 
         # -- Step 1: Build context for LLM ----------------------------------
         self._step(f"Reading {file_path.name}:{target.line} ({target.decl_name})")
         lines = original_content.split("\n")
         start = max(0, target.decl_line - 1)
         end = min(len(lines), target.line + 20)
-        file_context = "\n".join(
-            f"{i + start + 1:4d} | {l}" for i, l in enumerate(lines[start:end])
+        file_context = "\n".join(f"{i + start + 1:4d} | {text}" for i, text in enumerate(lines[start:end]))
+
+        structural = self.structure.inspect(
+            file_path,
+            original_content,
+            line=target.line,
+            col=target.col,
+            declaration_name=target.decl_name,
+        )
+        structural_text = structural.render()
+        self._structural_context_sha256[target.id] = structural.sha256
+        file_context += f"\n\n{structural_text}"
+        self._step(
+            f"Structure: {structural.quality.value}, "
+            f"{len(structural.referenced_declarations)} local references",
+            "cyan" if structural.target is not None else "yellow",
         )
 
-        # P0.2 + P0.3: Get goal state via hole-punch (cached per target)
+        # Extract the goal once for this exact target source.
         if target.id not in self._goal_cache:
             self._step("Extracting goal state (hole-punch: sorry -> ?_)")
             with console.status("[dim]Extracting goal state...", spinner="dots"):
                 self._goal_cache[target.id] = self.project.get_goal_via_hole_punch(
-                    file_path, target.line, target.col,
+                    file_path,
+                    target.line,
+                    target.col,
                     timeout=self.config.cycle_timeout_seconds,
                 )
-            if self._goal_cache[target.id]:
-                goal_preview = self._goal_cache[target.id].replace("\n", " ")[:100]
-                self._step(f"Goal: {goal_preview}", "cyan")
+            cached_goal = self._goal_cache[target.id]
+            if cached_goal:
+                self._step(f"Goal: {cached_goal.replace(chr(10), ' ')[:100]}", "cyan")
             else:
                 self._step("Goal state unavailable (will infer from context)", "yellow")
         else:
@@ -678,7 +967,7 @@ class AutoLeanAgent:
         # Store context for training data collection
         self.collector.set_context(target.id, goal_state or "", file_context)
 
-        # Format failed attempts with error-informed hints (P2.3)
+        # Failed candidates and diagnostics guide the next request.
         prev_fails = self._failed_proofs.get(target.id, [])
         if prev_fails:
             self._step(f"Self-correction: {len(prev_fails)} previous failures inform this attempt", "yellow")
@@ -695,56 +984,41 @@ class AutoLeanAgent:
         else:
             failed_str = "(none)"
 
+        guidance: list[str] = []
+        if self.config.goals:
+            goals = "\n".join(f"- {goal}" for goal in self.config.goals)
+            guidance.append(f"## Program Goals\n{goals}")
+        if self.config.constraints:
+            constraints = "\n".join(f"- {constraint}" for constraint in self.config.constraints)
+            guidance.append(f"## Program Constraints\n{constraints}")
+        if guidance:
+            file_context += "\n\n" + "\n\n".join(guidance)
+
         # Add strategy hints to context
         hints = "\n".join(f"- {h}" for h in self.config.strategy_hints)
         if hints:
             file_context += f"\n\n## Strategy Hints\n{hints}"
 
-        # Inject learned skills (Hermes-inspired self-improving loop)
-        skill_injection = self.skill_memory.get_prompt_injection(
-            goal_state or file_context, max_skills=5
-        )
+        # Reusable successful patterns augment the request context.
+        skill_injection = self.skill_memory.get_prompt_injection(goal_state or file_context, max_skills=5)
         if skill_injection:
-            n_skills = skill_injection.count("**")  // 2
+            n_skills = skill_injection.count("**") // 2
             self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
 
-        # Search mathlib + arXiv for relevant lemmas/research (database lookups, NOT LLMs)
-        if attempt == 1:  # only search on first attempt (cached for retries)
-            from autolean.search import (
-                search_relevant_lemmas, format_search_results_for_prompt,
-                search_arxiv, format_arxiv_for_prompt,
-            )
-            self._step("Searching mathlib (Loogle + LeanSearch)...")
-            search_results = search_relevant_lemmas(
-                goal_state or "", target.decl_name,
-            )
-            search_context_parts = []
-            if search_results:
-                self._step(f"Found {len(search_results)} relevant lemmas", "cyan")
-                for r in search_results[:3]:
-                    self._step(f"  {r.name}: {r.type_sig[:60]}", "dim")
-                search_context_parts.append(format_search_results_for_prompt(search_results))
-            else:
-                self._step("No relevant lemmas found in mathlib", "dim")
-
-            # For research-level targets, also search arXiv
-            from autolean.scanner import _difficulty_score
-            if _difficulty_score(target) >= 7:  # hard or research
-                self._step("Searching arXiv for relevant research...")
-                papers = search_arxiv(target.decl_name.replace("_", " "), max_results=2)
-                if papers:
-                    self._step(f"Found {len(papers)} relevant papers", "cyan")
-                    for p in papers:
-                        self._step(f"  {p['title'][:70]}", "dim")
-                    search_context_parts.append(format_arxiv_for_prompt(papers))
-
-            if search_context_parts:
-                combined = "\n\n".join(search_context_parts)
-                file_context += f"\n\n{combined}"
-                self._search_cache[target.id] = combined
-        elif target.id in self._search_cache:
-            file_context += f"\n\n{self._search_cache[target.id]}"
+        enrichment = self.proof_context.build(
+            target,
+            goal_state or "",
+            structural_quality=structural.quality.value,
+            local_references=tuple(
+                declaration.qualified_name for declaration in structural.referenced_declarations
+            ),
+            strategy_hints=tuple(self.config.strategy_hints),
+            attempt=attempt,
+        )
+        self._indexed_context_sha256[target.id] = enrichment.indexed_sha256
+        self._strategy_sha256[target.id] = enrichment.strategy_sha256
+        file_context += f"\n\n{enrichment.text}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
         user_prompt = SORRY_FILL_USER.format(
@@ -754,14 +1028,21 @@ class AutoLeanAgent:
             goal_state=goal_state or "(goal state unavailable -- try to infer from context)",
             failed_attempts=failed_str,
         )
+        self._prompt_sha256[target.id] = sha256_text(f"{SYSTEM_PROMPT}\0{user_prompt}")
 
-        # P2.2: Cap temperature escalation
-        temp = min(
-            self.config.temperature + (attempt - 1) * TEMP_ESCALATION_STEP,
-            TEMP_MAX,
-        )
+        # Sampling backends can diversify bounded retries. Deterministic and
+        # reasoning profiles retain their declared request configuration.
+        temp: float | None = None
+        configured_temperature = self.llm.config.temperature
+        if self.llm.capabilities.temperature and configured_temperature is not None:
+            retry_delta = (
+                (attempt - 1) * TEMP_ESCALATION_STEP if self.llm.capabilities.retry_temperature else 0.0
+            )
+            temp = min(configured_temperature + retry_delta, TEMP_MAX)
 
-        self._step(f"Querying {self.config.model} (temp={temp:.2f})")
+        model = self.llm.config.model
+        knob = f" (temp={temp:.2f})" if temp is not None else ""
+        self._step(f"Querying {model}{knob}")
 
         try:
             response = self.llm.generate(
@@ -769,102 +1050,220 @@ class AutoLeanAgent:
                 user=user_prompt,
                 temperature=temp,
             )
-        except Exception as e:
+        except LLMError as e:
+            self._consecutive_llm_errors += 1
+            if isinstance(e, (LLMAuthenticationError, LLMRateLimitError)):
+                self._interrupted = True
+                provider_category = (
+                    "llm_authentication" if isinstance(e, LLMAuthenticationError) else "llm_rate_limit"
+                )
+                self._terminal_failure = f"Provider request failed: {e}"
+            elif isinstance(e, LLMTransientError):
+                provider_category = "llm_transient"
+                if self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
+                    self._interrupted = True
+                    self._terminal_failure = (
+                        f"Provider remained unavailable after {MAX_REPEATED_ERRORS} attempts: {e}"
+                    )
+                else:
+                    delay = min(2 ** (self._consecutive_llm_errors - 1), 8)
+                    self._step(f"Provider unavailable; retrying after {delay}s", "yellow")
+                    time.sleep(delay)
+            else:
+                provider_category = "llm_error"
+                if self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
+                    self._interrupted = True
+                    self._terminal_failure = (
+                        f"Provider failed for {MAX_REPEATED_ERRORS} consecutive requests: {e}"
+                    )
             return self._make_record(
-                cycle, target, attempt, t0,
-                outcome=Outcome.FAIL_BUILD,
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.FAIL_PROVIDER,
                 error_summary=f"LLM error: {e}",
+                error_category=provider_category,
             )
+        self._response_input_tokens[target.id] = response.input_tokens
+        self._consecutive_llm_errors = 0
 
         # -- Step 3: Clean and apply proof ----------------------------------
-        # P0.1: Pass tactic_mode to clean_llm_proof
         proof = clean_llm_proof(response.text, tactic_mode=target.tactic_mode)
-
-        # Reject if proof is empty or contains `sorry` as a standalone tactic.
-        # Only match sorry at line start (possibly indented) — not in English text.
-        has_sorry_tactic = bool(re.search(r"(?m)^\s*sorry\s*$", proof))
-        if not proof or has_sorry_tactic:
+        try:
+            proof = validate_generated_proof(proof)
+        except GeneratedCodeError as e:
             self._failed_proofs.setdefault(target.id, []).append(response.text)
             return self._make_record(
-                cycle, target, attempt, t0,
+                cycle,
+                target,
+                attempt,
+                t0,
                 outcome=Outcome.FAIL_SORRY_REMAINS,
-                llm_tokens=response.eval_count,
+                llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
-                error_summary="LLM output contains sorry or is empty",
+                error_summary=f"Generated proof rejected: {e}",
+                proof=response.text,
+                model=response.model,
             )
 
-        # P3.5: Reject proofs that are too long
+        # Bound generated proof size before elaboration.
         proof_lines = len(proof.splitlines())
         if proof_lines > self.config.max_proof_lines:
             self._failed_proofs.setdefault(target.id, []).append(proof)
             return self._make_record(
-                cycle, target, attempt, t0,
+                cycle,
+                target,
+                attempt,
+                t0,
                 outcome=Outcome.FAIL_BUILD,
-                llm_tokens=response.eval_count,
+                llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
                 error_summary=f"Proof too long: {proof_lines} lines > {self.config.max_proof_lines} max",
                 proof_length=proof_lines,
+                proof=proof,
+                model=response.model,
             )
 
         # Always show the generated proof (key DX: see what the LLM produces)
         if proof_lines <= 5 or self.verbose:
             console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
             for pline in proof.splitlines()[:12]:
-                console.print(f"    [cyan]{pline}[/]")
+                console.print(Text(f"    {pline}", style="cyan"))
             if proof_lines > 12:
                 console.print(f"    [dim]... ({proof_lines - 12} more lines)[/]")
         else:
             first = proof.splitlines()[0].strip()
-            console.print(f"  [bold]Proof[/] ({proof_lines} lines): [cyan]{first}[/] ...")
+            summary = Text("  Proof", style="bold")
+            summary.append(f" ({proof_lines} lines): ")
+            summary.append(first, style="cyan")
+            summary.append(" ...")
+            console.print(summary)
 
-        if self.dry_run:
-            console.print(f"  [yellow]DRY RUN -- skipping file write and build[/]")
-            return self._make_record(
-                cycle, target, attempt, t0,
-                outcome=Outcome.SKIPPED,
-                llm_tokens=response.eval_count,
-                llm_tok_per_sec=response.tokens_per_second,
-                proof_length=proof_lines,
-            )
-
-        # Apply the proof
+        # Construct the candidate without changing the accepted source.
         try:
             new_content = self.project.replace_sorry_at(
-                file_path, target.line, proof, original_content=original_content
+                file_path,
+                target.line,
+                proof,
+                original_content=original_content,
+                col=target.col,
             )
-            self.project.write_file(file_path, new_content)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return self._make_record(
-                cycle, target, attempt, t0,
+                cycle,
+                target,
+                attempt,
+                t0,
                 outcome=Outcome.FAIL_BUILD,
-                llm_tokens=response.eval_count,
+                llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
                 error_summary=f"Replace error: {e}",
+                proof=proof,
+                model=response.model,
             )
 
         # -- Step 4: Build and check ----------------------------------------
-        self._step("Verifying with lake build...")
+        self._step("Verifying with the pinned Lean kernel...")
 
-        with console.status("[dim]Building...", spinner="dots"):
-            build = self.project.check_file(
-                file_path, timeout=self.config.cycle_timeout_seconds
+        try:
+            with console.status("[dim]Building...", spinner="dots"):
+                build = self.project.validate_candidate(
+                    file_path,
+                    new_content,
+                    timeout=self.config.cycle_timeout_seconds,
+                    declaration=target.qualified_decl_name,
+                    declaration_line=target.line,
+                    expected_environment=self._environment_sha256,
+                )
+                repairs = 0
+                while (
+                    repairs < MAX_REDUNDANT_TAIL_REPAIRS
+                    and len(proof.splitlines()) > 1
+                    and _has_redundant_tail(build)
+                ):
+                    proof = "\n".join(proof.splitlines()[:-1]).rstrip()
+                    proof_lines = len(proof.splitlines())
+                    new_content = self.project.replace_sorry_at(
+                        file_path,
+                        target.line,
+                        proof,
+                        original_content=original_content,
+                        col=target.col,
+                    )
+                    repairs += 1
+                    build = self.project.validate_candidate(
+                        file_path,
+                        new_content,
+                        timeout=self.config.cycle_timeout_seconds,
+                        declaration=target.qualified_decl_name,
+                        declaration_line=target.line,
+                        expected_environment=self._environment_sha256,
+                    )
+                if repairs and build.success:
+                    self._step(
+                        f"Removed {repairs} redundant trailing tactic(s); Lean accepted the prefix",
+                        "green",
+                    )
+        except (OSError, ValueError) as e:
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.FAIL_BUILD,
+                llm_tokens=response.output_tokens,
+                llm_tok_per_sec=response.tokens_per_second,
+                error_summary=f"Candidate validation failed: {e}",
+                proof=proof,
+                model=response.model,
             )
         duration = time.monotonic() - t0
 
         # -- Step 5: Keep or revert -----------------------------------------
-        # Check success: build succeeded AND the sorry at our target line is gone.
-        # We re-read the file and check if `sorry` is still at the original line.
-        # This is robust: other sorrys in the file don't interfere.
-        sorry_gone = False
-        if build.success:
-            new_file_content = self.project.read_file(file_path)
-            new_lines = new_file_content.split("\n")
-            if target.line <= len(new_lines):
-                sorry_gone = "sorry" not in new_lines[target.line - 1]
-            else:
-                sorry_gone = True  # line shifted, original sorry is gone
+        # Success removes exactly the selected placeholder from the candidate.
+        original_sorries = count_sorries(original_content)
+        candidate_sorries = count_sorries(new_content)
+        sorry_gone = build.success and candidate_sorries == original_sorries - 1
+        if self.dry_run and sorry_gone:
+            console.print(
+                f"  [bold green]VALIDATED[/bold green] [green]{target.decl_name}[/green] "
+                f"[dim]({build.duration_seconds:.1f}s sandboxed Lean; no project changes)[/dim]"
+            )
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.VALIDATED,
+                llm_tokens=response.output_tokens,
+                llm_tok_per_sec=response.tokens_per_second,
+                proof_length=proof_lines,
+                build_duration_seconds=build.duration_seconds,
+                proof=proof,
+                axioms=(",".join(build.axioms) if build.axioms else "none"),
+                model=response.model,
+            )
         if sorry_gone:
-            # SUCCESS -- sorry is gone and file builds clean!
+            try:
+                self.project.write_file(
+                    file_path,
+                    new_content,
+                    expected_content=original_content,
+                )
+            except OSError as e:
+                return self._make_record(
+                    cycle,
+                    target,
+                    attempt,
+                    t0,
+                    outcome=Outcome.FAIL_BUILD,
+                    llm_tokens=response.output_tokens,
+                    llm_tok_per_sec=response.tokens_per_second,
+                    error_summary=f"Could not accept validated proof: {e}",
+                    proof=proof,
+                    model=response.model,
+                )
             console.print(
                 f"  [bold green]PROVED![/bold green] "
                 f"[green]{target.decl_name}[/green] "
@@ -873,7 +1272,7 @@ class AutoLeanAgent:
             rel_path = str(file_path.relative_to(self.project.root))
             record = ExperimentRecord(
                 cycle=cycle,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 target_id=target.id,
                 decl_name=target.decl_name,
                 file=rel_path,
@@ -881,14 +1280,50 @@ class AutoLeanAgent:
                 outcome=Outcome.SUCCESS,
                 attempt=attempt,
                 duration_seconds=duration,
-                llm_tokens=response.eval_count,
+                llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
                 proof_length=proof_lines,
                 build_duration_seconds=build.duration_seconds,
+                environment_sha256=self._environment_sha256,
+                proof_sha256=sha256_text(proof),
+                axioms=",".join(build.axioms) if build.axioms else "none",
+                model=response.model,
+                backend=self.llm.config.backend,
+                llm_input_tokens=response.input_tokens,
+                prompt_sha256=self._prompt_sha256.get(target.id, ""),
+                structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+                model_revision=self.llm.config.model_revision or "",
+                sampling_seed=self.llm.config.seed,
+                model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
             )
-            self.tracker.commit_success(record)
+            try:
+                self.tracker.commit_success(record)
+            except GitError as e:
+                try:
+                    self.project.write_file(
+                        file_path,
+                        original_content,
+                        expected_content=new_content,
+                    )
+                except OSError as restore_error:
+                    e = GitError(f"{e}; rollback stopped: {restore_error}")
+                return self._make_record(
+                    cycle,
+                    target,
+                    attempt,
+                    t0,
+                    outcome=Outcome.FAIL_BUILD,
+                    llm_tokens=response.output_tokens,
+                    llm_tok_per_sec=response.tokens_per_second,
+                    error_summary=f"Git commit failed: {e}",
+                    proof=proof,
+                    model=response.model,
+                )
             self._failed_proofs.pop(target.id, None)
             self._last_error.pop(target.id, None)
+            self._error_history.pop(target.id, None)
+            # Clear unhealthy status for this file (proof success = file is OK)
+            self._unhealthy_files.pop(file_path, None)
 
             # Self-improving loop: collect training data + learn skill
             self._step("Committing to git + collecting training data", "green")
@@ -897,68 +1332,150 @@ class AutoLeanAgent:
                 theorem_name=target.decl_name,
                 theorem_statement=target.context_before[:200],
                 proof=proof,
-                goal_state=goal_state or "",
             )
             if skill:
                 self._step(f"Learned skill: {skill.name} ({skill.description[:60]})", "magenta")
             return record
 
-        # FAILURE -- revert with error handling (P0.6)
+        # Classify the rejected candidate for bounded retry policy.
         self._step("Build failed — analyzing error...", "red")
         error_summary = ""
         error_category = ""
+        cat = ErrorCategory.OTHER
         if build.errors:
             error_summary = build.errors[0].message[:500]
             cat = classify_error(error_summary)
             error_category = cat.value
             self._last_error[target.id] = (cat, error_summary)
+            self._record_error_category(target.id, cat)
+
+            # Structural error — exhaust retries immediately (LLM can't fix)
+            if cat in STRUCTURAL_ERRORS:
+                self._step(
+                    f"Structural error ({cat.value}) — skipping target",
+                    "red",
+                )
+                self._attempts[target.id] = self.config.max_retries_per_sorry
+                # Mark file as unhealthy so other targets in it are skipped too
+                self._unhealthy_files[file_path] = f"{cat.value}: {error_summary[:120]}"
 
             # Auto-detect missing definitions and try to fill gaps
-            from autolean.library import detect_missing_definitions, fill_gap
-            gaps = detect_missing_definitions(error_summary, file_context, str(file_path))
-            if gaps:
-                for gap in gaps[:2]:  # max 2 gaps per attempt
-                    self._step(f"Detected missing: {gap.name} — attempting to define it", "yellow")
-                    definition = fill_gap(gap, file_path, self.llm.generate)
-                    if definition:
-                        self._step(f"Generated definition for {gap.name} ({len(definition)} chars)", "cyan")
-                        # Prepend the definition to the file for next attempt
-                        prepend = f"\n-- Auto-generated by AutoLean (missing from mathlib)\n{definition}\n\n"
-                        current = self.project.read_file(file_path)
-                        # Insert after imports but before theorems
-                        import_end = 0
-                        for i, line in enumerate(current.split("\n")):
-                            if line.strip().startswith("import ") or line.strip().startswith("open "):
-                                import_end = i + 1
-                        lines_list = current.split("\n")
-                        lines_list.insert(import_end, prepend)
-                        self.project.write_file(file_path, "\n".join(lines_list))
-                        log.info("Auto-defined %s in %s", gap.name, file_path.name)
+            # (only for non-structural errors, and with validation)
+            elif cat == ErrorCategory.UNKNOWN_IDENTIFIER and not self.dry_run:
+                from autolean.library import detect_missing_definitions, fill_gap
+
+                gaps = detect_missing_definitions(error_summary, file_context, str(file_path))
+                if gaps:
+                    for gap in gaps[:2]:  # max 2 gaps per attempt
+                        self._step(f"Detected missing: {gap.name} — attempting to define it", "yellow")
+                        try:
+                            definition = fill_gap(gap, file_path, self.llm.generate)
+                            if definition:
+                                definition = validate_generated_closed_declarations(definition)
+                        except (LLMError, GeneratedCodeError) as e:
+                            self._step(f"Gap generation rejected: {e}", "red")
+                            definition = None
+                        if definition:
+                            self._step(
+                                f"Generated definition for {gap.name} ({len(definition)} chars)",
+                                "cyan",
+                            )
+                            # Insert after imports but before theorems
+                            current = self.project.read_file(file_path)
+                            prepend = (
+                                f"\n-- Auto-generated by AutoLean (missing from mathlib)\n{definition}\n\n"
+                            )
+                            import_end = 0
+                            for i, line in enumerate(current.split("\n")):
+                                if line.strip().startswith("import ") or line.strip().startswith("open "):
+                                    import_end = i + 1
+                            lines_list = current.split("\n")
+                            lines_list.insert(import_end, prepend)
+                            new_content_with_gap = "\n".join(lines_list)
+                            declaration_line = import_end + 3
+                            try:
+                                check = self.project.validate_candidate(
+                                    file_path,
+                                    new_content_with_gap,
+                                    timeout=60,
+                                    declaration=gap.name,
+                                    declaration_line=declaration_line,
+                                    expected_environment=self._environment_sha256,
+                                )
+                            except OSError as e:
+                                self._step(f"Gap validation failed: {e}", "red")
+                                continue
+                            if not check.success:
+                                self._step(
+                                    f"Gap definition for {gap.name} did not compile",
+                                    "red",
+                                )
+                            else:
+                                gap_record = self._make_record(
+                                    cycle,
+                                    target,
+                                    attempt,
+                                    t0,
+                                    outcome=Outcome.GAP_FILLED,
+                                    llm_tokens=response.output_tokens,
+                                    llm_tok_per_sec=response.tokens_per_second,
+                                    error_summary=(
+                                        f"Added missing definition {gap.name}; proof target will be rescanned"
+                                    ),
+                                    error_category=error_category,
+                                    proof_length=proof_lines,
+                                    build_duration_seconds=check.duration_seconds,
+                                    proof=definition,
+                                    axioms=(",".join(check.axioms) if check.axioms else "none"),
+                                    model=response.model,
+                                )
+                                gap_record.decl_name = gap.name
+                                try:
+                                    self.project.write_file(
+                                        file_path,
+                                        new_content_with_gap,
+                                        expected_content=current,
+                                    )
+                                    self.tracker.commit_success(gap_record)
+                                except (GitError, OSError) as e:
+                                    try:
+                                        self.project.write_file(
+                                            file_path,
+                                            current,
+                                            expected_content=new_content_with_gap,
+                                        )
+                                    except OSError as restore_error:
+                                        e = GitError(f"{e}; rollback stopped: {restore_error}")
+                                    return self._make_record(
+                                        cycle,
+                                        target,
+                                        attempt,
+                                        t0,
+                                        outcome=Outcome.FAIL_BUILD,
+                                        llm_tokens=response.output_tokens,
+                                        llm_tok_per_sec=response.tokens_per_second,
+                                        error_summary=f"Gap acceptance failed: {e}",
+                                        error_category=error_category,
+                                        proof=definition,
+                                        model=response.model,
+                                    )
+                                log.info("Auto-defined %s in %s", gap.name, file_path.name)
+                                self._failed_proofs.setdefault(target.id, []).append(proof)
+                                return gap_record
         elif not build.success:
             error_summary = build.stderr[:500] if build.stderr else "Build failed (unknown)"
             error_category = ErrorCategory.OTHER.value
+            self._record_error_category(target.id, ErrorCategory.OTHER)
         else:
             error_summary = f"sorry still present after replacement at line {target.line}"
             error_category = ErrorCategory.SORRY_REMAINS.value
-
-        # P0.6: Safe revert with fallback
-        try:
-            self.project.write_file(file_path, original_content)
-        except OSError as e:
-            console.print(f"[red]CRITICAL: Failed to revert {file_path}: {e}[/]")
-            try:
-                from autolean.tracker import git_revert_file
-                rel = str(file_path.relative_to(self.project.root))
-                git_revert_file(self.project.root, rel)
-                console.print(f"[yellow]Recovered via git checkout.[/]")
-            except Exception:
-                console.print("[red]Git revert also failed. Manual intervention needed.[/]")
+            self._record_error_category(target.id, ErrorCategory.SORRY_REMAINS)
 
         self._failed_proofs.setdefault(target.id, []).append(proof)
 
         fail_record = ExperimentRecord(
             cycle=cycle,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             target_id=target.id,
             decl_name=target.decl_name,
             file=str(file_path.relative_to(self.project.root)),
@@ -966,11 +1483,23 @@ class AutoLeanAgent:
             outcome=Outcome.FAIL_BUILD if build.errors else Outcome.FAIL_SORRY_REMAINS,
             attempt=attempt,
             duration_seconds=duration,
-            llm_tokens=response.eval_count,
+            llm_tokens=response.output_tokens,
             llm_tok_per_sec=response.tokens_per_second,
             error_summary=error_summary,
             error_category=error_category,
             build_duration_seconds=build.duration_seconds,
+            environment_sha256=self._environment_sha256,
+            proof_sha256=sha256_text(proof),
+            model=response.model,
+            backend=self.llm.config.backend,
+            llm_input_tokens=response.input_tokens,
+            prompt_sha256=self._prompt_sha256.get(target.id, ""),
+            structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+            indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
+            strategy_sha256=self._strategy_sha256.get(target.id, ""),
+            model_revision=self.llm.config.model_revision or "",
+            sampling_seed=self.llm.config.seed,
+            model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
         )
 
         # Collect failed attempt for DPO training data
@@ -994,11 +1523,14 @@ class AutoLeanAgent:
         llm_tok_per_sec: float = 0.0,
         proof_length: int = 0,
         build_duration_seconds: float = 0.0,
+        proof: str = "",
+        axioms: str = "",
+        model: str | None = None,
     ) -> ExperimentRecord:
         """Helper to create an ExperimentRecord with common fields."""
         return ExperimentRecord(
             cycle=cycle,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             target_id=target.id,
             decl_name=target.decl_name,
             file=str(target.file.relative_to(self.project.root)),
@@ -1012,6 +1544,17 @@ class AutoLeanAgent:
             error_category=error_category,
             proof_length=proof_length,
             build_duration_seconds=build_duration_seconds,
+            environment_sha256=self._environment_sha256,
+            proof_sha256=sha256_text(proof) if proof else "",
+            axioms=axioms,
+            model=model or self.llm.config.model,
+            backend=self.llm.config.backend,
+            llm_input_tokens=self._response_input_tokens.get(target.id, 0),
+            prompt_sha256=self._prompt_sha256.get(target.id, ""),
+            structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+            model_revision=self.llm.config.model_revision or "",
+            sampling_seed=self.llm.config.seed,
+            model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
         )
 
     # -- Final report -------------------------------------------------------
@@ -1021,41 +1564,43 @@ class AutoLeanAgent:
         remaining_targets: list[SorryTarget],
         session_start: float,
     ) -> None:
-        """Print a comprehensive end-of-session report with proper Rich tables."""
-        import logging
-        from rich.columns import Columns
-        from rich.panel import Panel
+        """Print the end-of-session report."""
         from rich.table import Table
 
-        log = logging.getLogger("autolean")
         elapsed = time.monotonic() - session_start
         proved = [r for r in self.tracker.records if r.outcome == Outcome.SUCCESS]
+        validated = [r for r in self.tracker.records if r.outcome == Outcome.VALIDATED]
         total_tokens = sum(r.llm_tokens for r in self.tracker.records)
         remaining = [
-            t for t in remaining_targets
-            if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
+            t for t in remaining_targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
         ]
         exhausted = [
-            t for t in remaining_targets
-            if self._attempts.get(t.id, 0) >= self.config.max_retries_per_sorry
+            t for t in remaining_targets if self._attempts.get(t.id, 0) >= self.config.max_retries_per_sorry
         ]
 
         # ── Header panel ──
         console.print()
         header_lines = [
-            f"[bold]Session Complete[/bold]",
+            "[bold]Session Complete[/bold]",
             f"Duration:  {elapsed / 60:.1f} min ({elapsed / 3600:.1f} hr)",
             f"Cycles:    {self.tracker.cycle}",
             f"Proved:    [bold green]{len(proved)}[/bold green] / {self._initial_sorry_count}",
             f"Remaining: [yellow]{len(remaining)}[/yellow]  Exhausted: [red]{len(exhausted)}[/red]",
             f"Tokens:    {total_tokens:,}",
         ]
-        console.print(Panel(
-            "\n".join(header_lines),
-            title="AutoLean Report",
-            border_style="cyan",
-            width=70,
-        ))
+        if self.dry_run:
+            header_lines.insert(
+                4,
+                f"Validated: [bold green]{len(validated)}[/bold green] dry-run candidate(s)",
+            )
+        console.print(
+            Panel(
+                "\n".join(header_lines),
+                title="AutoLean Report",
+                border_style="cyan",
+                width=70,
+            )
+        )
 
         # ── Metrics tables (from tracker) ──
         self.tracker.print_summary(initial_count=self._initial_sorry_count)
@@ -1139,53 +1684,64 @@ class AutoLeanAgent:
         if total_tokens > 0 and proved:
             timing_lines.append(f"Tokens/proof:   {total_tokens / len(proved):,.0f}")
 
-        console.print(Panel(
-            "\n".join(timing_lines),
-            title="Timing",
-            border_style="dim",
-            width=70,
-        ))
+        console.print(
+            Panel(
+                "\n".join(timing_lines),
+                title="Timing",
+                border_style="dim",
+                width=70,
+            )
+        )
 
         # ── Files & next steps ──
-        files_lines = [
-            f"Results TSV:  {self.tracker.results_file}",
-        ]
-        log_file = self.project.root / "overnight.log"
-        if log_file.exists():
-            files_lines.append(f"Session log:  {log_file}")
-        # Find structured log
-        log_dir = self.project.root / "logs"
-        if log_dir.exists():
-            latest = sorted(log_dir.glob("autolean_*.log"))
-            if latest:
-                files_lines.append(f"Audit log:    {latest[-1]}")
+        if self.dry_run:
+            files_lines = ["Dry run: no project files were written."]
+            if validated:
+                files_lines.extend(
+                    (
+                        "",
+                        "Re-run the same command without --dry-run to accept a validated proof.",
+                    )
+                )
+        else:
+            files_lines = [f"Results TSV:  {self.tracker.results_file}"]
+            log_file = self.project.root / "overnight.log"
+            if log_file.exists():
+                files_lines.append(f"Session log:  {log_file}")
+            log_dir = self.project.root / "logs"
+            if log_dir.exists():
+                latest = sorted(log_dir.glob("autolean_*.log"))
+                if latest:
+                    files_lines.append(f"Audit log:    {latest[-1]}")
 
-        if remaining or exhausted:
+        if not self.dry_run and (remaining or exhausted):
             files_lines.append("")
             files_lines.append("[bold]Next steps:[/bold]")
             if remaining:
-                files_lines.append("  uv run autolean run --resume")
-            files_lines.append("  uv run autolean diff")
+                files_lines.append("  uv run autolean solve --resume")
+            files_lines.append("  uv run autolean changes")
             files_lines.append("  uv run autolean results")
             if exhausted:
-                files_lines.append("  uv run autolean run --model deepseek-prover --resume")
-        else:
+                files_lines.append("  uv run autolean solve --model deepseek-prover --resume")
+        elif not self.dry_run:
             files_lines.append("")
             files_lines.append("[bold green]All sorry targets resolved![/bold green]")
 
-        console.print(Panel(
-            "\n".join(files_lines),
-            title="Files & Next Steps",
-            border_style="dim",
-            width=70,
-        ))
+        console.print(
+            Panel(
+                "\n".join(files_lines),
+                title="Files & Next Steps",
+                border_style="dim",
+                width=70,
+            )
+        )
 
         # ── Export training data + fine-tuning trigger ──
         stats = self.collector.stats()
-        if stats["total_examples"] > 0:
+        if not self.dry_run and stats["total_examples"] > 0:
             exported = self.collector.export_all()
             data_lines = [
-                f"[bold]Training Data Collected[/bold]",
+                "[bold]Training Data Collected[/bold]",
                 f"Total examples:    {stats['total_examples']}",
                 f"Positive (SFT):    {stats['positive']}",
                 f"Negative (DPO):    {stats['negative']}",
@@ -1195,29 +1751,40 @@ class AutoLeanAgent:
                 data_lines.append(f"  {fmt}: {path}")
 
             # Auto fine-tuning trigger (self-improving loop)
-            from autolean.finetune import check_finetune_readiness, trigger_local_finetune
+            from autolean.finetune import (
+                FINETUNE_THRESHOLD,
+                check_finetune_readiness,
+                trigger_local_finetune,
+            )
+
             ft_status = check_finetune_readiness(self.project.root / "training_data")
             if ft_status.ready:
                 data_lines.append("")
                 data_lines.append("[bold magenta]Fine-tuning auto-triggered![/bold magenta]")
                 trigger_local_finetune(self.project.root / "training_data")
             elif stats["positive"] > 0:
-                remaining = 50 - ft_status.positive_examples
-                data_lines.append(f"  ({remaining} more proofs until auto fine-tuning)")
+                until_finetune = FINETUNE_THRESHOLD - ft_status.positive_examples
+                data_lines.append(f"  ({until_finetune} more proofs until auto fine-tuning)")
 
-            console.print(Panel(
-                "\n".join(data_lines),
-                title="Self-Improving Loop",
-                border_style="magenta",
-                width=70,
-            ))
+            console.print(
+                Panel(
+                    "\n".join(data_lines),
+                    title="Self-Improving Loop",
+                    border_style="magenta",
+                    width=70,
+                )
+            )
 
         # ── Log the final summary to structured log ──
         log.info(
             "SESSION COMPLETE: proved=%d/%d (%.1f%%) cycles=%d time=%.1fm tokens=%d training_examples=%d",
-            len(proved), self._initial_sorry_count,
+            len(proved),
+            self._initial_sorry_count,
             len(proved) / self._initial_sorry_count * 100 if self._initial_sorry_count else 0,
-            self.tracker.cycle, elapsed / 60, total_tokens, stats.get("total_examples", 0),
+            self.tracker.cycle,
+            elapsed / 60,
+            total_tokens,
+            stats.get("total_examples", 0),
         )
         for r in proved:
             log.info("  PROVED: %s (attempt %d, %.1fs)", r.decl_name, r.attempt, r.duration_seconds)

@@ -1,45 +1,106 @@
 [project]
 name = "autolean"
 version = "0.5.0"
-description = "Autonomous Lean 4 proof agent — overnight sorry elimination, autoformalization, and proof golf. Inspired by Karpathy's autoresearch and RightNow-AI's autokernel."
+description = "Autonomous Lean 4 proof agent with sandboxed, content-addressed verification."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "AutoLean Contributors" }]
+maintainers = [{ name = "Leonard Aukea" }]
 keywords = ["lean4", "theorem-proving", "ai", "autonomous-agent", "formal-verification"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
 dependencies = [
-    "httpx>=0.27",
-    "rich>=13.0",
-    "click>=8.1",
-    "pyyaml>=6.0",
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
+    "rich>=15.0.0",
+    "textual>=8.2.8",
+    "click>=8.4.2",
+    "pyyaml>=6.0.3",
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.3",
 ]
 
 [project.optional-dependencies]
-pdf = ["pymupdf>=1.24"]
-lean = ["lean-interact>=0.11"]
-dev = ["ruff", "pytest", "respx", "mypy"]
-all = ["pymupdf>=1.24", "lean-interact>=0.11"]
+lean = ["lean-interact>=0.11.5"]
+# Hosted API providers use their official Python SDKs. Subscription providers
+# invoke the installed Claude Code and Codex CLIs.
+anthropic = ["anthropic>=0.121.0"]
+openai = ["openai>=2.54.0"]
+dev = [
+    "hatchling==1.31.0",
+    "pip-audit>=2.10.1",
+    "ruff>=0.16.2",
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+    "mypy>=2.3.0",
+    "types-PyYAML>=6.0.12.20260724",
+]
+all = [
+    "lean-interact>=0.11.5",
+    "anthropic>=0.121.0",
+    "openai>=2.54.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/LeonardAukea/autolean"
+Documentation = "https://github.com/LeonardAukea/autolean/tree/main/docs"
+Repository = "https://github.com/LeonardAukea/autolean.git"
+Issues = "https://github.com/LeonardAukea/autolean/issues"
+Releases = "https://github.com/LeonardAukea/autolean/releases"
 
 [project.scripts]
 autolean = "autolean.__main__:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.beads",
+    "/.claude",
+    "/.codedb",
+    "/.reviews",
+    "/.sentrux",
+    "/codedb.snapshot",
+    "/docs/assets",
+    "/workspace/.autolean",
+    "/workspace/.codedb",
+    "/workspace/.lake",
+    "/workspace/AutoLean/Generated",
+    "/workspace/AutoLean/UserTheorems.lean",
+    "/workspace/logs",
+    "/workspace/skills",
+    "/workspace/training_data",
+    "/workspace/workspace",
+]
+
 [tool.ruff]
-line-length = 100
+line-length = 110
 target-version = "py311"
+# workspace/ holds the vendored Lean project, including mathlib's own scripts.
+extend-exclude = ["workspace"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP"]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+# Lean and mathematical notation (ℝ, γ, ∨, ∣, →) is the subject matter here,
+# so the ambiguous-unicode rules fire on correct code.
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,3 +111,12 @@ markers = [
 [tool.mypy]
 python_version = "3.11"
 strict = true
+files = ["autolean"]
+exclude = ["^workspace/"]
+
+# PyMuPDF Layout imports NumPy at runtime. NumPy's current stubs use Python
+# 3.12 type-alias syntax, while AutoLean continues to support Python 3.11.
+[[tool.mypy.overrides]]
+module = ["pymupdf", "pymupdf.*", "pymupdf4llm", "pymupdf4llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

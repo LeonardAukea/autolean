@@ -33,6 +33,15 @@ class TestCleanLlmProof:
         raw = "```\nomega\n```"
         assert clean_llm_proof(raw) == "omega"
 
+    def test_inline_markdown_code_is_stripped(self) -> None:
+        """A provider may wrap a one-word proof in inline Markdown."""
+        assert clean_llm_proof("`trivial`") == "trivial"
+
+    def test_simpa_proof_is_preserved(self) -> None:
+        proof = "simpa [pow_two] using norm_add_sq_eq_norm_sq_add_norm_sq_real h"
+
+        assert clean_llm_proof(proof) == proof
+
     def test_leading_by_stripped_in_tactic_mode(self) -> None:
         """A leading `by` is stripped when tactic_mode=True."""
         raw = "by\n  simp"
@@ -53,13 +62,13 @@ class TestCleanLlmProof:
         assert clean_llm_proof("\n\n") == ""
 
     def test_multiline_with_blank_lines(self) -> None:
-        """Leading and trailing blank lines are removed, indentation preserved."""
+        """Outer blank lines are removed while indentation is preserved."""
         raw = "\n\nsimp\nomega\n\n"
         result = clean_llm_proof(raw)
         assert result == "simp\nomega"
 
     def test_by_simp_omega_tactic_mode(self) -> None:
-        """`by\\n  simp\\n  omega` with tactic_mode=True strips the leading `by`."""
+        """Tactic mode strips a standalone leading `by`."""
         raw = "by\n  simp\n  omega"
         result = clean_llm_proof(raw, tactic_mode=True)
         # Leading `by` removed, then blank lines removed; indented lines remain
@@ -86,8 +95,21 @@ class TestCleanLlmProof:
         assert result == "  omega"
 
     def test_by_on_same_line_as_tactic_not_stripped(self) -> None:
-        """Only a standalone `by` line is stripped, not `by simp` on one line."""
+        """An inline `by simp` remains intact."""
         raw = "by simp"
         result = clean_llm_proof(raw, tactic_mode=True)
         # `by simp` is a single line where strip() != "by", so it stays
         assert result == "by simp"
+
+    def test_complete_theorem_wrapper_is_stripped(self) -> None:
+        """A model may echo the requested declaration around its proof."""
+        raw = "theorem AutoLeanBackendSmoke : True := by\n  trivial"
+        assert clean_llm_proof(raw) == "  trivial"
+
+    def test_inline_complete_theorem_wrapper_is_stripped(self) -> None:
+        raw = "theorem AutoLeanBackendSmoke : True := by trivial"
+        assert clean_llm_proof(raw) == "trivial"
+
+    def test_fenced_complete_theorem_wrapper_is_stripped(self) -> None:
+        raw = "```lean\nlemma smoke : True := by\n  exact True.intro\n```"
+        assert clean_llm_proof(raw) == "  exact True.intro"

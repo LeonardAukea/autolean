@@ -5,27 +5,38 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from autolean.collector import DPOPair, ProofExample, TrainingDataCollector
+from autolean.collector import TrainingDataCollector
 from autolean.tracker import ExperimentRecord, Outcome
 
 
 def _make_record(
-    decl: str = "foo", outcome: Outcome = Outcome.SUCCESS,
-    attempt: int = 1, tokens: int = 100,
-    error_cat: str = "", error_msg: str = "",
+    decl: str = "foo",
+    outcome: Outcome = Outcome.SUCCESS,
+    attempt: int = 1,
+    tokens: int = 100,
+    error_cat: str = "",
+    error_msg: str = "",
 ) -> ExperimentRecord:
     return ExperimentRecord(
-        cycle=1, timestamp="2026-01-01T00:00:00Z",
-        target_id=f"File.lean:10:{decl}", decl_name=decl,
-        file="File.lean", line=10, outcome=outcome,
-        attempt=attempt, duration_seconds=5.0,
-        llm_tokens=tokens, llm_tok_per_sec=50.0,
-        error_summary=error_msg, error_category=error_cat,
+        cycle=1,
+        timestamp="2026-01-01T00:00:00Z",
+        target_id=f"File.lean:10:{decl}",
+        decl_name=decl,
+        file="File.lean",
+        line=10,
+        outcome=outcome,
+        attempt=attempt,
+        duration_seconds=5.0,
+        llm_tokens=tokens,
+        llm_tok_per_sec=50.0,
+        error_summary=error_msg,
+        error_category=error_cat,
+        model="gpt-5.6-luna",
+        backend="codex_cli",
     )
 
 
 class TestTrainingDataCollector:
-
     def test_record_attempt_stores_example(self, tmp_path: Path) -> None:
         c = TrainingDataCollector(output_dir=tmp_path)
         c.set_context("File.lean:10:foo", "goal: True", "context code")
@@ -75,6 +86,8 @@ class TestTrainingDataCollector:
         assert data["conversations"][1]["from"] == "human"
         assert data["conversations"][2]["from"] == "gpt"
         assert data["conversations"][2]["value"] == "simp"
+        assert data["metadata"]["model"] == "gpt-5.6-luna"
+        assert data["metadata"]["backend"] == "codex_cli"
 
     def test_export_dpo_pairs(self, tmp_path: Path) -> None:
         c = TrainingDataCollector(output_dir=tmp_path)

@@ -12,8 +12,7 @@ def lean_file_no_sorry(tmp_path: Path) -> Path:
     """A minimal Lean file with no sorry."""
     p = tmp_path / "Clean.lean"
     p.write_text(
-        "theorem add_comm (a b : Nat) : a + b = b + a := by\n"
-        "  omega\n",
+        "theorem add_comm (a b : Nat) : a + b = b + a := by\n  omega\n",
         encoding="utf-8",
     )
     return p
@@ -24,8 +23,7 @@ def lean_file_one_sorry(tmp_path: Path) -> Path:
     """A Lean file with exactly one sorry in tactic mode."""
     p = tmp_path / "One.lean"
     p.write_text(
-        "theorem foo : 1 + 1 = 2 := by\n"
-        "  sorry\n",
+        "theorem foo : 1 + 1 = 2 := by\n  sorry\n",
         encoding="utf-8",
     )
     return p
@@ -47,9 +45,7 @@ def lean_file_sorry_in_comment(tmp_path: Path) -> Path:
     """A Lean file where sorry only appears inside a comment."""
     p = tmp_path / "Commented.lean"
     p.write_text(
-        "-- sorry this is just a comment\n"
-        "theorem clean : True := by\n"
-        "  trivial\n",
+        "-- sorry this is just a comment\ntheorem clean : True := by\n  trivial\n",
         encoding="utf-8",
     )
     return p

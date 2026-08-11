@@ -1,7 +1,7 @@
--- AutoLean example workspace
--- A collection of sorry'd theorems for the agent to prove.
--- Organized by difficulty: trivial → easy → medium → hard
+-- AutoLean example workspace.
+-- The environment smoke module pins the Mathlib and CSLib import boundary.
 
+import AutoLean.EnvironmentSmoke
 import AutoLean.Trivial
 import AutoLean.Easy
 import AutoLean.Medium

@@ -42,6 +42,11 @@ class ProofExample:
     duration: float
     error_category: str = ""
     error_message: str = ""
+    environment_sha256: str = ""
+    proof_sha256: str = ""
+    axioms: str = ""
+    model: str = ""
+    backend: str = ""
 
 
 @dataclass
@@ -74,9 +79,6 @@ class TrainingDataCollector:
     _goal_states: dict[str, str] = field(default_factory=dict)  # target_id -> goal
     _contexts: dict[str, str] = field(default_factory=dict)  # target_id -> context
 
-    def __post_init__(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
     def set_context(self, target_id: str, goal_state: str, context: str) -> None:
         """Store goal state and context for a target (before attempts)."""
         self._goal_states[target_id] = goal_state or ""
@@ -100,6 +102,11 @@ class TrainingDataCollector:
             duration=record.duration_seconds,
             error_category=record.error_category,
             error_message=record.error_summary[:500],
+            environment_sha256=record.environment_sha256,
+            proof_sha256=record.proof_sha256,
+            axioms=record.axioms,
+            model=record.model,
+            backend=record.backend,
         )
         self.examples.append(example)
         log.debug(
@@ -112,25 +119,20 @@ class TrainingDataCollector:
     # -- Export formats -------------------------------------------------------
 
     def export_all(self) -> dict[str, Path]:
-        """Export training data in all formats. Returns paths to generated files."""
+        """Export every training format and return the generated paths."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         paths = {}
 
-        sft = self.export_instruction_jsonl(
-            self.output_dir / f"sft_{timestamp}.jsonl"
-        )
+        sft = self.export_instruction_jsonl(self.output_dir / f"sft_{timestamp}.jsonl")
         if sft:
             paths["sft"] = sft
 
-        sharegpt = self.export_sharegpt_jsonl(
-            self.output_dir / f"sharegpt_{timestamp}.jsonl"
-        )
+        sharegpt = self.export_sharegpt_jsonl(self.output_dir / f"sharegpt_{timestamp}.jsonl")
         if sharegpt:
             paths["sharegpt"] = sharegpt
 
-        dpo = self.export_dpo_jsonl(
-            self.output_dir / f"dpo_{timestamp}.jsonl"
-        )
+        dpo = self.export_dpo_jsonl(self.output_dir / f"dpo_{timestamp}.jsonl")
         if dpo:
             paths["dpo"] = dpo
 
@@ -152,7 +154,7 @@ class TrainingDataCollector:
         if not positives:
             return None
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for ex in positives:
                 record = {
                     "messages": [
@@ -193,15 +195,13 @@ class TrainingDataCollector:
         if not positives:
             return None
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for ex in positives:
                 record = {
                     "conversations": [
                         {
                             "from": "system",
-                            "value": (
-                                "You are a Lean 4 theorem prover. Output ONLY tactic code."
-                            ),
+                            "value": ("You are a Lean 4 theorem prover. Output ONLY tactic code."),
                         },
                         {
                             "from": "human",
@@ -217,6 +217,11 @@ class TrainingDataCollector:
                         "file": ex.file,
                         "attempt": ex.attempt,
                         "tokens": ex.tokens,
+                        "environment_sha256": ex.environment_sha256,
+                        "proof_sha256": ex.proof_sha256,
+                        "axioms": ex.axioms,
+                        "model": ex.model,
+                        "backend": ex.backend,
                     },
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -251,19 +256,21 @@ class TrainingDataCollector:
                 if neg.proof in seen_proofs:
                     continue
                 seen_proofs.add(neg.proof)
-                pairs.append(DPOPair(
-                    theorem_name=name,
-                    goal_state=chosen.goal_state,
-                    context=chosen.context,
-                    chosen=chosen.proof,
-                    rejected=neg.proof,
-                    rejected_error=neg.error_category or "build_failed",
-                ))
+                pairs.append(
+                    DPOPair(
+                        theorem_name=name,
+                        goal_state=chosen.goal_state,
+                        context=chosen.context,
+                        chosen=chosen.proof,
+                        rejected=neg.proof,
+                        rejected_error=neg.error_category or "build_failed",
+                    )
+                )
 
         if not pairs:
             return None
 
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for pair in pairs:
                 record = {
                     "prompt": self._format_user_prompt_from_pair(pair),
@@ -287,9 +294,7 @@ class TrainingDataCollector:
             parts.append(f"## Context\n```lean\n{ex.context[:2000]}\n```")
         if ex.goal_state:
             parts.append(f"## Goal State\n```\n{ex.goal_state}\n```")
-        parts.append(
-            f"## Task\nProvide the tactic proof for `{ex.theorem_name}`."
-        )
+        parts.append(f"## Task\nProvide the tactic proof for `{ex.theorem_name}`.")
         return "\n\n".join(parts)
 
     def _format_user_prompt_from_pair(self, pair: DPOPair) -> str:
@@ -298,9 +303,7 @@ class TrainingDataCollector:
             parts.append(f"## Context\n```lean\n{pair.context[:2000]}\n```")
         if pair.goal_state:
             parts.append(f"## Goal State\n```\n{pair.goal_state}\n```")
-        parts.append(
-            f"## Task\nProvide the tactic proof for `{pair.theorem_name}`."
-        )
+        parts.append(f"## Task\nProvide the tactic proof for `{pair.theorem_name}`.")
         return "\n\n".join(parts)
 
     # -- Stats ----------------------------------------------------------------
@@ -316,5 +319,5 @@ class TrainingDataCollector:
         }
 
     def should_finetune(self, threshold: int = 50) -> bool:
-        """Check if enough positive examples collected to trigger fine-tuning."""
+        """Report whether enough positive examples enable fine-tuning."""
         return sum(1 for e in self.examples if e.success) >= threshold
