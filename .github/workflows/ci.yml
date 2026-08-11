@@ -98,6 +98,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Reserve disk for proof artifacts
+        run: |
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       - name: Install host sandbox
@@ -107,7 +111,9 @@ jobs:
       - name: Restore Lake artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: workspace/.lake
+          path: |
+            workspace/.lake/build
+            workspace/.lake/packages/cslib/.lake/build
           key: >-
             lake-${{ runner.os }}-${{ runner.arch }}-
             ${{ hashFiles('workspace/lean-toolchain', 'workspace/lake-manifest.json') }}
@@ -116,9 +122,11 @@ jobs:
       - name: Run Nix checks
         run: nix flake check path:. --print-build-logs
       - name: Restore pinned Mathlib artifacts
-        run: >-
-          nix develop path:. --command bash -euo pipefail -c
-          'cd workspace && lake exe cache get'
+        run: |
+          df -h /
+          nix develop path:. --command bash -euo pipefail -c \
+            'cd workspace && lake exe cache get'
+          df -h /
       - name: Build CSLib and the Lean workspace
         run: >-
           nix develop path:. --command bash -euo pipefail -c
