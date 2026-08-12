@@ -157,7 +157,7 @@ jobs:
   nix:
     name: Lean and Nix closure
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -233,6 +233,17 @@ jobs:
           AUTOLEAN_RUN_SANDBOX_E2E=1
           python -m pytest -q -p no:cacheprovider
           tests/test_lean_sandbox_e2e.py
+      - name: Run the tutorial end to end against a scripted model
+        run: >-
+          nix develop . --command env
+          AUTOLEAN_BWRAP=/usr/bin/bwrap
+          AUTOLEAN_RUN_TUTORIAL_E2E=1
+          GIT_AUTHOR_NAME=autolean-ci
+          GIT_AUTHOR_EMAIL=ci@autolean.invalid
+          GIT_COMMITTER_NAME=autolean-ci
+          GIT_COMMITTER_EMAIL=ci@autolean.invalid
+          python -m pytest -q -p no:cacheprovider
+          tests/test_tutorial_e2e.py
       - name: Record the proof environment
         run: >-
           nix run .#default -- environment --project workspace --json
