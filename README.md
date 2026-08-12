@@ -143,6 +143,7 @@ The documentation follows the four-part
 - [Trust boundary](docs/explanation/trust-boundary.md)
 - [Research and proof loop](docs/explanation/research-loop.md)
 - [Architecture](docs/explanation/architecture.md)
+- [Engineering discipline](docs/explanation/engineering.md)
 
 The [documentation index](docs/README.md) describes where each kind of
 information belongs.
