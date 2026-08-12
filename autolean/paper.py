@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from rich.console import Console
 
 from autolean.generated_code import (
     GeneratedCodeError,
@@ -41,9 +40,7 @@ from autolean.llm import (
     LLMBackend,
     LLMError,
 )
-
-console = Console()
-
+from autolean.ui import console
 
 # ---------------------------------------------------------------------------
 # Data types

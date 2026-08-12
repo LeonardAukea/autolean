@@ -17,10 +17,9 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Literal
 
-from rich.console import Console
 from rich.table import Table
 
-console = Console()
+from autolean.ui import console
 
 
 @dataclass

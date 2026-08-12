@@ -11,12 +11,10 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from rich.console import Console
 
 from autolean.llm._http import HttpBackend, as_int, as_list, as_object, as_text
 from autolean.llm.base import Capabilities, LLMError, LLMResponse
-
-console = Console()
+from autolean.ui import console
 
 DEFAULT_OPENAI_COMPAT_URL = "http://localhost:8000"
 

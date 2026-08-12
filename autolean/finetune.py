@@ -18,9 +18,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Console
+from autolean.ui import console
 
-console = Console()
 log = logging.getLogger("autolean")
 
 FINETUNE_THRESHOLD = 50  # minimum positive examples before triggering

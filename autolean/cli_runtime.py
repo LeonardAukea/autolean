@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
 import click
-from rich.console import Console
 
 from autolean.llm import BACKEND_NAMES, LLMBackend, LLMError, create_llm_client
+from autolean.ui import console
 
 if TYPE_CHECKING:
     from autolean.agent import AgentRunResult, AutoLeanAgent
@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from autolean.routing import EscalationDecision
     from autolean.session import ProofSession, SessionStore
 
-console = Console()
 
 model_option = click.option(
     "--model",

@@ -5,11 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
-from rich.console import Console
 
 from autolean import cli_runtime
-
-console = Console()
+from autolean.ui import console
 
 _agent_for = cli_runtime.agent_for
 _configure_escalation = cli_runtime.configure_escalation

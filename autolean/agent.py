@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
@@ -60,8 +59,8 @@ from autolean.scanner import (
 )
 from autolean.structure import LeanStructureProvider
 from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
+from autolean.ui import console
 
-console = Console()
 log = logging.getLogger("autolean")
 
 # Temperature escalation per retry attempt (capped at 1.0)

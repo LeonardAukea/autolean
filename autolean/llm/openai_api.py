@@ -12,8 +12,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from rich.console import Console
-
 from autolean.llm.base import (
     OPENAI_EFFORTS,
     BaseBackend,
@@ -26,8 +24,7 @@ from autolean.llm.base import (
     LLMResponse,
     LLMTransientError,
 )
-
-console = Console()
+from autolean.ui import console
 
 # GPT-5-class reasoning models take depth from `reasoning.effort` and accept
 # their default sampling configuration. Responses has no stop-sequence field.

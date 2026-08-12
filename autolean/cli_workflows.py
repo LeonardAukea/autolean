@@ -6,15 +6,13 @@ import subprocess
 from pathlib import Path
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 
 from autolean import cli_runtime
 from autolean.challenges import OpenProblem
 from autolean.llm import LLMError
 from autolean.provenance import ProofEnvironmentError
-
-console = Console()
+from autolean.ui import console
 
 _accept_generated_source = cli_runtime.accept_generated_source
 _agent_for = cli_runtime.agent_for

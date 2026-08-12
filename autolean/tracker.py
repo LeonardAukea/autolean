@@ -10,10 +10,10 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
-from rich.console import Console
 from rich.table import Table
 
-console = Console()
+from autolean.ui import console
+
 log = logging.getLogger("autolean")
 
 

@@ -15,16 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from rich.console import Console
-
 from autolean.provenance import (
     ProofEnvironment,
     ProofEnvironmentError,
     capture_proof_environment,
 )
 from autolean.scanner import _mask_lean_noncode, count_sorries
-
-console = Console()
 
 # ---------------------------------------------------------------------------
 # Types

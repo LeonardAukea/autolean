@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
@@ -17,6 +16,7 @@ from autolean.cli_sessions import register_commands as _register_session_command
 from autolean.cli_workflows import register_commands as _register_workflow_commands
 from autolean.llm import LLMBackend, LLMError
 from autolean.provenance import ProofEnvironmentError
+from autolean.ui import console
 
 if TYPE_CHECKING:
     from autolean.lean_interface import LeanProject
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from autolean.provenance import ProofEnvironment
     from autolean.strategy import PlanAttempt, ProofPlan
 
-console = Console()
 
 _accept_generated_source = cli_runtime.accept_generated_source
 _agent_for = cli_runtime.agent_for
