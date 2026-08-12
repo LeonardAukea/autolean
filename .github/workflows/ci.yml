@@ -186,6 +186,7 @@ jobs:
             'workspace/AutoLean/Papers/**' \
             'workspace/AutoLean/Paper_*.lean' \
             workspace/AutoLean/UserTheorems.lean \
+            workspace/program.md \
             'workspace/skills/*.json' \
             'workspace/training_data/**' \
             'workspace/workspace/**')"

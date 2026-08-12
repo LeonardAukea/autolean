@@ -94,6 +94,7 @@ exclude = [
     "/workspace/AutoLean/Paper_*.lean",
     "/workspace/AutoLean/UserTheorems.lean",
     "/workspace/logs",
+    "/workspace/program.md",
     "/workspace/skills",
     "/workspace/training_data",
     "/workspace/workspace",
