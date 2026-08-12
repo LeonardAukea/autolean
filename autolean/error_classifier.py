@@ -1,4 +1,4 @@
-"""Classify Lean build errors into categories for smarter retry strategies."""
+"""Classify Lean build errors into categories for retry policy."""
 
 from __future__ import annotations
 

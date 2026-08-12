@@ -1,12 +1,5 @@
 """Curated open-problem statements and formalization scaffolds.
 
-A curated list of open mathematical problems, ranging from accessible
-sub-results to millennium-level challenges. Each problem includes:
-  - Natural language description
-  - Difficulty rating
-  - Known sub-results
-  - A formalized Lean statement or an explicitly labeled scaffold
-
 Only source-faithful formalizations can enter the proof loop.
 """
 

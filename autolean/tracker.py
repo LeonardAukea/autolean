@@ -1,4 +1,4 @@
-"""Experiment tracking — git-based with TSV logging (like AutoResearch)."""
+"""Experiment tracking — git commits and append-only TSV rows."""
 
 from __future__ import annotations
 

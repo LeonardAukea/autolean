@@ -216,19 +216,9 @@ def solve(
     """Start the autonomous proof agent loop.
 
     \b
-    Runs continuously until all targets are proved or you press Ctrl+C.
-    Use --max-cycles to set a limit. Self-correction, data collection,
-    and skill learning are always active.
-
-    \b
-    The proof experiment loop:
-      1. Pick highest-priority sorry target
-      2. Extract the Lean goal and Tree-sitter structure
-      3. Assemble bounded search, skill, and failure context
-      4. Query the configured model
-      5. Validate the candidate in the OS sandbox and Lean kernel
-      6. Accept the exact validated bytes and record provenance
-      7. Repeat
+    Runs proof experiments until all targets are proved or you press
+    Ctrl+C. Use --max-cycles to set a limit. The experiment cycle is
+    described in docs/explanation/research-loop.md.
 
     Press Ctrl+C once to stop gracefully. Twice to force quit.
     """
@@ -935,7 +925,7 @@ def prove(
 
     \b
     Takes a math statement in plain English, formalizes it as Lean 4,
-    and attempts to prove it automatically.
+    and attempts to prove it.
 
     \b
     Examples:
@@ -1368,15 +1358,7 @@ def _create_program(path: Path) -> bool:
 )
 @click.option("--toolchain", default=DEFAULT_LEAN_TOOLCHAIN, help="Lean toolchain.")
 def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
-    """Initialize a new Lean project for AutoLean.
-
-    \b
-    Creates:
-      <path>/lakefile.lean
-      <path>/lean-toolchain
-      <path>/MyProject.lean (with example sorry targets)
-      program.md (in current directory)
-    """
+    """Create a pinned Lean project and `program.md`."""
     path = path.resolve()
     if path.exists() and not path.is_dir():
         raise click.ClickException(f"Project path is not a directory: {path}")

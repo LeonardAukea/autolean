@@ -128,7 +128,7 @@ def generate_library_source(
     """Generate a complete Lean 4 library source for a topic.
 
     Args:
-        topic: Mathematical topic (e.g., "differential geometry", "graph theory")
+        topic: Mathematical topic (e.g., "differential geometry")
         llm_generate: LLM generate function
 
     Returns:

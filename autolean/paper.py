@@ -210,7 +210,9 @@ def _cache_paper_pdf(document: PaperDocument, root: Path) -> Path | None:
 
 
 def materialize_paper(document: PaperDocument, project_root: Path) -> PaperArtifact:
-    """Persist extracted text and exact PDF bytes without replacing artifacts."""
+    """Persist extracted text and exact PDF bytes without replacing
+    artifacts.
+    """
     extracted_text = _paper_text(document)
     root = project_root.resolve()
     text_sha256 = hashlib.sha256(extracted_text.encode()).hexdigest()

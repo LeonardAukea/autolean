@@ -173,9 +173,7 @@ def export_training(project: Path) -> None:
 def finetune_config(project: Path, model: str, framework: str) -> None:
     """Generate a fine-tuning config for Lean 4 proof models.
 
-    \b
-    Creates a ready-to-use config file for the specified framework.
-    Supports: Axolotl, Unsloth, HuggingFace TRL.
+    Writes a config file for the selected framework.
     """
     import yaml
 
@@ -320,7 +318,7 @@ def build_library(
 
     \b
     Creates definitions, structures, and basic lemmas that supplement
-    mathlib for a specific domain. Fills gaps that mathlib doesn't cover.
+    mathlib for a specific domain.
 
     \b
     Examples:
@@ -389,7 +387,7 @@ def build_library(
 
 
 # ---------------------------------------------------------------------------
-# improve — simplify/deepen/beautify an existing proof
+# improve — rewrite an existing proof toward a --goal
 # ---------------------------------------------------------------------------
 
 
@@ -420,12 +418,11 @@ def improve(
     max_attempts: int,
     program: Path,
 ) -> None:
-    """Improve an existing proof — make it shorter, more elegant, or faster.
+    """Rewrite an existing proof toward the selected --goal.
 
     \b
-    Takes a .lean file and theorem name, reads the current proof,
-    asks the LLM to improve it, verifies the new version compiles,
-    and replaces the original if successful.
+    Reads the named theorem's proof, requests a rewrite, verifies the
+    new version compiles, and replaces the original.
 
     \b
     Examples:
@@ -728,6 +725,7 @@ def challenge(
     """Take on an open mathematical problem.
 
     \b
+    Same catalog and workflow as `autolean problems`.
     Without arguments, lists all available problems.
     With a problem ID, generates the formalization and starts proving.
 

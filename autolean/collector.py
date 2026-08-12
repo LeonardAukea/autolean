@@ -5,8 +5,8 @@ Collects data in three formats:
   2. ShareGPT JSONL (Hermes/Axolotl compatible)
   3. DPO pairs (positive proof + negative proof for preference learning)
 
-The key insight: every AutoLean run generates training data.
-Successful proofs → positive examples. Failed attempts → negative examples for DPO.
+Successful proofs become positive examples; failed attempts become DPO
+negatives.
 """
 
 from __future__ import annotations

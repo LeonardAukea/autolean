@@ -328,7 +328,6 @@ class AutoLeanAgent:
         # Target identities already accepted by a persisted session.
         self._proved_ids: set[str] = set()
 
-        # Self-improving loop: data collection + skill memory
         from autolean.collector import TrainingDataCollector
         from autolean.skills import SkillMemory
 
@@ -598,10 +597,9 @@ class AutoLeanAgent:
         if len(targets) > 10:
             console.print(f"  ... and {len(targets) - 10} more")
 
-        # -- Deterministic tactic pre-search (before LLM) -------------------
-        # Try standard tactics on all targets. This instantly solves trivial
-        # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
-        # Fast tactics precede the more expensive compound tactics.
+        # -- Deterministic tactic pre-search --------------------------------
+        # Standard tactics run before any model request; trivial goals close
+        # here. Fast tactics precede the more expensive compound tactics.
         extra_standard = [t for t in STANDARD_TACTICS if t not in FAST_TACTICS]
         all_presearch = [*FAST_TACTICS, *extra_standard, *COMPOUND_TACTICS]
         if self.dry_run:
@@ -702,7 +700,6 @@ class AutoLeanAgent:
                     f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
                 )
 
-                # Self-improving loop
                 self.collector.record_attempt(record, tactic)
                 self.skill_memory.learn_from_proof(
                     theorem_name=t.decl_name,
@@ -833,7 +830,6 @@ class AutoLeanAgent:
                 f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
             )
 
-            # Show build error details (DX improvement)
             if record.error_summary and record.outcome in FAILURE_OUTCOMES:
                 err_lines = record.error_summary.strip().split("\n")
                 for eline in err_lines[:4]:
@@ -1150,7 +1146,6 @@ class AutoLeanAgent:
                 model=response.model,
             )
 
-        # Always show the generated proof (key DX: see what the LLM produces)
         if proof_lines <= 5 or self.verbose:
             console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
             for pline in proof.splitlines()[:12]:
@@ -1353,7 +1348,6 @@ class AutoLeanAgent:
             # Clear unhealthy status for this file (proof success = file is OK)
             self._unhealthy_files.pop(file_path, None)
 
-            # Self-improving loop: collect training data + learn skill
             self._step("Committing to git + collecting training data", "green")
             self.collector.record_attempt(record, proof)
             skill = self.skill_memory.learn_from_proof(
@@ -1781,7 +1775,6 @@ class AutoLeanAgent:
             for fmt, path in (exported or {}).items():
                 data_lines.append(f"  {fmt}: {path}")
 
-            # Auto fine-tuning trigger (self-improving loop)
             from autolean.finetune import (
                 FINETUNE_THRESHOLD,
                 check_finetune_readiness,
