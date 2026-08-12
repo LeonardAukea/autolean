@@ -97,8 +97,9 @@ python -m json.tool release/release-manifest.json
 ```
 
 The release job attaches every asset before publication. GitHub locks the tag
-and assets, then emits the release attestation. The workflow allows one minute
-for that asynchronous record to appear before `gh release verify` checks it.
+and assets, then emits the release attestation. The workflow allows five
+minutes for that asynchronous record to appear before `gh release verify`
+checks it.
 
 Repository release immutability was enabled on 2026-08-12. Earlier private
 qualification releases remain mutable and are not public distribution
