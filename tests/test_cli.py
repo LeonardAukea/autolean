@@ -867,6 +867,24 @@ def test_problem_commands_use_nouns_for_discovery_and_work(runner: CliRunner) ->
         assert command in result.output
 
 
+def test_new_challenge_uses_the_accepted_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autolean.cli_workflows import _prepare_challenge_source
+
+    path = tmp_path / "AutoLean" / "Challenge_Collatz.lean"
+    accepted = path.resolve()
+    monkeypatch.setattr(
+        "autolean.cli_workflows._accept_generated_source",
+        lambda *args, **kwargs: (accepted, SimpleNamespace(success=True)),
+    )
+
+    result = _prepare_challenge_source(tmp_path, path, "collatz", "source")
+
+    assert result == (accepted, False)
+
+
 def test_prove_routes_the_riemann_hypothesis_to_source_research(
     runner: CliRunner,
     project_dir: Path,
@@ -934,7 +952,7 @@ def test_challenge_reopens_owned_source_as_a_session(
         captured.update(kwargs)
         return Agent()
 
-    monkeypatch.setattr("autolean.__main__._agent_for", agent_for)
+    monkeypatch.setattr("autolean.cli_workflows._agent_for", agent_for)
 
     result = runner.invoke(
         main,
@@ -1006,7 +1024,7 @@ def test_resume_uses_persisted_scope_and_accepts_a_new_model(
         captured.update(kwargs)
         return Agent()
 
-    monkeypatch.setattr("autolean.__main__._agent_for", agent_for)
+    monkeypatch.setattr("autolean.cli_sessions._agent_for", agent_for)
 
     result = runner.invoke(
         main,
