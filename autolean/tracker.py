@@ -76,6 +76,7 @@ class ExperimentRecord:
     structural_context_sha256: str = ""
     indexed_context_sha256: str = ""
     strategy_sha256: str = ""
+    strategy_response_sha256: str = ""
     model_revision: str = ""
     sampling_seed: int | None = None
     model_artifact_sha256: str = ""
@@ -109,6 +110,7 @@ class ExperimentRecord:
             "structural_context_sha256": self.structural_context_sha256,
             "indexed_context_sha256": self.indexed_context_sha256,
             "strategy_sha256": self.strategy_sha256,
+            "strategy_response_sha256": self.strategy_response_sha256,
             "error": self.error_summary[:200],  # truncate long errors
         }
 
@@ -141,6 +143,7 @@ TSV_FIELDS = [
     "structural_context_sha256",
     "indexed_context_sha256",
     "strategy_sha256",
+    "strategy_response_sha256",
     "error",
 ]
 

@@ -226,11 +226,16 @@ class TestCLIBasics:
                         "objective": "Prove the equality in Nat.",
                         "formalization": ["Fix the numeral type to Nat."],
                         "observations": ["The equality computes."],
+                        "invariants": ["Preserve the exact theorem statement."],
+                        "obstructions": ["Reject an inferred non-Nat numeral type."],
                         "reductions": ["Normalize both sides."],
                         "premises": ["Use Mathlib arithmetic normalization."],
                         "methods": ["Try norm_num."],
+                        "partial_results": [],
                         "risks": ["Numerals are polymorphic."],
+                        "completion_criteria": ["Lean accepts the theorem without placeholders."],
                         "checkpoints": ["Compile the scaffold."],
+                        "revision_triggers": ["Lean infers a different numeral type."],
                     }
                 ),
                 lean_code,
@@ -238,6 +243,8 @@ class TestCLIBasics:
         )
 
         class Backend:
+            config = SimpleNamespace(model="fixture", backend="fixture")
+
             def __enter__(self) -> Backend:
                 return self
 

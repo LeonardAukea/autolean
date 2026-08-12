@@ -20,12 +20,13 @@ from autolean.provenance import ProofEnvironmentError
 
 if TYPE_CHECKING:
     from autolean.agent import AgentRunResult, AutoLeanAgent
-    from autolean.lean_interface import LeanProject
+    from autolean.lean_interface import BuildResult, LeanProject
+    from autolean.paper import PreparedPaper
     from autolean.program import ProgramConfig
     from autolean.provenance import ProofEnvironment
     from autolean.routing import EscalationDecision
     from autolean.session import ProofSession, SessionStore
-    from autolean.strategy import ProofPlan
+    from autolean.strategy import PlanAttempt, ProofPlan
 
 console = Console()
 
@@ -419,7 +420,7 @@ def _accept_generated_source(
     *,
     timeout: int = 120,
     expected_content: str | None = None,
-) -> Path:
+) -> tuple[Path, BuildResult]:
     """Compile generated source in isolation, then install the exact bytes."""
     from autolean.lean_interface import LeanProject
 
@@ -437,7 +438,7 @@ def _accept_generated_source(
     except (OSError, ValueError) as e:
         raise click.ClickException(f"Generated Lean output could not be accepted: {e}") from e
     if result.success:
-        return output
+        return output, result
 
     detail = result.errors[0].message if result.errors else result.stderr.strip() or result.stdout.strip()
     detail = " ".join(detail.split())[:500] if detail else "Lean rejected the source"
@@ -933,26 +934,19 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
 
 def _doctor_research_tools() -> list[str]:
     """Report the paper and indexed-context tools used by research workflows."""
-    from importlib.metadata import PackageNotFoundError, version
-
-    from autolean.code_search import CodeDBSearchProvider
-    from autolean.paper import lightpanda_identity
+    from autolean.research_tools import research_tools
 
     failures: list[str] = []
     console.print("\n[bold]Checking research tools...[/]")
-    try:
-        pdf_version = version("pymupdf4llm")
-        console.print(f"  [green]OK[/] PyMuPDF4LLM {pdf_version}")
-    except PackageNotFoundError:
-        failures.append("PyMuPDF4LLM is unavailable")
-        console.print("  [red]FAIL[/] PyMuPDF4LLM is unavailable")
-
-    lightpanda = lightpanda_identity()
-    lightpanda_style = "green]OK" if not lightpanda.endswith("unavailable") else "yellow]WARN"
-    console.print(f"  [{lightpanda_style}[/] {lightpanda}")
-    codedb = CodeDBSearchProvider().identity()
-    codedb_style = "green]OK" if not codedb.endswith("unavailable") else "yellow]WARN"
-    console.print(f"  [{codedb_style}[/] {codedb}")
+    for tool in research_tools():
+        if tool.available:
+            style = "green]OK"
+        elif tool.required:
+            style = "red]FAIL"
+            failures.append(tool.identity)
+        else:
+            style = "yellow]WARN"
+        console.print(f"  [{style}[/] {tool.identity}")
     return failures
 
 
@@ -1018,23 +1012,28 @@ def environment_command(project: Path, as_json: bool) -> None:
 @program_option
 def export_command(output: Path, title: str, session_id: str | None, program: Path) -> None:
     """Export a standalone Lean project and companion LaTeX paper."""
-    from autolean.export import ExportError, export_project
+    from autolean.export import ExportError, export_project, paper_bundle_from_artifacts
     from autolean.lean_interface import LeanProject
     from autolean.program import parse_program
-    from autolean.session import SessionError, SessionStore
+    from autolean.session import SessionError, SessionKind, SessionStore
 
     config = parse_program(program)
     project = LeanProject(program.parent / config.lean_project_path)
     try:
         environment = project.proof_environment()
         store = SessionStore(project.root)
-        session = store.load(session_id).as_dict() if session_id else None
+        proof_session = store.load(session_id) if session_id else None
+        session = proof_session.as_dict() if proof_session is not None else None
+        paper_bundle = None
+        if proof_session is not None and proof_session.kind is SessionKind.PAPER:
+            paper_bundle = paper_bundle_from_artifacts(store.artifact_paths(proof_session))
         result = export_project(
             project.root,
             output,
             title=title,
             environment_sha256=environment.sha256,
             session=session,
+            paper_bundle=paper_bundle,
         )
     except (ExportError, OSError, ProofEnvironmentError, SessionError) as error:
         raise click.ClickException(str(error)) from error
@@ -1045,7 +1044,8 @@ def export_command(output: Path, title: str, session_id: str | None, program: Pa
             f"Lean files: {result.source_count}\n"
             f"Manifest:   sha256:{result.manifest_sha256}\n\n"
             "Build Lean:  cd project && lake build\n"
-            "Build paper: cd paper && latexmk -xelatex main.tex",
+            "Build paper: cd paper && latexmk -xelatex main.tex\n"
+            "Paper data:  source/ (paper sessions)",
             title="Export",
             border_style="green",
         )
@@ -1133,12 +1133,25 @@ def _proof_plan(
     statement: str,
     llm: LLMBackend,
     guidance: tuple[str, ...],
+    *,
+    context: str = "",
+    on_response: Callable[[PlanAttempt], None] | None = None,
 ) -> ProofPlan:
     """Generate a plan and translate strategy errors for Click."""
     from autolean.strategy import ProofStrategyError, generate_proof_plan
 
     try:
-        return generate_proof_plan(statement, llm.generate, guidance=guidance)
+        return generate_proof_plan(
+            statement,
+            llm.generate,
+            guidance=guidance,
+            context=context,
+            on_response=on_response,
+            on_repair=lambda attempt, error: console.print(
+                f"[yellow]Strategy response rejected:[/] {error}\n"
+                f"  Requesting bounded repair {attempt}/1 from {llm.config.model}."
+            ),
+        )
     except ProofStrategyError as error:
         raise click.ClickException(f"Could not form a proof strategy: {error}") from error
 
@@ -1296,7 +1309,7 @@ def prove(
     console.print(Panel(Text(theorem.code), title="Lean 4 theorem", border_style="cyan"))
 
     target_file = generated_theorem_path(lean_root, theorem.declaration_name)
-    target_file = _accept_generated_source(
+    target_file, _ = _accept_generated_source(
         lean_root,
         target_file,
         theorem.source,
@@ -1357,139 +1370,33 @@ def _prepare_paper(
     output: Path | None,
     model: str | None,
     backend: str | None,
+    guide: tuple[str, ...],
+    review_plan: bool,
     program: Path,
-) -> tuple[Path | None, ProgramConfig]:
-    """Extract, display, and optionally formalize one paper."""
-    import re as _re
+) -> tuple[PreparedPaper | None, ProgramConfig]:
+    """Extract, review, and accept one paper through the shared workflow."""
+    from autolean.paper_workflow import PaperServices, prepare_paper
 
-    from autolean.paper import (
-        PdfEngine,
-        analyze_paper_structure,
-        extract_document_claims,
-        formalize_claim,
-        materialize_paper,
-        read_paper,
-        render_verification_source,
+    return prepare_paper(
+        source,
+        pages=pages,
+        pdf_engine=pdf_engine,
+        paddleocr_url=paddleocr_url,
+        extract_only=extract_only,
+        output=output,
+        model=model,
+        backend=backend,
+        guide=guide,
+        review_plan=review_plan,
+        program=program,
+        services=PaperServices(
+            console=console,
+            connect_llm=_connected_llm,
+            plan_proof=_proof_plan,
+            show_plan=_show_proof_plan,
+            accept_source=_accept_generated_source,
+        ),
     )
-    from autolean.program import parse_program
-
-    cfg = parse_program(program)
-    llm: LLMBackend | None = None
-    extracted_input_sha256 = ""
-
-    def connected_llm() -> LLMBackend:
-        nonlocal llm
-        if llm is None:
-            llm = _connected_llm(model, backend, cfg, timeout=600.0)
-        return llm
-
-    console.print(f"[bold]Analyzing paper: {source}[/]\n")
-    try:
-        try:
-            document = read_paper(
-                source,
-                pages=pages,
-                pdf_engine=PdfEngine(pdf_engine),
-                paddleocr_url=paddleocr_url,
-            )
-        except (OSError, ValueError, RuntimeError) as e:
-            raise click.ClickException(f"Paper extraction failed: {e}") from e
-
-        lean_root = program.parent / cfg.lean_project_path
-        try:
-            paper_artifact = materialize_paper(document, lean_root)
-        except (OSError, ValueError) as error:
-            raise click.ClickException(f"Paper artifact could not be saved: {error}") from error
-        if paper_artifact.pdf_path is not None:
-            document.pdf_path = paper_artifact.pdf_path
-
-        if extract_only:
-            console.print(
-                f"[green]Extracted paper artifact[/]\n"
-                f"  Markdown: {paper_artifact.markdown_path}\n"
-                f"  PDF:      {paper_artifact.pdf_path or 'not available'}\n"
-                f"  Source:   sha256:{paper_artifact.input_sha256}\n"
-                f"  Text:     sha256:{paper_artifact.text_sha256}"
-            )
-            if document.claims:
-                console.print(f"\n[bold]Found {len(document.claims)} structured claims:[/]")
-                for index, claim in enumerate(document.claims, 1):
-                    console.print(f"  {index}. [bold]{claim.label}[/]: {claim.statement[:100]}")
-            return None, cfg
-
-        claims = document.claims
-        paper_title = document.title
-        if not claims:
-            console.print("[bold]Using model-based extraction fallback...[/]")
-            text = document.text
-            if text and len(text.strip()) > 100:
-                extracted_input_sha256 = document.input_sha256
-                claims = extract_document_claims(document, connected_llm())
-
-        if not claims:
-            raise click.ClickException("No claims were extracted; select a page range or another source.")
-        if extracted_input_sha256:
-            for claim in claims:
-                claim.input_ref = document.input_ref
-                claim.input_sha256 = extracted_input_sha256
-
-        if document.extractor:
-            console.print(
-                f"[dim]Extractor: {document.extractor} · "
-                f"sha256:{document.input_sha256[:16] or 'unavailable'}[/]"
-            )
-
-        structure = analyze_paper_structure(claims)
-        console.print(f"\n[bold]Found {len(claims)} claims:[/]")
-        for kind, count in sorted(structure["by_kind"].items()):
-            console.print(f"  {kind}: {count}")
-        console.print()
-        for index, claim in enumerate(claims, 1):
-            proof_marker = " [dim](has proof)[/]" if claim.proof_sketch else ""
-            console.print(f"  {index}. [bold]{claim.label}[/]: {claim.statement[:100]}...{proof_marker}")
-
-        to_formalize = [claim for claim in claims if claim.kind != "remark"]
-        console.print(f"\n[bold]Formalizing {len(to_formalize)} claims...[/]")
-        formalizer = connected_llm()
-        for claim in to_formalize:
-            with console.status(f"[dim]Formalizing {claim.label}..."):
-                formalize_claim(claim, formalizer.generate)
-            if claim.lean_code:
-                console.print(f"  [green]OK[/] {claim.label} -> {claim.lean_name}")
-            else:
-                console.print(f"  [yellow]SKIP[/] {claim.label}")
-
-        formalized = sum(bool(claim.lean_code) for claim in to_formalize)
-        if formalized == 0:
-            raise click.ClickException("No claims could be formalized.")
-
-        safe_title = _re.sub(
-            r"[^a-zA-Z0-9_]",
-            "_",
-            (paper_title or "Untitled").replace(" ", "_"),
-        )
-        if output is None:
-            output_path = lean_root / "AutoLean" / f"Paper_{safe_title}.lean"
-        elif output.is_absolute():
-            output_path = output
-        else:
-            output_path = lean_root / output
-        content = render_verification_source(
-            to_formalize,
-            paper_title=paper_title,
-        )
-        output_path = _accept_generated_source(
-            lean_root,
-            output_path,
-            content,
-            timeout=300,
-        )
-        console.print(f"\n[bold green]Accepted {output_path}[/]")
-        console.print(f"  {formalized} declarations ready for proving")
-        return output_path, cfg
-    finally:
-        if llm is not None:
-            llm.close()
 
 
 @main.command()
@@ -1517,6 +1424,16 @@ def _prepare_paper(
     show_default=True,
     help="Cycle budget after formalization (0 = unlimited).",
 )
+@click.option(
+    "--guide",
+    multiple=True,
+    help="Add a mathematical constraint or preferred method.",
+)
+@click.option(
+    "--review-plan",
+    is_flag=True,
+    help="Review and optionally revise the paper strategy before formalization.",
+)
 @model_option
 @backend_option
 @program_option
@@ -1529,6 +1446,8 @@ def verify(
     formalize_only: bool,
     output: Path | None,
     max_cycles: int,
+    guide: tuple[str, ...],
+    review_plan: bool,
     model: str | None,
     backend: str | None,
     program: Path,
@@ -1536,7 +1455,7 @@ def verify(
     """Extract, formalize, and attempt the claims in a paper."""
     if extract_only and formalize_only:
         raise click.ClickException("Choose exactly one of --extract-only and --formalize-only.")
-    artifact, _ = _prepare_paper(
+    prepared, config = _prepare_paper(
         source,
         pages=pages,
         pdf_engine=pdf_engine,
@@ -1545,14 +1464,52 @@ def verify(
         output=output,
         model=model,
         backend=backend,
+        guide=guide,
+        review_plan=review_plan,
         program=program,
     )
     if extract_only:
         return
-    if artifact is None:  # pragma: no cover - fixed by extract_only=False
+    if prepared is None:  # pragma: no cover - fixed by extract_only=False
         raise click.ClickException("Paper formalization produced no output file.")
     if formalize_only:
         console.print(f"\n[dim]Continue:[/] autolean solve --program {program}")
+        return
+
+    from autolean.scanner import count_sorries
+    from autolean.session import SessionKind, SessionStatus, SessionStore
+
+    artifact = prepared.lean_path
+    paper_artifacts = (
+        prepared.source.markdown_path,
+        prepared.coverage_path,
+        prepared.plan_path,
+        *((prepared.source.pdf_path,) if prepared.source.pdf_path is not None else ()),
+    )
+    if count_sorries(artifact.read_text(encoding="utf-8")) == 0:
+        lean_root = (program.parent / config.lean_project_path).resolve()
+        store = SessionStore(lean_root)
+        session = store.create(
+            kind=SessionKind.PAPER,
+            title=source,
+            model=prepared.model,
+            backend=prepared.backend,
+            max_cycles=max_cycles,
+            target_file=artifact,
+            artifacts=paper_artifacts,
+            guidance=guide,
+        )
+        finished = store.save(
+            session.update(
+                status=SessionStatus.COMPLETED,
+                remaining_targets=0,
+                message="Every reviewed paper item passed Lean elaboration.",
+            )
+        )
+        console.print(
+            f"\n[bold green]Paper session complete:[/] {finished.id}\n"
+            f"  autolean export paper-artifact --session {finished.id}"
+        )
         return
 
     cycles_label = "unlimited" if max_cycles == 0 else str(max_cycles)
@@ -1566,8 +1523,6 @@ def verify(
     )
     agent.config.max_cycles = max_cycles
 
-    from autolean.session import SessionKind, SessionStore
-
     store = SessionStore(agent.project.root)
     session = store.create(
         kind=SessionKind.PAPER,
@@ -1579,6 +1534,8 @@ def verify(
         escalation_model=agent.config.escalation_model or "",
         escalation_after_failures=agent.config.escalation_after_failures,
         target_file=artifact,
+        artifacts=paper_artifacts,
+        guidance=guide,
     )
     _run_session_agent(agent, store, session)
 
@@ -1611,7 +1568,7 @@ def verify_paper(
     program: Path,
 ) -> None:
     """Extract or formalize the claims in a paper."""
-    artifact, _ = _prepare_paper(
+    prepared, _ = _prepare_paper(
         source,
         pages=pages,
         pdf_engine=pdf_engine,
@@ -1620,9 +1577,11 @@ def verify_paper(
         output=output,
         model=model,
         backend=backend,
+        guide=(),
+        review_plan=False,
         program=program,
     )
-    if artifact is not None:
+    if prepared is not None:
         console.print("\n  Next: [cyan]uv run autolean solve[/] to attempt proofs")
 
 

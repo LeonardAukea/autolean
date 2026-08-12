@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from autolean.llm import GenerateFn, LLMError
+from autolean.llm import GenerateFn, LLMError, LLMResponse
 
 _PLAN_FIELDS = (
     "formalization",
@@ -24,9 +25,10 @@ _PLAN_FIELDS = (
     "checkpoints",
     "revision_triggers",
 )
-_MAX_ITEMS = 8
-_MAX_ITEM_CHARS = 500
-_MAX_PLAN_CHARS = 20_000
+_MAX_ITEMS = 4
+_MAX_ITEM_CHARS = 240
+_MAX_PLAN_CHARS = 12_000
+_MAX_RESPONSE_CHARS = 64_000
 
 _SYSTEM_PROMPT = """\
 You are a mathematical research planner. Produce a concise, reviewable proof
@@ -61,12 +63,62 @@ Return exactly these JSON fields:
 - checkpoints: finite milestones that can be validated before proceeding
 - revision_triggers: observations that require changing the plan
 
-Every field after objective is an array of short strings.
+Every field after objective is an array of at most {max_items} strings. Each
+string is at most {max_item_chars} characters. Preserve the named fields even
+when an array is empty. Keep the complete response concise enough to review in
+one terminal screen.
+"""
+
+_REPAIR_PROMPT = """\
+Your previous proof strategy violated this response contract:
+
+{error}
+
+Return one corrected JSON object with the exact requested fields. Every array
+contains at most {max_items} strings, and every string contains at most
+{max_item_chars} characters. Do not omit mathematical risks or completion
+criteria; combine related items.
+
+Previous response:
+{response}
 """
 
 
 class ProofStrategyError(ValueError):
     """A model response cannot form a bounded proof strategy."""
+
+
+@dataclass(frozen=True)
+class PlanAttempt:
+    """One exact model response in a bounded planning exchange."""
+
+    attempt: int
+    guidance: tuple[str, ...]
+    response: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    duration_seconds: float
+    validation_error: str = ""
+
+    @property
+    def response_sha256(self) -> str:
+        """Return the identity of the provider response bytes."""
+        return hashlib.sha256(self.response.encode()).hexdigest()
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the complete response record for an audit artifact."""
+        return {
+            "attempt": self.attempt,
+            "duration_seconds": self.duration_seconds,
+            "guidance": list(self.guidance),
+            "input_tokens": self.input_tokens,
+            "model": self.model,
+            "output_tokens": self.output_tokens,
+            "response": self.response,
+            "response_sha256": self.response_sha256,
+            "validation_error": self.validation_error,
+        }
 
 
 @dataclass(frozen=True)
@@ -135,6 +187,9 @@ def generate_proof_plan(
     *,
     guidance: tuple[str, ...] = (),
     context: str = "",
+    max_repairs: int = 1,
+    on_repair: Callable[[int, str], None] | None = None,
+    on_response: Callable[[PlanAttempt], None] | None = None,
 ) -> ProofPlan:
     """Generate one concise strategy for a statement and explicit guidance."""
     statement = " ".join(statement.split())
@@ -142,6 +197,8 @@ def generate_proof_plan(
         raise ProofStrategyError("statement must not be empty")
     guidance_text = "\n".join(f"- {' '.join(item.split())}" for item in guidance) or "(none)"
     context_text = context.strip() or "(none)"
+    if max_repairs < 0 or max_repairs > 3:
+        raise ProofStrategyError("strategy repair budget must be between 0 and 3")
     try:
         response = llm_generate(
             _SYSTEM_PROMPT,
@@ -149,16 +206,56 @@ def generate_proof_plan(
                 statement=statement,
                 guidance=guidance_text,
                 context=context_text,
+                max_items=_MAX_ITEMS,
+                max_item_chars=_MAX_ITEM_CHARS,
             ),
         )
+        for repair in range(max_repairs + 1):
+            try:
+                plan = parse_proof_plan(response.text)
+            except ProofStrategyError as error:
+                if on_response is not None:
+                    on_response(
+                        _plan_attempt(
+                            response,
+                            attempt=repair + 1,
+                            guidance=guidance,
+                            validation_error=str(error),
+                        )
+                    )
+                if repair == max_repairs:
+                    raise
+                if on_repair is not None:
+                    on_repair(repair + 1, str(error))
+                response = llm_generate(
+                    _SYSTEM_PROMPT,
+                    _REPAIR_PROMPT.format(
+                        error=error,
+                        response=response.text[:_MAX_PLAN_CHARS],
+                        max_items=_MAX_ITEMS,
+                        max_item_chars=_MAX_ITEM_CHARS,
+                    ),
+                )
+            else:
+                if on_response is not None:
+                    on_response(
+                        _plan_attempt(
+                            response,
+                            attempt=repair + 1,
+                            guidance=guidance,
+                        )
+                    )
+                return plan
     except LLMError as error:
         raise ProofStrategyError(f"strategy generation failed: {error}") from error
-    return parse_proof_plan(response.text)
+    raise ProofStrategyError("strategy generation produced no response")
 
 
 def parse_proof_plan(raw: str) -> ProofPlan:
     """Parse and bound one model-produced JSON strategy."""
     text = raw.strip()
+    if len(text) > _MAX_RESPONSE_CHARS:
+        raise ProofStrategyError(f"strategy response exceeds {_MAX_RESPONSE_CHARS} characters")
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if fenced:
         text = fenced.group(1)
@@ -168,6 +265,13 @@ def parse_proof_plan(raw: str) -> ProofPlan:
         raise ProofStrategyError(f"strategy is not valid JSON: {error.msg}") from error
     if not isinstance(payload, dict):
         raise ProofStrategyError("strategy must be one JSON object")
+
+    expected_fields = {"objective", *_PLAN_FIELDS}
+    actual_fields = set(payload)
+    if actual_fields != expected_fields:
+        missing = ", ".join(sorted(expected_fields - actual_fields)) or "none"
+        unexpected = ", ".join(sorted(actual_fields - expected_fields)) or "none"
+        raise ProofStrategyError(f"strategy fields differ; missing: {missing}; unexpected: {unexpected}")
 
     objective = _bounded_text(payload.get("objective"), "objective")
     values: dict[str, tuple[str, ...]] = {}
@@ -184,62 +288,24 @@ def parse_proof_plan(raw: str) -> ProofPlan:
     return plan
 
 
-def plan_for_lean_target(
-    declaration: str,
-    goal_state: str,
+def _plan_attempt(
+    response: LLMResponse,
     *,
-    structural_quality: str,
-    local_references: tuple[str, ...] = (),
-    strategy_hints: tuple[str, ...] = (),
-    indexed_context_available: bool = False,
-) -> ProofPlan:
-    """Build the deterministic strategy checkpoint for one Lean target."""
-    goal = " ".join(goal_state.split())[:_MAX_ITEM_CHARS] or "Goal state unavailable."
-    methods = strategy_hints or _methods_for_goal(goal)
-    premises = tuple(f"Check local declaration `{name}`." for name in local_references[:5])
-    if indexed_context_available:
-        premises = (*premises, "Review the indexed local-project matches.")
-    risks = []
-    if structural_quality != "complete":
-        risks.append(f"Tree-sitter parse quality is {structural_quality}; confirm syntax with Lean.")
-    if goal_state.strip() == "":
-        risks.append("The Lean goal could not be extracted; infer it from the declaration context.")
-    return ProofPlan(
-        objective=f"Close every Lean goal in `{declaration}` without changing its statement.",
-        formalization=(f"Exact current goal: {goal}",),
-        observations=("Check simple constructors, computation, and contradiction cases first.",),
-        invariants=("Preserve the exact declaration statement and its universe and typeclass context.",),
-        obstructions=("Test proposed helper claims against small cases before relying on them.",),
-        reductions=("Reduce the goal to independently checkable subgoals before using broad automation.",),
-        premises=premises,
-        methods=methods,
-        partial_results=("Retain independently accepted helper lemmas that reduce the original goal.",),
-        risks=tuple(risks),
-        completion_criteria=("The declaration elaborates without placeholders or unapproved axioms.",),
-        checkpoints=(
-            "Elaborate the candidate in the pinned project closure.",
-            "Audit the exact declaration range and transitive axioms.",
-            "Install only the source bytes accepted by the sandbox.",
-        ),
-        revision_triggers=(
-            "A required premise is absent from the pinned library closure.",
-            "Two attempts repeat one kernel diagnostic without reducing the goal.",
-        ),
+    attempt: int,
+    guidance: tuple[str, ...],
+    validation_error: str = "",
+) -> PlanAttempt:
+    """Capture one provider response without normalizing its text."""
+    return PlanAttempt(
+        attempt=attempt,
+        guidance=guidance,
+        response=response.text,
+        model=response.model,
+        input_tokens=response.input_tokens,
+        output_tokens=response.output_tokens,
+        duration_seconds=response.duration_seconds,
+        validation_error=validation_error,
     )
-
-
-def _methods_for_goal(goal: str) -> tuple[str, ...]:
-    methods: list[str] = []
-    if re.search(r"\b\d+\b", goal) and "=" in goal:
-        methods.append("Try computation or `norm_num` before algebraic automation.")
-    if "∀" in goal or "→" in goal:
-        methods.append("Introduce quantified variables and hypotheses explicitly.")
-    if "∃" in goal:
-        methods.append("Construct a concrete witness and prove each obligation separately.")
-    if "=" in goal:
-        methods.append("Try definitional equality, targeted simplification, then rewriting.")
-    methods.append("Use a verified library premise with `exact` or `apply` when available.")
-    return tuple(methods[:4])
 
 
 def _bounded_text(value: Any, label: str) -> str:

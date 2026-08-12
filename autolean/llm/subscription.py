@@ -271,7 +271,7 @@ class ClaudeCodeClient(CliBackend):
             raise LLMError("claude produced an empty completion")
         return LLMResponse(
             text=text,
-            model=_first_model(payload) or self.config.model,
+            model=_generating_model(payload, self.config.model),
             input_tokens=_nonnegative_int(usage.get("input_tokens")),
             output_tokens=_nonnegative_int(usage.get("output_tokens")),
             duration_seconds=elapsed,
@@ -338,12 +338,31 @@ class CodexClient(CliBackend):
         )
 
 
-def _first_model(payload: dict[str, object]) -> str | None:
-    """Read the model name out of the claude CLI's `modelUsage` map."""
+def _generating_model(payload: dict[str, object], requested_model: str) -> str:
+    """Identify the Claude model whose tokens produced the response."""
     model_usage = payload.get("modelUsage")
-    if isinstance(model_usage, dict) and model_usage:
+    if not isinstance(model_usage, dict) or not model_usage:
+        return requested_model
+    if len(model_usage) == 1:
         return str(next(iter(model_usage)))
-    return None
+
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        input_tokens = _nonnegative_int(usage.get("input_tokens"))
+        output_tokens = _nonnegative_int(usage.get("output_tokens"))
+        matches = [
+            str(model)
+            for model, counts in model_usage.items()
+            if isinstance(counts, dict)
+            and _nonnegative_int(counts.get("inputTokens")) == input_tokens
+            and _nonnegative_int(counts.get("outputTokens")) == output_tokens
+        ]
+        if len(matches) == 1:
+            return matches[0]
+
+    requested = requested_model.casefold()
+    matches = [str(model) for model in model_usage if requested in str(model).casefold()]
+    return matches[0] if len(matches) == 1 else requested_model
 
 
 def _nonnegative_int(value: object) -> int:

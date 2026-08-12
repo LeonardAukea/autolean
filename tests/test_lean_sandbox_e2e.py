@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -17,6 +18,8 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("AUTOLEAN_RUN_SANDBOX_E2E") != "1",
     reason="set AUTOLEAN_RUN_SANDBOX_E2E=1 for host sandbox checks",
 )
+
+_MATHLIB_E2E_TIMEOUT_SECONDS = 240
 
 
 @pytest.fixture()
@@ -253,6 +256,7 @@ theorem pythagorean_theorem
         lambda _system, _user: LLMResponse(text=scaffold, model="fixture"),
         project,
         max_repairs=0,
+        timeout=_MATHLIB_E2E_TIMEOUT_SECONDS,
     )
 
     proof_source = theorem.source.replace(
@@ -264,6 +268,7 @@ theorem pythagorean_theorem
         proof_source,
         declaration=theorem.declaration_name,
         declaration_line=theorem.declaration_line,
+        timeout=_MATHLIB_E2E_TIMEOUT_SECONDS,
     )
 
     assert theorem.declaration_name == "pythagorean_theorem"
@@ -287,3 +292,43 @@ def test_runnable_challenge_sources_are_well_formed(
             continue
         result = project.validate_candidate(source, render_challenge_source(problem), timeout=120)
         assert result.success, f"{problem.id}: {result.stderr or result.errors}"
+
+
+def test_reviewed_ionescu_tulcea_inventory_reaches_isolated_lean(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    project, source = project_and_source
+    if not (project.root / ".lake" / "packages" / "mathlib").exists():
+        pytest.skip("the sandbox fixture has no Mathlib closure")
+
+    from autolean.paper import Claim, PaperArtifact
+    from autolean.paper_evidence import bind_reviewed_paper, render_verification_source
+    from autolean.paper_profiles import IONESCU_TULCEA_V5
+
+    claims = [
+        Claim(
+            item.label,
+            f"Extracted statement for {item.label}.",
+            kind=item.label.split()[0],
+            input_ref="https://arxiv.org/pdf/2506.18616v5.pdf",
+            input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        )
+        for item in IONESCU_TULCEA_V5.items
+    ]
+    artifact = PaperArtifact(
+        markdown_path=Path("paper.md"),
+        pdf_path=None,
+        input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        text_sha256="0" * 64,
+        pdf_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+    )
+    profile = bind_reviewed_paper(claims, artifact)
+    assert profile is IONESCU_TULCEA_V5
+    evidence = render_verification_source(claims, profile.title, imports=profile.imports)
+
+    result = project.validate_candidate(source, evidence, timeout=300)
+
+    assert result.success, result.stderr or result.errors
+    assert len(claims) == 25
+    assert sum(len(claim.evidence_names) for claim in claims) == 33
+    assert re.search(r"(?m)^[ \t]*sorry\b", evidence) is None

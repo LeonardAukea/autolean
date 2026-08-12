@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,8 @@ from autolean.tracker import Outcome
 
 class FakeBackend(BaseBackend):
     calls: int = 0
+    planning_calls: int = 0
+    proof_calls: int = 0
     error: Exception | None = None
     last_user: str = ""
     text: str = "trivial"
@@ -37,17 +40,44 @@ class FakeBackend(BaseBackend):
         temperature: float | None = None,
         stop: list[str] | None = None,
     ) -> LLMResponse:
-        del system, temperature, stop
+        del temperature, stop
         self.calls += 1
         self.last_user = user
         if self.error is not None:
             raise self.error
+        if "mathematical research planner" in system:
+            self.planning_calls += 1
+            return LLMResponse(
+                text=json.dumps(_strategy_payload()),
+                model=self.config.model,
+                input_tokens=60,
+                output_tokens=120,
+            )
+        self.proof_calls += 1
         return LLMResponse(
             text=self.text,
             model=self.config.model,
             input_tokens=42,
             output_tokens=1,
         )
+
+
+def _strategy_payload() -> dict[str, object]:
+    return {
+        "objective": "Close the exact Lean goal without changing its statement.",
+        "formalization": ["Work in the declaration's current local context."],
+        "observations": ["The goal is propositionally true."],
+        "invariants": ["Preserve the declaration statement."],
+        "obstructions": ["Reject terms that do not inhabit the exact goal."],
+        "reductions": ["Construct a term of the target proposition."],
+        "premises": ["Use declarations present in the pinned environment."],
+        "methods": ["Try the smallest constructor proof first."],
+        "partial_results": [],
+        "risks": ["The extracted goal may omit relevant local context."],
+        "completion_criteria": ["Lean accepts the declaration without placeholders."],
+        "checkpoints": ["Elaborate the candidate in the sandbox."],
+        "revision_triggers": ["A kernel diagnostic contradicts the proposed method."],
+    }
 
 
 def _project(tmp_path: Path) -> tuple[Path, Path, SorryTarget]:
@@ -151,7 +181,9 @@ def test_cycle_budget_is_fresh_when_an_experiment_resumes(
     result = agent.run()
 
     assert result.successful
-    assert backend.calls == 1
+    assert backend.calls == 2
+    assert backend.planning_calls == 1
+    assert backend.proof_calls == 1
     assert agent.tracker.cycle == 11
 
 
@@ -269,8 +301,10 @@ def test_auto_escalation_switches_once_without_expanding_the_attempt_budget(
     result = agent.run()
 
     assert result.successful
-    assert initial.calls == 1
-    assert stronger.calls == 1
+    assert initial.calls == 2
+    assert stronger.calls == 2
+    assert initial.planning_calls == 1
+    assert stronger.planning_calls == 1
     assert len(created) == 1
     assert created[0].model == "gpt-5.6-terra"
     assert agent.tracker.cycle == 2

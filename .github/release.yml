@@ -6,6 +6,8 @@ changelog:
       labels: [proof-engine]
     - title: Providers
       labels: [providers]
+    - title: Paper evidence
+      labels: [paper]
     - title: Documentation
       labels: [documentation]
     - title: Dependencies

@@ -1,4 +1,4 @@
-# Qualify and publish a release
+# Qualify a release
 
 This guide is for maintainers. A release is the output of a qualified `main`
 commit. Tags and assets are produced by CI.
@@ -54,12 +54,13 @@ audits the locked dependency graph and emits a CycloneDX SBOM.
 Regenerate the README demonstration when its command or output changes:
 
 ```bash
-python scripts/record_pythagorean_demo.py
+python scripts/record_paper_demo.py
 ```
 
-The recorder uses deterministic local model responses and the real Lean
-acceptance path. Pass `--live` only when provider variability is part of the
-demonstration.
+The recorder requires the configured live provider. It verifies the exact PDF,
+checks the accepted evidence and export, then drives the versioned VHS tape.
+The recorder and tape contain the command and human review guidance. Provider
+responses enter the generated provenance records at runtime.
 
 ## 3. Merge through the required gate
 
@@ -67,8 +68,12 @@ Open a pull request against `main`. The `Required` check aggregates the Python,
 dependency, Lean/Nix, sandbox, and reproducible-package jobs. Resolve every
 review thread and update the branch before squash merging.
 
-`main` rejects direct pushes, force pushes, and deletions. The repository keeps
-a linear history and deletes merged topic branches.
+The repository accepts squash merges, keeps a linear history, and deletes
+merged topic branches. Require the `Required` check through a branch rule when
+the repository plan exposes private-repository rules. GitHub's current free
+private-repository plan does not expose that control, so maintainers merge only
+after inspecting the aggregate check. Apply and verify the rule before changing
+the repository to public visibility.
 
 ## 4. Verify the immutable release
 
@@ -93,3 +98,6 @@ request; the resulting commit receives its own identity and evidence.
 
 The [environment reference](../reference/environment.md) defines the proof
 identity recorded in every accepted result.
+
+The repository remains private until the separate
+[public launch gate](open-the-repository.md) passes.

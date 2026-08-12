@@ -48,6 +48,7 @@ from autolean.proof_loop import (
     EscalationRouter,
     ModelTransition,
     ProofContextBuilder,
+    ProofContextError,
 )
 from autolean.provenance import ProofEnvironmentError, sha256_text
 from autolean.scanner import (
@@ -316,6 +317,7 @@ class AutoLeanAgent:
         self._structural_context_sha256: dict[str, str] = {}
         self._indexed_context_sha256: dict[str, str] = {}
         self._strategy_sha256: dict[str, str] = {}
+        self._strategy_response_sha256: dict[str, str] = {}
         self._response_input_tokens: dict[str, int] = {}
         self.structure = LeanStructureProvider()
         self.proof_context = ProofContextBuilder(self.project.root, self._step)
@@ -459,6 +461,7 @@ class AutoLeanAgent:
         self.config.model = route.decision.to_profile
         self.config.backend = route.decision.to_backend
         self._consecutive_llm_errors = 0
+        self.proof_context.invalidate_strategy(target.id)
         console.print(
             f"[bold cyan]Model switched:[/] {route.transition.from_model} → "
             f"{route.transition.to_model}; the total attempt budget is unchanged."
@@ -1006,18 +1009,35 @@ class AutoLeanAgent:
             self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
             file_context += f"\n\n{skill_injection}"
 
-        enrichment = self.proof_context.build(
-            target,
-            goal_state or "",
-            structural_quality=structural.quality.value,
-            local_references=tuple(
-                declaration.qualified_name for declaration in structural.referenced_declarations
-            ),
-            strategy_hints=tuple(self.config.strategy_hints),
-            attempt=attempt,
-        )
+        try:
+            enrichment = self.proof_context.build(
+                target,
+                goal_state or "",
+                structural_quality=structural.quality.value,
+                local_references=tuple(
+                    declaration.qualified_name for declaration in structural.referenced_declarations
+                ),
+                strategy_hints=tuple(self.config.strategy_hints),
+                llm_generate=self.llm.generate,
+                attempt=attempt,
+            )
+        except ProofContextError as error:
+            message = f"Model strategy failed: {error}"
+            self._terminal_failure = message
+            self._interrupted = True
+            self._step(message, "red")
+            return self._make_record(
+                cycle,
+                target,
+                attempt,
+                t0,
+                outcome=Outcome.FAIL_PROVIDER,
+                error_summary=message,
+                error_category="strategy_generation",
+            )
         self._indexed_context_sha256[target.id] = enrichment.indexed_sha256
         self._strategy_sha256[target.id] = enrichment.strategy_sha256
+        self._strategy_response_sha256[target.id] = enrichment.strategy_response_sha256
         file_context += f"\n\n{enrichment.text}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
@@ -1292,6 +1312,9 @@ class AutoLeanAgent:
                 llm_input_tokens=response.input_tokens,
                 prompt_sha256=self._prompt_sha256.get(target.id, ""),
                 structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+                indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
+                strategy_sha256=self._strategy_sha256.get(target.id, ""),
+                strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
                 model_revision=self.llm.config.model_revision or "",
                 sampling_seed=self.llm.config.seed,
                 model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
@@ -1497,6 +1520,7 @@ class AutoLeanAgent:
             structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
             indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
             strategy_sha256=self._strategy_sha256.get(target.id, ""),
+            strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
             model_revision=self.llm.config.model_revision or "",
             sampling_seed=self.llm.config.seed,
             model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
@@ -1552,6 +1576,9 @@ class AutoLeanAgent:
             llm_input_tokens=self._response_input_tokens.get(target.id, 0),
             prompt_sha256=self._prompt_sha256.get(target.id, ""),
             structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
+            indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
+            strategy_sha256=self._strategy_sha256.get(target.id, ""),
+            strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
             model_revision=self.llm.config.model_revision or "",
             sampling_seed=self.llm.config.seed,
             model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",

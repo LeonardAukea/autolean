@@ -23,6 +23,29 @@ The registry in `autolean/models.py` is the source of truth for shipped
 profiles. Provider catalogs change; the command reports the profiles in the
 installed AutoLean version.
 
+## Set the project default
+
+Put the profile name in `program.md` when a project should begin every run with
+the same model:
+
+```markdown
+## LLM Configuration
+
+model: sonnet
+```
+
+A command-line `--model` selects a model for that invocation. The session
+records the resolved profile, backend, and provider model.
+
+## Choose interactively
+
+```bash
+autolean workbench
+```
+
+The workbench lists ready models and lets you select one before starting or
+continuing a proof session.
+
 ## Use a subscription
 
 `claude_cli` uses a Claude subscription authenticated by the Claude CLI.

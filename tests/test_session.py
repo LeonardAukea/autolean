@@ -21,6 +21,9 @@ def test_session_round_trip_and_latest_target_lookup(tmp_path: Path) -> None:
     target = tmp_path / "AutoLean" / "Challenge_Collatz.lean"
     target.parent.mkdir()
     target.write_text("theorem target : True := by\n  sorry\n", encoding="utf-8")
+    paper = tmp_path / "AutoLean" / "Papers" / "paper.md"
+    paper.parent.mkdir()
+    paper.write_text("# Paper\n", encoding="utf-8")
     store = SessionStore(tmp_path)
 
     session = store.create(
@@ -31,6 +34,7 @@ def test_session_round_trip_and_latest_target_lookup(tmp_path: Path) -> None:
         max_cycles=8,
         target_file=target,
         target_filter="collatz",
+        artifacts=(paper,),
         guidance=("Prefer finite reductions.",),
         escalation_policy=EscalationPolicy.AUTO,
         escalation_model="fable",
@@ -60,6 +64,7 @@ def test_session_round_trip_and_latest_target_lookup(tmp_path: Path) -> None:
     assert store.latest() == paused
     assert store.find_target(target) == paused
     assert store.target_path(paused) == target
+    assert store.artifact_paths(paused) == (paper,)
     assert paused.escalation_policy is EscalationPolicy.AUTO
     assert paused.escalation_model == "fable"
     assert paused.model_transitions == (transition,)
@@ -97,6 +102,23 @@ def test_session_target_must_remain_inside_project(tmp_path: Path) -> None:
             max_cycles=5,
             target_file=tmp_path / "outside.lean",
             session_id="20260811-outside-00000001",
+        )
+
+
+def test_session_artifacts_must_exist_inside_project(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "workspace")
+    outside = tmp_path / "paper.pdf"
+    outside.write_bytes(b"paper")
+
+    with pytest.raises(SessionError, match="inside the Lean project"):
+        store.create(
+            kind=SessionKind.PAPER,
+            title="Outside artifact",
+            model="opus",
+            backend="claude_cli",
+            max_cycles=5,
+            artifacts=(outside,),
+            session_id="20260811-artifact-00000001",
         )
 
 

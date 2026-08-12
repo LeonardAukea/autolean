@@ -31,10 +31,11 @@ Each cycle performs the same steps:
 1. Select the highest-priority target within the requested scope.
 2. Read its Lean goal and bounded structural context.
 3. Add fixed-budget local search, learned skills, and prior failure evidence.
-4. Ask one model for one candidate proof.
-5. Apply the source policy and sandboxed Lean validation.
-6. Record the outcome and provenance.
-7. Install only an accepted candidate, then rescan.
+4. Ask the active model for a target-specific proof strategy.
+5. Ask that model for one candidate proof under the accepted strategy.
+6. Apply the source policy and sandboxed Lean validation.
+7. Record the plan response, candidate, outcome, and provenance.
+8. Install only an accepted candidate, then rescan.
 
 The order is stable. Prompt layers are separate: system rules, project
 guidance, and ephemeral target evidence have different ownership and hashes.
