@@ -1,7 +1,6 @@
 # Command-line interface
 
-Root help presents one interactive entry point, six proof workflows, three
-inspection commands, and four project commands:
+Root help groups commands by task:
 
 ```bash
 autolean --help
@@ -29,8 +28,8 @@ autolean COMMAND --help
 `prove STATEMENT`
 
 : Plan, formalize, compiler-repair, and prove one natural-language statement.
-  `--review-plan` pauses before source generation. The default limit is five
-  proof attempts; zero is unlimited.
+  `--review-plan` pauses before source generation. `--max-attempts` bounds
+  proof attempts for the statement; zero is unlimited.
 
 `solve`
 

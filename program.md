@@ -42,22 +42,9 @@ workspace
 ## LLM Configuration
 
 <!--
-`auto` selects the strongest profile for an authenticated subscription CLI,
-then a configured hosted provider. Use `backend` to select one provider or
-`model` to select an exact profile. Run `autolean models` to see setup state.
-Subscription profiles include fable, opus, sonnet, codex, codex-terra, and
-codex-luna. Hosted profiles append `-api`. Local profiles include muse-glimmer,
-gemma4, and deepseek-prover. A raw model string also works, for example
-`gemma4:26b`.
-
-backend: overrides the profile's backend with one of
-claude_cli, codex_cli, anthropic, openai, ollama, openai_compat, muse_glimmer.
-endpoint: optional HTTP base URL for a self-hosted inference server.
-effort: optional reasoning-depth override for capable models.
-temperature: sampling value for backends that advertise support.
-escalation_policy: never, ask, or auto; ask is silent in non-interactive runs.
-escalation_model: optional exact stronger profile or raw model ID.
-escalation_after_failures: eligible kernel failures before a routing decision.
+`auto` selects the strongest profile for an authenticated provider. Run
+`autolean models` for profiles and setup state; docs/reference/program.md
+defines every key.
 -->
 model: auto
 temperature: 0.0

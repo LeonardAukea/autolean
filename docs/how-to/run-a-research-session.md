@@ -26,8 +26,9 @@ To work through declarations already containing `sorry`:
 autolean solve --max-cycles 5
 ```
 
-Use `--dry-run` to exercise model and Lean validation while keeping source,
-logs, results, skills, and training data unchanged.
+Use `--dry-run` to exercise model and Lean validation without installing
+source; the [trust boundary](../explanation/trust-boundary.md#provider-boundary)
+states its exact guarantees.
 
 ## Continue saved work
 
@@ -72,7 +73,8 @@ only after inspecting its evidence. `Escape` stops an active worker.
 
 ## Choose a budget
 
-Five cycles is the normal default. A small explicit budget is easier to audit:
+Budgets are bounded by default ([`max_cycles`](../reference/program.md)). A
+small explicit budget is easier to audit:
 
 ```bash
 autolean solve --max-cycles 3

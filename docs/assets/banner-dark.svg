@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="270" viewBox="0 0 1200 270" role="img" aria-label="AutoLean: conjecture in, kernel-checked proof out">
+  <style>
+    .wordmark {
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas,
+        "DejaVu Sans Mono", monospace;
+      font-size: 76px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      fill: #e8edf4;
+    }
+    .tagline {
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas,
+        "DejaVu Sans Mono", monospace;
+      font-size: 21px;
+      fill: #9aa4b2;
+    }
+    .tagline-accent { fill: #2dd4bf; }
+    .stage {
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas,
+        "DejaVu Sans Mono", monospace;
+      font-size: 15px;
+      fill: #7c8694;
+    }
+    .stage-final { fill: #2dd4bf; font-weight: 700; }
+  </style>
+
+  <!-- turnstile ⊢ drawn as geometry so no font is required -->
+  <g transform="translate(330,68)">
+    <rect x="0" y="0" width="11" height="76" rx="3" fill="#2dd4bf"/>
+    <rect x="11" y="33" width="52" height="11" rx="3" fill="#2dd4bf"/>
+  </g>
+
+  <text class="wordmark" x="416" y="128" textLength="456">AutoLean</text>
+
+  <text class="tagline" x="600" y="181" text-anchor="middle">conjecture in
+    <tspan class="tagline-accent">· kernel-checked proof out</tspan></text>
+
+  <!-- acceptance pipeline -->
+  <g transform="translate(300,222)">
+    <text class="stage" x="0" y="5">plan</text>
+    <path d="M 44 0 h 26" stroke="#3d4654" stroke-width="1.5"/>
+    <text class="stage" x="82" y="5">generate</text>
+    <path d="M 162 0 h 26" stroke="#3d4654" stroke-width="1.5"/>
+    <text class="stage" x="200" y="5">sandbox</text>
+    <path d="M 271 0 h 26" stroke="#3d4654" stroke-width="1.5"/>
+    <text class="stage" x="309" y="5">elaborate</text>
+    <path d="M 398 0 h 26" stroke="#3d4654" stroke-width="1.5"/>
+    <text class="stage" x="436" y="5">audit</text>
+    <path d="M 489 0 h 26" stroke="#3d4654" stroke-width="1.5"/>
+    <text class="stage stage-final" x="527" y="5">kernel ✓</text>
+  </g>
+</svg>

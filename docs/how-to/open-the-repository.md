@@ -1,6 +1,6 @@
 # Open the repository
 
-The repository stays private until this launch gate passes. Changing
+This gate governs the change from private to public visibility. Changing
 visibility is a separate maintainer action after the qualifying pull request
 merges.
 

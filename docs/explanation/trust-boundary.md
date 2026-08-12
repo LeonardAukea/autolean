@@ -15,33 +15,23 @@ checks can reject a candidate early. None can accept one.
 
 ## Acceptance sequence
 
-```text
-selected target + expected source hash
-                 |
-                 v
-          bounded model request
-                 |
-                 v
-       generated-source policy
-                 |
-                 v
-       isolated scratch project
-                 |
-                 v
- sandbox-exec (macOS) / Bubblewrap (Linux)
-       no network, minimal environment
-                 |
-                 v
-        pinned Lean elaboration
-                 |
-                 v
- fresh declaration-range and axiom audit
-                 |
-                 v
- compare-and-swap source installation
-                 |
-                 v
-        exact-path proof commit
+```mermaid
+flowchart TD
+    target["selected target + expected source hash"]
+    request["bounded model request"]
+    policy["generated-source policy"]
+    scratch["isolated scratch project"]
+    sandbox["sandbox-exec (macOS) / Bubblewrap (Linux)<br/>no network, minimal environment"]
+    elab["pinned Lean elaboration"]
+    audit["fresh declaration-range and axiom audit"]
+    install["compare-and-swap source installation"]
+    commit["exact-path proof commit"]
+
+    target --> request --> policy --> scratch --> sandbox
+    sandbox --> elab --> audit --> install --> commit
+    policy -- "reject" --> stop(["candidate discarded,<br/>diagnostics recorded"])
+    elab -- "reject" --> stop
+    audit -- "reject" --> stop
 ```
 
 The generated candidate and compiler outputs live in a temporary directory.
@@ -62,6 +52,29 @@ The policy rejects source that carries authority beyond a proof body:
 This is defense in depth. Lean elaboration can execute metaprograms, so the
 operating-system sandbox owns process, filesystem, environment, and network
 containment.
+
+## Why an operating-system sandbox
+
+Elaborating Lean source is executing a program. Macros, `elab` rules, and
+tactic frameworks run arbitrary compiled code inside the elaborator, so
+checking an untrusted candidate is code execution, whatever the candidate
+looks like. The layers above the sandbox cannot carry this responsibility:
+
+- The source policy is a syntactic filter. It rejects the obvious escape
+  hatches, and a determined payload can be disguised from any scanner that
+  does not run the code.
+- The kernel guarantees logical soundness. It says nothing about what the
+  elaborator did to the host while producing the term it checks.
+
+The sandbox is the one layer whose guarantee does not depend on the
+candidate's content: no network, a minimal environment, and a filesystem view
+restricted to the scratch project, enforced by the operating system.
+
+Its cost does not match its weight. Wrapping the Lean process in
+`sandbox-exec` or Bubblewrap adds process-launch overhead of a few
+milliseconds; the elaboration it contains imports Mathlib and runs for
+seconds to minutes, dominated by work that would happen with or without the
+sandbox. Containment is effectively free relative to what it contains.
 
 ## Declaration binding
 

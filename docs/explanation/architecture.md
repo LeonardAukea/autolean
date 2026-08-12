@@ -4,20 +4,32 @@ AutoLean is a pipeline with one owner for each decision. Command adapters
 collect intent. Domain services produce plans and candidate source. The proof
 boundary accepts exact bytes only after Lean validates them.
 
-```text
-CLI and workbench
-       |
-       v
-typed command runtime
-       |
-       v
-plans, sessions, papers, routing, exports
-       |
-       v
-generated-source policy and Lean project
-       |
-       v
-sandbox, elaborator, declaration audit, axiom audit
+```mermaid
+flowchart TD
+    subgraph commands["Command layer"]
+        cli["scriptable CLI<br/>__main__, cli_sessions, cli_workflows"]
+        workbench["Textual workbench"]
+        runtime["typed command runtime<br/>cli_runtime"]
+    end
+    subgraph research["Research layer"]
+        strategy["strategy:<br/>reviewed plan"]
+        session["session:<br/>durable state"]
+        routing["routing:<br/>model escalation"]
+        proofloop["proof_loop:<br/>bounded context"]
+        paper["paper, paper_workflow:<br/>claim evidence"]
+        export["export:<br/>standalone artifacts"]
+    end
+    subgraph boundary["Proof boundary"]
+        policy["generated_code:<br/>source policy"]
+        lean["lean_interface:<br/>sandbox, elaboration, audits,<br/>compare-and-swap install"]
+        provenance["provenance:<br/>identity records"]
+    end
+
+    cli --> runtime
+    workbench -- "child-process<br/>command plans" --> cli
+    runtime --> strategy & session & routing & proofloop & paper & export
+    strategy & session & routing & proofloop & paper & export --> policy
+    policy --> lean --> provenance
 ```
 
 ## Command layer
