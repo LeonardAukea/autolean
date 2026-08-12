@@ -76,6 +76,12 @@ The Nix checks validate the Lean version, grammar load, generated-code command
 policy, and native package. Linux CI also runs the Bubblewrap containment
 attacks under the host AppArmor profile.
 
+CI builds the hash-pinned Lean grammar once and supplies that shared library
+to every supported Python interpreter. A non-Nix installation can materialize
+the same versioned grammar through `tree-sitter-language-pack`. If that cache
+is unavailable, structural inspection reports `unavailable` and proof search
+continues with Lean as its semantic authority.
+
 ## Reproducibility boundary
 
 Environment capture and candidate acceptance are deterministic for fixed

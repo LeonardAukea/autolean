@@ -27,6 +27,17 @@ def test_release_job_requires_immutability() -> None:
     assert 'test "$immutable" = true' in workflow
 
 
+def test_python_matrix_uses_one_pinned_grammar_and_exact_interpreters() -> None:
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "nix build .#lean-grammar" in workflow
+    assert "name: lean-tree-sitter-grammar" in workflow
+    assert "needs: grammar" in workflow
+    assert "UV_PYTHON: ${{ matrix.python }}" in workflow
+    assert "AUTOLEAN_TREE_SITTER_LEAN_LIBRARY:" in workflow
+    assert "sys.version_info[:2] == expected" in workflow
+
+
 def test_release_attestation_verification_is_independently_retriable() -> None:
     workflow = (WORKFLOWS / "verify-release.yml").read_text(encoding="utf-8")
 

@@ -211,6 +211,24 @@ def _parser_from_library(path: Path) -> tuple[Parser, ctypes.CDLL]:
     return Parser(Language(capsule)), handle
 
 
+class _GrammarUnavailableError(RuntimeError):
+    """The language pack could not materialize its Lean grammar."""
+
+
+def _parser_from_language_pack() -> tuple[Parser, Path | None]:
+    """Load the cached language-pack parser and locate its grammar library."""
+    from tree_sitter_language_pack import Error as LanguagePackError
+    from tree_sitter_language_pack import cache_dir, get_parser
+
+    try:
+        parser = get_parser("lean")
+    except LanguagePackError as error:
+        raise _GrammarUnavailableError(str(error)) from error
+
+    grammar = next(Path(cache_dir()).glob("libtree_sitter_lean.*"), None)
+    return parser, grammar
+
+
 def _node_text(node: Node, source: bytes) -> str:
     return source[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
 
@@ -383,10 +401,7 @@ class LeanStructureProvider:
                 self._parser, self._grammar_handle = _parser_from_library(path)
                 self._parser_identity = parser_identity(grammar_sha256=_sha256_file(path))
             else:
-                from tree_sitter_language_pack import cache_dir, get_parser
-
-                self._parser = get_parser("lean")
-                grammar = next(Path(cache_dir()).joinpath("libs").glob("libtree_sitter_lean.*"), None)
+                self._parser, grammar = _parser_from_language_pack()
                 if grammar is not None:
                     self._parser_identity = parser_identity(grammar_sha256=_sha256_file(grammar))
         except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as error:
