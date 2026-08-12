@@ -3,37 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import click
 from rich.console import Console
 
-from autolean.cli_extra import (
-    backend_option,
-    escalation_options,
-    model_option,
-    program_option,
-)
+from autolean import cli_runtime
 
 console = Console()
 
-
-def _root_cli() -> Any:
-    from autolean import __main__ as root_cli
-
-    return root_cli
-
-
-def _agent_for(*args: Any, **kwargs: Any) -> Any:
-    return _root_cli()._agent_for(*args, **kwargs)
-
-
-def _configure_escalation(*args: Any, **kwargs: Any) -> Any:
-    return _root_cli()._configure_escalation(*args, **kwargs)
-
-
-def _run_session_agent(*args: Any, **kwargs: Any) -> Any:
-    return _root_cli()._run_session_agent(*args, **kwargs)
+_agent_for = cli_runtime.agent_for
+_configure_escalation = cli_runtime.configure_escalation
+_run_session_agent = cli_runtime.run_session_agent
+backend_option = cli_runtime.backend_option
+escalation_options = cli_runtime.escalation_options
+model_option = cli_runtime.model_option
+program_option = cli_runtime.program_option
 
 
 @click.group()
