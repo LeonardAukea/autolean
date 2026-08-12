@@ -66,14 +66,9 @@ source-control changes.
 
 ## Documentation
 
-Documentation follows [Diátaxis](https://diataxis.fr/):
-
-- `docs/tutorials/` teaches through a complete first experience.
-- `docs/how-to/` gives steps for a specific task.
-- `docs/reference/` states commands, formats, and contracts.
-- `docs/explanation/` develops design and research ideas.
-
-Put each fact in one place and link to it elsewhere. Write current behaviour in
+Documentation follows [Diátaxis](https://diataxis.fr/); the
+[documentation index](docs/README.md) states where each kind of information
+belongs. Put each fact in one place and link to it elsewhere. Write current behaviour in
 plain sentences. Wrap prose at 80 columns.
 
 The terminal demo is reproducible:

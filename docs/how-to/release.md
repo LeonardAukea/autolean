@@ -69,11 +69,9 @@ dependency, Lean/Nix, sandbox, and reproducible-package jobs. Resolve every
 review thread and update the branch before squash merging.
 
 The repository accepts squash merges, keeps a linear history, and deletes
-merged topic branches. Require the `Required` check through a branch rule when
-the repository plan exposes private-repository rules. GitHub's current free
-private-repository plan does not expose that control, so maintainers merge only
-after inspecting the aggregate check. Apply and verify the rule before changing
-the repository to public visibility.
+merged topic branches. Branch-rule enforcement of the `Required` check is
+owned by the [public launch gate](open-the-repository.md); merge only after
+inspecting the aggregate check where no rule enforces it.
 
 ## 4. Verify the immutable release
 
@@ -116,8 +114,8 @@ request; the resulting commit receives its own identity and evidence.
 The [environment reference](../reference/environment.md) defines the proof
 identity recorded in every accepted result.
 
-The repository remains private until the separate
-[public launch gate](open-the-repository.md) passes.
+Repository visibility is governed by the separate
+[public launch gate](open-the-repository.md).
 
 ## 5. Publish the Python distribution
 

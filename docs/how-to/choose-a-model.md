@@ -101,7 +101,8 @@ export OPENAI_API_KEY=...
 autolean prove "1 + 1 = 2" --model gpt-api
 ```
 
-Credentials do not enter `program.md`, the prompt, or the session record.
+The [provider boundary](../explanation/trust-boundary.md#provider-boundary)
+states how credentials and prompt data are handled.
 
 ## Use local inference
 

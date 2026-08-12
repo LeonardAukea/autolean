@@ -23,10 +23,10 @@ the tag and assets when the release is published and emits an attestation for
 them. The maintainer may stop publication when a boundary is uncertain; the
 next qualified commit receives a new identity.
 
-The repository remains private until the
-[public launch gate](docs/how-to/open-the-repository.md) passes. Visibility
-changes require an explicit maintainer decision and are never part of routine
-release automation.
+Repository visibility follows the
+[public launch gate](docs/how-to/open-the-repository.md). A visibility change
+is an explicit maintainer decision and is never part of routine release
+automation.
 
 ## Security and conduct
 
