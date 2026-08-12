@@ -139,15 +139,15 @@ class TestBackendSelection:
         assert (resolved.model, resolved.backend) == ("gemma4:26b", "ollama")
 
     def test_max_output_tokens_is_read(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "max_output_tokens: 4096\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nmax_output_tokens: 4096\n"))
         assert cfg.llm_config().max_output_tokens == 4096
 
     def test_num_predict_is_accepted_as_the_ollama_spelling(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "num_predict: 512\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nnum_predict: 512\n"))
         assert cfg.llm_config().max_output_tokens == 512
 
     def test_llm_timeout_is_read(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "llm_timeout_seconds: 90\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nllm_timeout_seconds: 90\n"))
         assert cfg.llm_config().timeout == pytest.approx(90.0)
 
     def test_model_escalation_policy_is_read(self, tmp_path: Path) -> None:
