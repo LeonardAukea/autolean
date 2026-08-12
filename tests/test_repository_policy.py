@@ -38,6 +38,25 @@ def test_python_matrix_uses_one_pinned_grammar_and_exact_interpreters() -> None:
     assert "sys.version_info[:2] == expected" in workflow
 
 
+def test_documentation_checks_use_the_ci_tools_shell() -> None:
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+
+    assert workflow.count("nix develop .#ci --command") == 3
+    assert 'name = "autolean-ci";' in flake
+    assert 'name = "autolean";' in flake
+
+
+def test_contribution_interfaces_require_reproducible_evidence() -> None:
+    bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug.yml").read_text(encoding="utf-8")
+    pull_request = (ROOT / ".github" / "pull_request_template.md").read_text(encoding="utf-8")
+
+    for field in ("behaviour", "expected", "reproduce", "environment", "artifacts", "boundary"):
+        assert f"id: {field}" in bug
+    for section in ("## Invariant", "## Verification", "## Qualification boundary"):
+        assert section in pull_request
+
+
 def test_release_integrity_is_independently_verifiable() -> None:
     workflow = (WORKFLOWS / "verify-release.yml").read_text(encoding="utf-8")
 

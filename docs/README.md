@@ -35,6 +35,7 @@ Explanation pages describe the design and the constraints that shape it.
 - [Trust boundary](explanation/trust-boundary.md)
 - [Research and proof loop](explanation/research-loop.md)
 - [Architecture](explanation/architecture.md)
+- [Engineering discipline](explanation/engineering.md)
 
 These four homes follow [Diátaxis](https://diataxis.fr/). A page should answer
 one kind of question. Link to another page when the reader's question changes.

@@ -45,6 +45,10 @@ AUTOLEAN_RUN_SANDBOX_E2E=1 \
 
 ## Design rules
 
+The [engineering discipline](docs/explanation/engineering.md) defines the
+contract, failure, readability, debugging, testing, and review model used by
+this repository.
+
 - Give each invariant one owner.
 - Keep provider code behind the common backend protocol.
 - Keep model output outside the trusted boundary until Lean accepts it.

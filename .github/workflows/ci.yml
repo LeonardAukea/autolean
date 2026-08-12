@@ -171,9 +171,9 @@ jobs:
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       - name: Check workflows and local documentation links
         run: |
-          nix develop . --command actionlint .github/workflows/*.yml
-          nix develop . --command cffconvert --validate -i CITATION.cff
-          nix develop . --command lychee --offline --include-fragments \
+          nix develop .#ci --command actionlint .github/workflows/*.yml
+          nix develop .#ci --command cffconvert --validate -i CITATION.cff
+          nix develop .#ci --command lychee --offline --include-fragments \
             README.md CONTRIBUTING.md SECURITY.md SUPPORT.md GOVERNANCE.md \
             CODE_OF_CONDUCT.md CHANGELOG.md docs
       - name: Check repository boundaries

@@ -38,6 +38,11 @@ body:
     validations:
       required: true
   - type: textarea
+    id: artifacts
+    attributes:
+      label: Diagnostic artifacts
+      description: Attach relevant logs, generated files, or screenshots.
+  - type: textarea
     id: boundary
     attributes:
       label: Qualification boundary

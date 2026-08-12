@@ -462,48 +462,59 @@
             generated-code-sandbox-vm = sandboxVmTest;
           };
 
-        devShells.default = pkgs.mkShell {
-          name = "autolean";
-          packages =
-            (with pkgs; [
+        devShells = {
+          ci = pkgs.mkShell {
+            name = "autolean-ci";
+            packages = with pkgs; [
               actionlint
               cffconvert
-              cvc5
-              curl
-              jq
               lychee
-              ollama
-              ripgrep
-              tmux
-              tesseract
-              uv
-              vhs
-              z3
-              zstd
-            ])
-            ++ runtimeTools
-            ++ [autolean sandboxTestPython];
+            ];
+          };
 
-          shellHook = ''
-            first_line() {
-              "$@" 2>/dev/null | head -n 1
-            }
-            echo "AutoLean dev shell"
-            printf '  %-9s %s\n' autolean "$(first_line autolean --version)"
-            printf '  %-9s %s\n' lean "$(first_line lean --version)"
-            printf '  %-9s %s\n' uv "$(first_line uv --version)"
-            printf '  %-9s %s\n' z3 "$(first_line z3 --version)"
-            printf '  %-9s %s\n' cvc5 "$(first_line cvc5 --version)"
-            printf '  %-9s %s\n' ollama "$(first_line ollama --version)"
-            echo
-            echo "Commands:"
-            echo "  autolean workbench"
-            echo "  autolean doctor"
-            echo "  uv sync --all-extras --all-groups"
-            echo "  uv run autolean solve --overnight"
-          '';
+          default = pkgs.mkShell {
+            name = "autolean";
+            packages =
+              (with pkgs; [
+                actionlint
+                cffconvert
+                cvc5
+                curl
+                jq
+                lychee
+                ollama
+                ripgrep
+                tmux
+                tesseract
+                uv
+                vhs
+                z3
+                zstd
+              ])
+              ++ runtimeTools
+              ++ [autolean sandboxTestPython];
 
-          UV_PYTHON = "${pkgs.python312}/bin/python3";
+            shellHook = ''
+              first_line() {
+                "$@" 2>/dev/null | head -n 1
+              }
+              echo "AutoLean dev shell"
+              printf '  %-9s %s\n' autolean "$(first_line autolean --version)"
+              printf '  %-9s %s\n' lean "$(first_line lean --version)"
+              printf '  %-9s %s\n' uv "$(first_line uv --version)"
+              printf '  %-9s %s\n' z3 "$(first_line z3 --version)"
+              printf '  %-9s %s\n' cvc5 "$(first_line cvc5 --version)"
+              printf '  %-9s %s\n' ollama "$(first_line ollama --version)"
+              echo
+              echo "Commands:"
+              echo "  autolean workbench"
+              echo "  autolean doctor"
+              echo "  uv sync --all-extras --all-groups"
+              echo "  uv run autolean solve --overnight"
+            '';
+
+            UV_PYTHON = "${pkgs.python312}/bin/python3";
+          };
         };
 
         checks =
