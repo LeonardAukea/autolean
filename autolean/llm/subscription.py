@@ -20,8 +20,6 @@ import tempfile
 import time
 from dataclasses import dataclass
 
-from rich.console import Console
-
 from autolean.llm.base import (
     CLAUDE_EFFORTS,
     OPENAI_EFFORTS,
@@ -33,8 +31,7 @@ from autolean.llm.base import (
     LLMRateLimitError,
     LLMResponse,
 )
-
-console = Console()
+from autolean.ui import console
 
 #: A CLI receives this shutdown margin after its request deadline.
 KILL_GRACE_SECONDS = 15.0

@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from rich.console import Console
 
 from autolean.llm._http import (
     CONNECT_TIMEOUT,
@@ -17,8 +16,7 @@ from autolean.llm._http import (
     as_text,
 )
 from autolean.llm.base import Capabilities, LLMError, LLMResponse
-
-console = Console()
+from autolean.ui import console
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 

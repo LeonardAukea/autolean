@@ -40,7 +40,9 @@ class ProofEnvironment:
 
 
 def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironment:
-    """Hash the configured kernel, manifest, and importable compiled artifacts."""
+    """Hash the configured kernel, manifest, and importable compiled
+    artifacts.
+    """
     project_root = project_root.resolve()
     lean = lean.resolve()
     lean_version = _read_lean_version(lean)

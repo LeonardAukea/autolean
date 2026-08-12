@@ -17,15 +17,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Console
-
 from autolean.generated_code import (
     safe_lean_comment_text,
     validate_generated_declarations,
 )
 from autolean.llm import GenerateFn
 
-console = Console()
 log = logging.getLogger("autolean")
 
 # ---------------------------------------------------------------------------
@@ -131,7 +128,7 @@ def generate_library_source(
     """Generate a complete Lean 4 library source for a topic.
 
     Args:
-        topic: Mathematical topic (e.g., "differential geometry", "graph theory")
+        topic: Mathematical topic (e.g., "differential geometry")
         llm_generate: LLM generate function
 
     Returns:

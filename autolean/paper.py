@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from rich.console import Console
 
+from autolean import ui
 from autolean.generated_code import (
     GeneratedCodeError,
     validate_generated_declarations,
@@ -41,9 +41,7 @@ from autolean.llm import (
     LLMBackend,
     LLMError,
 )
-
-console = Console()
-
+from autolean.ui import console
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -212,7 +210,9 @@ def _cache_paper_pdf(document: PaperDocument, root: Path) -> Path | None:
 
 
 def materialize_paper(document: PaperDocument, project_root: Path) -> PaperArtifact:
-    """Persist extracted text and exact PDF bytes without replacing artifacts."""
+    """Persist extracted text and exact PDF bytes without replacing
+    artifacts.
+    """
     extracted_text = _paper_text(document)
     root = project_root.resolve()
     text_sha256 = hashlib.sha256(extracted_text.encode()).hexdigest()
@@ -285,8 +285,10 @@ def fetch_arxiv(arxiv_id_or_url: str, output_dir: Path | None = None) -> Path:
         console.print(f"  [dim]Using cached: {output_path}[/]")
         return output_path
 
-    console.print(f"  Downloading [cyan]{pdf_url}[/]...")
-    with httpx.stream("GET", pdf_url, follow_redirects=True, timeout=120.0) as resp:
+    with (
+        ui.status(f"Downloading {pdf_url}..."),
+        httpx.stream("GET", pdf_url, follow_redirects=True, timeout=120.0) as resp,
+    ):
         resp.raise_for_status()
         with open(output_path, "wb") as f:
             for chunk in resp.iter_bytes():
@@ -788,13 +790,12 @@ def extract_claims_via_llm(
     truncated = _smart_truncate(text, max_text_chars)
     prompt = EXTRACT_CLAIMS_PROMPT.format(text=truncated)
 
-    console.print(f"  Sending {len(truncated):,} chars to LLM for claim extraction...")
-
     try:
-        response = llm_generate(
-            "You are a mathematical paper analyst. Extract all theorems precisely.",
-            prompt,
-        )
+        with ui.status(f"Extracting claims from {len(truncated):,} chars..."):
+            response = llm_generate(
+                "You are a mathematical paper analyst. Extract all theorems precisely.",
+                prompt,
+            )
     except LLMError as e:
         error_msg = str(e).lower()
         if "timeout" in error_msg or "timed out" in error_msg:

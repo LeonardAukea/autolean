@@ -1,13 +1,8 @@
-"""Local fine-tuning — self-triggered when enough training data is collected.
+"""Local fine-tuning on collected proof data.
 
-Converts collected SFT/DPO data into the format expected by
-gemma-tuner-multimodal or HuggingFace TRL, then launches training locally.
-
-The self-improving loop:
-  1. Agent runs → collects (goal, proof) pairs
-  2. When threshold reached → auto-converts to training format
-  3. Launches local LoRA fine-tuning (if GPU available) or exports for cloud
-  4. Updated model loaded for next session
+Converts collected SFT/DPO data to gemma-tuner-multimodal or
+HuggingFace TRL format and, past FINETUNE_THRESHOLD positive
+examples, launches local LoRA training or writes a cloud export.
 """
 
 from __future__ import annotations
@@ -18,9 +13,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Console
+from autolean.ui import console
 
-console = Console()
 log = logging.getLogger("autolean")
 
 FINETUNE_THRESHOLD = 50  # minimum positive examples before triggering

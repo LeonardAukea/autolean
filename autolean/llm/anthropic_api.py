@@ -13,8 +13,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from rich.console import Console
-
 from autolean.llm.base import (
     CLAUDE_EFFORTS,
     BaseBackend,
@@ -27,8 +25,7 @@ from autolean.llm.base import (
     LLMResponse,
     LLMTransientError,
 )
-
-console = Console()
+from autolean.ui import console
 
 #: Server-side refusal fallback: on a policy decline the API re-runs the
 #: request on Anthropic's recommended substitute inside the same call.

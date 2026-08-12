@@ -6,15 +6,13 @@ import subprocess
 from pathlib import Path
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 
-from autolean import cli_runtime
+from autolean import cli_runtime, ui
 from autolean.challenges import OpenProblem
 from autolean.llm import LLMError
 from autolean.provenance import ProofEnvironmentError
-
-console = Console()
+from autolean.ui import console
 
 _accept_generated_source = cli_runtime.accept_generated_source
 _agent_for = cli_runtime.agent_for
@@ -92,10 +90,10 @@ def diff(project: Path) -> None:
         raise click.ClickException(f"Git log failed: {detail or 'no detail'}")
     proved = [entry for entry in log_result.stdout.strip().split("\n") if entry]
     if proved:
-        console.print(f"\n[bold green]{len(proved)} recent proofs:[/]")
+        console.print(f"\n[bold]{len(proved)} recent proofs:[/]", style="ok")
         for entry in proved:
             name = entry.removeprefix("proof: Prove ")
-            console.print(f"  [green]OK[/] {name}")
+            ui.ok(name)
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +173,7 @@ def export_training(project: Path) -> None:
 def finetune_config(project: Path, model: str, framework: str) -> None:
     """Generate a fine-tuning config for Lean 4 proof models.
 
-    \b
-    Creates a ready-to-use config file for the specified framework.
-    Supports: Axolotl, Unsloth, HuggingFace TRL.
+    Writes a config file for the selected framework.
     """
     import yaml
 
@@ -284,7 +280,7 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
         console.print(f"  Use DPOTrainer with config from {config_path}")
 
     # Summary
-    console.print("\n[bold]Self-improving loop:[/]")
+    console.print("\n[bold]Fine-tuning loop:[/]")
     console.print("  1. Run agent:      uv run autolean solve --overnight")
     console.print("  2. Export data:     uv run autolean export-training")
     console.print(f"  3. Fine-tune:      {framework} train ...")
@@ -322,7 +318,7 @@ def build_library(
 
     \b
     Creates definitions, structures, and basic lemmas that supplement
-    mathlib for a specific domain. Fills gaps that mathlib doesn't cover.
+    mathlib for a specific domain.
 
     \b
     Examples:
@@ -352,7 +348,7 @@ def build_library(
     console.print(f"[bold]Output:[/] {output}\n")
 
     try:
-        with console.status(f"[dim]Generating {topic} library..."):
+        with ui.status(f"Generating {topic} library..."):
             content = generate_library_source(topic, llm.generate)
     except LLMError as e:
         raise click.ClickException(str(e)) from e
@@ -391,7 +387,7 @@ def build_library(
 
 
 # ---------------------------------------------------------------------------
-# improve — simplify/deepen/beautify an existing proof
+# improve — rewrite an existing proof toward a --goal
 # ---------------------------------------------------------------------------
 
 
@@ -422,12 +418,11 @@ def improve(
     max_attempts: int,
     program: Path,
 ) -> None:
-    """Improve an existing proof — make it shorter, more elegant, or faster.
+    """Rewrite an existing proof toward the selected --goal.
 
     \b
-    Takes a .lean file and theorem name, reads the current proof,
-    asks the LLM to improve it, verifies the new version compiles,
-    and replaces the original if successful.
+    Reads the named theorem's proof, requests a rewrite, verifies the
+    new version compiles, and replaces the original.
 
     \b
     Examples:
@@ -546,7 +541,7 @@ def improve(
             )
 
             try:
-                with console.status("[dim]Generating improved proof..."):
+                with ui.status("Generating improved proof..."):
                     response = llm.generate(system, user_prompt)
             except LLMError as e:
                 raise click.ClickException(f"Proof improvement failed: {e}") from e
@@ -572,7 +567,7 @@ def improve(
             new_lines[proof_start:proof_end] = replacement
             new_content = "\n".join(new_lines)
 
-            with console.status("[dim]Verifying proof and axioms..."):
+            with ui.status("Verifying proof and axioms..."):
                 build = project.validate_candidate(
                     file_path,
                     new_content,
@@ -730,6 +725,7 @@ def challenge(
     """Take on an open mathematical problem.
 
     \b
+    Same catalog and workflow as `autolean problems`.
     Without arguments, lists all available problems.
     With a problem ID, generates the formalization and starts proving.
 

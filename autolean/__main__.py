@@ -8,15 +8,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from autolean import __version__, cli_runtime
+from autolean import __version__, cli_runtime, ui
 from autolean.cli_sessions import register_commands as _register_session_commands
 from autolean.cli_workflows import register_commands as _register_workflow_commands
 from autolean.llm import LLMBackend, LLMError
 from autolean.provenance import ProofEnvironmentError
+from autolean.ui import console
 
 if TYPE_CHECKING:
     from autolean.lean_interface import LeanProject
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from autolean.provenance import ProofEnvironment
     from autolean.strategy import PlanAttempt, ProofPlan
 
-console = Console()
 
 _accept_generated_source = cli_runtime.accept_generated_source
 _agent_for = cli_runtime.agent_for
@@ -217,19 +216,9 @@ def solve(
     """Start the autonomous proof agent loop.
 
     \b
-    Runs continuously until all targets are proved or you press Ctrl+C.
-    Use --max-cycles to set a limit. Self-correction, data collection,
-    and skill learning are always active.
-
-    \b
-    The proof experiment loop:
-      1. Pick highest-priority sorry target
-      2. Extract the Lean goal and Tree-sitter structure
-      3. Assemble bounded search, skill, and failure context
-      4. Query the configured model
-      5. Validate the candidate in the OS sandbox and Lean kernel
-      6. Accept the exact validated bytes and record provenance
-      7. Repeat
+    Runs proof experiments until all targets are proved or you press
+    Ctrl+C. Use --max-cycles to set a limit. The experiment cycle is
+    described in docs/explanation/research-loop.md.
 
     Press Ctrl+C once to stop gracefully. Twice to force quit.
     """
@@ -499,12 +488,12 @@ def _doctor_preflight(llm: LLMBackend) -> str | None:
     try:
         ready = llm.ping()
     except LLMError as error:
-        console.print(f"  [red]FAIL[/] Preflight: {error}")
+        ui.fail(f"Preflight: {error}")
         return f"backend preflight: {error}"
     if ready:
-        console.print("  [green]OK[/] Preflight passed")
+        ui.ok("Preflight passed")
         return None
-    console.print("  [red]FAIL[/] Backend preflight did not pass — see `autolean models`.")
+    ui.fail("Backend preflight did not pass — see `autolean models`.")
     return "backend preflight did not pass"
 
 
@@ -521,12 +510,14 @@ def _doctor_generate_proof(llm: LLMBackend) -> str:
         ),
         user="Fill the proof of `theorem AutoLeanBackendSmoke : True := by sorry`.",
     )
-    console.print("  [green]OK[/] Response: ", Text(response.text[:60]), sep="")
+    from rich.markup import escape
+
+    ui.ok(f"Response: {escape(response.text[:60])}")
     proof = validate_generated_proof(clean_llm_proof(response.text, tactic_mode=True))
-    console.print(f"  [green]OK[/] Proof SHA-256: {sha256_text(proof)}")
+    ui.ok(f"Proof SHA-256: {sha256_text(proof)}")
     if llm.capabilities.token_counts and response.output_tokens:
-        console.print(
-            f"  [green]OK[/] {response.output_tokens} tokens "
+        ui.ok(
+            f"{response.output_tokens} tokens "
             f"in {response.duration_seconds:.1f}s "
             f"({response.tokens_per_second:.1f} tok/s)"
         )
@@ -546,7 +537,7 @@ def _doctor_model(
     try:
         llm = _llm_for(model, backend, config)
     except (LLMError, ValueError) as error:
-        console.print(f"  [red]FAIL[/] Configuration: {error}")
+        ui.fail(f"Configuration: {error}")
         return "", [f"model configuration: {error}"]
     console.print(f"  Model:   {llm.config.model}")
     console.print(f"  Backend: {llm.config.backend}")
@@ -567,7 +558,7 @@ def _doctor_model(
             return _doctor_generate_proof(llm), failures
         except (GeneratedCodeError, LLMError) as error:
             failures.append(f"model generation: {error}")
-            console.print(f"  [red]FAIL[/] Generation: {error}")
+            ui.fail(f"Generation: {error}")
             return "", failures
 
 
@@ -589,10 +580,12 @@ def _doctor_validate_proof(
         expected_environment=environment.sha256,
     )
     if smoke.success:
-        console.print(f"  [green]OK[/] Model proof passed sandboxed Lean ({smoke.duration_seconds:.1f}s)")
+        ui.ok(f"Model proof passed sandboxed Lean ({smoke.duration_seconds:.1f}s)")
         return None
+    from rich.markup import escape
+
     detail = smoke.stderr or (smoke.errors[0].message if smoke.errors else "Lean rejected the model proof")
-    console.print(f"  [red]FAIL[/] Model proof: {detail[:300]}")
+    ui.fail(f"Model proof: {escape(detail[:300])}")
     return f"model proof validation: {detail[:300]}"
 
 
@@ -605,24 +598,24 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
     lean_root = program.parent / config.lean_project_path
     try:
         project = LeanProject(lean_root)
-        console.print(f"  [green]OK[/] Project: {project.root}")
-        console.print(f"  [green]OK[/] Lean files: {len(project.lean_files())}")
+        ui.ok(f"Project: {project.root}")
+        ui.ok(f"Lean files: {len(project.lean_files())}")
         environment = project.proof_environment()
-        console.print(f"  [green]OK[/] Environment: sha256:{environment.sha256}")
+        ui.ok(f"Environment: sha256:{environment.sha256}")
         if model_proof:
             proof_failure = _doctor_validate_proof(project, environment, model_proof)
             if proof_failure:
                 failures.append(proof_failure)
-        console.print("  Building...")
-        build = project.build(timeout=120)
+        with ui.status("Building Lean project..."):
+            build = project.build(timeout=120)
         if build.success:
-            console.print(f"  [green]OK[/] Build succeeded ({build.duration_seconds:.1f}s)")
+            ui.ok(f"Build succeeded ({build.duration_seconds:.1f}s)")
         else:
             failures.append("Lean project build failed")
-            console.print(f"  [red]FAIL[/] Build errors: {len(build.errors)}")
+            ui.fail(f"Build errors: {len(build.errors)}")
     except (FileNotFoundError, OSError, ProofEnvironmentError) as error:
         failures.append(f"Lean toolchain: {error}")
-        console.print(f"  [red]FAIL[/] {error}")
+        ui.fail(str(error))
     return failures
 
 
@@ -634,13 +627,12 @@ def _doctor_research_tools() -> list[str]:
     console.print("\n[bold]Checking research tools...[/]")
     for tool in research_tools():
         if tool.available:
-            style = "green]OK"
+            ui.ok(tool.identity)
         elif tool.required:
-            style = "red]FAIL"
             failures.append(tool.identity)
+            ui.fail(tool.identity)
         else:
-            style = "yellow]WARN"
-        console.print(f"  [{style}[/] {tool.identity}")
+            ui.warn(tool.identity)
     return failures
 
 
@@ -933,7 +925,7 @@ def prove(
 
     \b
     Takes a math statement in plain English, formalizes it as Lean 4,
-    and attempts to prove it automatically.
+    and attempts to prove it.
 
     \b
     Examples:
@@ -975,24 +967,28 @@ def prove(
     lean_root = program.parent / cfg.lean_project_path
     project = LeanProject(lean_root)
 
-    console.print(f"[bold]Planning:[/] {statement}\n")
+    ui.phase("Plan")
+    console.print(f"{statement}\n")
     with _connected_llm(model, backend, cfg) as llm:
-        proof_plan = _proof_plan(statement, llm, guide)
+        with ui.status(f"Consulting {llm.config.model}..."):
+            proof_plan = _proof_plan(statement, llm, guide)
         _show_proof_plan(proof_plan)
         while review_plan and not click.confirm("Use this plan?", default=True):
             revision = click.prompt("Additional guidance", type=str).strip()
-            proof_plan = _proof_plan(statement, llm, (*guide, revision))
+            with ui.status(f"Consulting {llm.config.model}..."):
+                proof_plan = _proof_plan(statement, llm, (*guide, revision))
             _show_proof_plan(proof_plan)
 
-        console.print("\n[bold]Formalizing and compiling the statement...[/]")
+        ui.phase("Formalize")
         try:
-            theorem = formalize_theorem(
-                statement,
-                proof_plan,
-                llm.generate,
-                project,
-                max_repairs=formalization_repairs,
-            )
+            with ui.status("Formalizing with the pinned Lean kernel..."):
+                theorem = formalize_theorem(
+                    statement,
+                    proof_plan,
+                    llm.generate,
+                    project,
+                    max_repairs=formalization_repairs,
+                )
         except FormalizationError as error:
             raise click.ClickException(str(error)) from error
 
@@ -1011,7 +1007,7 @@ def prove(
     console.print(f"[green]Accepted {target_file}[/]\n")
 
     attempts_label = "unlimited" if max_attempts == 0 else str(max_attempts)
-    console.print(f"[bold]Attempting proof ({attempts_label} attempts)...[/]\n")
+    ui.phase(f"Prove ({attempts_label} attempts)")
     agent = _agent_for(
         program,
         model=model,
@@ -1362,15 +1358,7 @@ def _create_program(path: Path) -> bool:
 )
 @click.option("--toolchain", default=DEFAULT_LEAN_TOOLCHAIN, help="Lean toolchain.")
 def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
-    """Initialize a new Lean project for AutoLean.
-
-    \b
-    Creates:
-      <path>/lakefile.lean
-      <path>/lean-toolchain
-      <path>/MyProject.lean (with example sorry targets)
-      program.md (in current directory)
-    """
+    """Create a pinned Lean project and `program.md`."""
     path = path.resolve()
     if path.exists() and not path.is_dir():
         raise click.ClickException(f"Project path is not a directory: {path}")

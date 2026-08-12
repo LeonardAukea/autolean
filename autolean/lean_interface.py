@@ -15,16 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from rich.console import Console
-
 from autolean.provenance import (
     ProofEnvironment,
     ProofEnvironmentError,
     capture_proof_environment,
 )
 from autolean.scanner import _mask_lean_noncode, count_sorries
-
-console = Console()
 
 # ---------------------------------------------------------------------------
 # Types
@@ -567,7 +563,9 @@ class LeanProject:
         declaration: str,
         declaration_line: int,
     ) -> BuildResult:
-        """Compile exact source, then audit its declaration in a fresh module."""
+        """Compile exact source, then audit its declaration in a fresh
+        module.
+        """
         relative_path = lean_file.resolve().relative_to(self.root)
         try:
             module = _module_name(relative_path)
@@ -972,9 +970,6 @@ class LeanProject:
 
         Returns the first tactic that makes the file build cleanly with no
         sorry remaining at the target line. Returns None if nothing works.
-
-        This is the "deterministic pre-search" — runs before any LLM call.
-        For trivial goals like `1 + 1 = 2`, this finds `rfl` instantly.
         """
         original = self.read_file(lean_file)
         original_sorries = count_sorries(original)

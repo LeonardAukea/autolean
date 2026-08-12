@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from autolean import ui
 from autolean.error_classifier import (
     STRUCTURAL_ERRORS,
     ErrorCategory,
@@ -60,8 +60,8 @@ from autolean.scanner import (
 )
 from autolean.structure import LeanStructureProvider
 from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
+from autolean.ui import GLYPH_FAIL, GLYPH_OK, GLYPH_SKIP, console
 
-console = Console()
 log = logging.getLogger("autolean")
 
 # Temperature escalation per retry attempt (capped at 1.0)
@@ -328,7 +328,6 @@ class AutoLeanAgent:
         # Target identities already accepted by a persisted session.
         self._proved_ids: set[str] = set()
 
-        # Self-improving loop: data collection + skill memory
         from autolean.collector import TrainingDataCollector
         from autolean.skills import SkillMemory
 
@@ -528,7 +527,8 @@ class AutoLeanAgent:
         )
 
         try:
-            connected = self.llm.ping()
+            with ui.status(f"Preflighting {llm_cfg.backend}..."):
+                connected = self.llm.ping()
         except LLMError as e:
             message = f"Backend preflight failed: {e}"
             console.print(f"[red]{message}[/]")
@@ -574,9 +574,9 @@ class AutoLeanAgent:
         # Every target source is elaborated inside the generated-code sandbox.
         # Direct Lean invocation writes compiler artifacts only to scratch.
         target_files = sorted({target.file.resolve() for target in targets})
-        console.print("\n[bold]Initial sandboxed Lean check...[/]")
+        ui.phase("Initial sandboxed Lean check")
         for target_file in target_files:
-            with console.status(f"[dim]Checking {target_file.name}...", spinner="dots"):
+            with ui.status(f"Checking {target_file.name}..."):
                 build = self.project.check_file(
                     target_file,
                     timeout=self.config.cycle_timeout_seconds,
@@ -597,10 +597,9 @@ class AutoLeanAgent:
         if len(targets) > 10:
             console.print(f"  ... and {len(targets) - 10} more")
 
-        # -- Deterministic tactic pre-search (before LLM) -------------------
-        # Try standard tactics on all targets. This instantly solves trivial
-        # goals like `1 + 1 = 2` (rfl) without wasting LLM cycles.
-        # Fast tactics precede the more expensive compound tactics.
+        # -- Deterministic tactic pre-search --------------------------------
+        # Standard tactics run before any model request; trivial goals close
+        # here. Fast tactics precede the more expensive compound tactics.
         extra_standard = [t for t in STANDARD_TACTICS if t not in FAST_TACTICS]
         all_presearch = [*FAST_TACTICS, *extra_standard, *COMPOUND_TACTICS]
         if self.dry_run:
@@ -608,10 +607,10 @@ class AutoLeanAgent:
             console.print("\n[yellow]DRY RUN — skipping tactic pre-search.[/]")
             all_presearch = []
         else:
-            console.print(
-                f"\n[bold]Tactic pre-search ({len(all_presearch)} tactics: "
+            ui.phase(
+                f"Tactic pre-search ({len(all_presearch)} tactics: "
                 f"{len(FAST_TACTICS)} fast + {len(extra_standard)} standard + "
-                f"{len(COMPOUND_TACTICS)} compound)...[/]"
+                f"{len(COMPOUND_TACTICS)} compound)"
             )
         presearch_proved = 0
         presearch_targets = (
@@ -701,7 +700,6 @@ class AutoLeanAgent:
                     f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
                 )
 
-                # Self-improving loop
                 self.collector.record_attempt(record, tactic)
                 self.skill_memory.learn_from_proof(
                     theorem_name=t.decl_name,
@@ -743,7 +741,7 @@ class AutoLeanAgent:
             )
 
         # -- Main loop ------------------------------------------------------
-        console.print("\n[bold green]Starting autonomous loop...[/]\n")
+        ui.phase("Autonomous loop")
         session_start = time.monotonic()
 
         run_cycles = 0
@@ -820,11 +818,11 @@ class AutoLeanAgent:
 
             # Outcome with color
             if record.outcome in (Outcome.SUCCESS, Outcome.VALIDATED):
-                icon, style = "✓", "bold green"
+                icon, style = GLYPH_OK, "ok"
             elif record.outcome in (Outcome.SKIPPED, Outcome.GAP_FILLED):
-                icon, style = "→", "yellow"
+                icon, style = GLYPH_SKIP, "skip"
             else:
-                icon, style = "✗", "red"
+                icon, style = GLYPH_FAIL, "fail"
 
             console.print(
                 f"  [{style}]{icon} {record.outcome.value}[/{style}]"
@@ -832,7 +830,6 @@ class AutoLeanAgent:
                 f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
             )
 
-            # Show build error details (DX improvement)
             if record.error_summary and record.outcome in FAILURE_OUTCOMES:
                 err_lines = record.error_summary.strip().split("\n")
                 for eline in err_lines[:4]:
@@ -840,18 +837,21 @@ class AutoLeanAgent:
                 if len(err_lines) > 4:
                     console.print(f"    [dim]... ({len(err_lines) - 4} more lines)[/dim]")
 
-            # Progress bar
-            bar_width = 30
-            filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
-            bar = "█" * filled + "░" * (bar_width - filled)
-            console.print(
-                f"  [{bar}] "
+            # Progress: the bar segment is animation, so logs keep only the
+            # numeric stats.
+            stats = (
                 f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
                 f"({coverage:.0f}%) | "
                 f"{remaining} left | "
                 f"{rate:.1f}/hr | "
                 f"{elapsed / 60:.0f}m elapsed"
             )
+            if console.is_terminal:
+                bar_width = 30
+                filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
+                bar = "█" * filled + "░" * (bar_width - filled)
+                stats = f"[{bar}] {stats}"
+            console.print(f"  {stats}")
             self._consider_model_escalation(target, record)
 
         # -- Session complete — full report -----------------------------------
@@ -951,7 +951,7 @@ class AutoLeanAgent:
         # Extract the goal once for this exact target source.
         if target.id not in self._goal_cache:
             self._step("Extracting goal state (hole-punch: sorry -> ?_)")
-            with console.status("[dim]Extracting goal state...", spinner="dots"):
+            with ui.status("Extracting goal state..."):
                 self._goal_cache[target.id] = self.project.get_goal_via_hole_punch(
                     file_path,
                     target.line,
@@ -1065,11 +1065,12 @@ class AutoLeanAgent:
         self._step(f"Querying {model}{knob}")
 
         try:
-            response = self.llm.generate(
-                system=SYSTEM_PROMPT,
-                user=user_prompt,
-                temperature=temp,
-            )
+            with ui.status(f"Waiting for {model}..."):
+                response = self.llm.generate(
+                    system=SYSTEM_PROMPT,
+                    user=user_prompt,
+                    temperature=temp,
+                )
         except LLMError as e:
             self._consecutive_llm_errors += 1
             if isinstance(e, (LLMAuthenticationError, LLMRateLimitError)):
@@ -1145,7 +1146,6 @@ class AutoLeanAgent:
                 model=response.model,
             )
 
-        # Always show the generated proof (key DX: see what the LLM produces)
         if proof_lines <= 5 or self.verbose:
             console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
             for pline in proof.splitlines()[:12]:
@@ -1187,7 +1187,7 @@ class AutoLeanAgent:
         self._step("Verifying with the pinned Lean kernel...")
 
         try:
-            with console.status("[dim]Building...", spinner="dots"):
+            with ui.status("Building..."):
                 build = self.project.validate_candidate(
                     file_path,
                     new_content,
@@ -1348,7 +1348,6 @@ class AutoLeanAgent:
             # Clear unhealthy status for this file (proof success = file is OK)
             self._unhealthy_files.pop(file_path, None)
 
-            # Self-improving loop: collect training data + learn skill
             self._step("Committing to git + collecting training data", "green")
             self.collector.record_attempt(record, proof)
             skill = self.skill_memory.learn_from_proof(
@@ -1768,7 +1767,6 @@ class AutoLeanAgent:
         if not self.dry_run and stats["total_examples"] > 0:
             exported = self.collector.export_all()
             data_lines = [
-                "[bold]Training Data Collected[/bold]",
                 f"Total examples:    {stats['total_examples']}",
                 f"Positive (SFT):    {stats['positive']}",
                 f"Negative (DPO):    {stats['negative']}",
@@ -1777,7 +1775,6 @@ class AutoLeanAgent:
             for fmt, path in (exported or {}).items():
                 data_lines.append(f"  {fmt}: {path}")
 
-            # Auto fine-tuning trigger (self-improving loop)
             from autolean.finetune import (
                 FINETUNE_THRESHOLD,
                 check_finetune_readiness,
@@ -1796,8 +1793,8 @@ class AutoLeanAgent:
             console.print(
                 Panel(
                     "\n".join(data_lines),
-                    title="Self-Improving Loop",
-                    border_style="magenta",
+                    title="Training data",
+                    border_style="note",
                     width=70,
                 )
             )

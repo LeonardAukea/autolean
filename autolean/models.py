@@ -11,13 +11,11 @@ import os
 import shutil
 from dataclasses import dataclass, replace
 
-from rich.console import Console
 from rich.table import Table
 
 from autolean.llm import BACKENDS, DEFAULT_MAX_OUTPUT_TOKENS, LLMConfig
 from autolean.llm.ollama import DEFAULT_OLLAMA_URL, probe_installed_models
-
-console = Console()
+from autolean.ui import console
 
 
 @dataclass(frozen=True)

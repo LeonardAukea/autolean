@@ -1,13 +1,10 @@
-"""Mathlib lemma search — database lookups, NOT LLM calls.
+"""Mathlib lemma search over Loogle, LeanSearch, and local lean-lsp indexes.
 
-Before asking the local LLM for a proof, the agent searches for relevant
-lemmas and includes them in the prompt context. This dramatically
-improves proof quality by giving the LLM concrete building blocks.
-
-These are pure database/index queries — no LLM inference involved:
-  1. Loogle (loogle.lean-lang.org) — type-pattern search over mathlib index
-  2. LeanSearch (leansearch.net) — natural language search over mathlib
-  3. Local lean-lsp MCP tools (if available)
+Results enter the prompt context as candidate lemmas before each proof
+request:
+  1. Loogle (loogle.lean-lang.org) — type-pattern search
+  2. LeanSearch (leansearch.net) — natural-language search
+  3. Local lean-lsp MCP tools when available
 """
 
 from __future__ import annotations
