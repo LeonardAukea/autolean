@@ -91,15 +91,20 @@ SHA-256 and the full source commit.
 gh release view --repo LeonardAukea/autolean
 gh release view --repo LeonardAukea/autolean \
   --json tagName,isImmutable,targetCommitish
-gh release verify --repo LeonardAukea/autolean
 gh release download --repo LeonardAukea/autolean --dir release
 python -m json.tool release/release-manifest.json
 ```
 
 The CI release job attaches every asset and publishes the immutable release.
-The `Verify release` workflow begins after successful CI and allows 15 minutes
-for GitHub's asynchronous release attestation to appear. A manual dispatch
-with the exact tag repeats verification against the same immutable assets.
+The `Verify release` workflow checks the immutable flag, exact tag and commit,
+complete asset set, file sizes, and SHA-256 values from the manifest. A manual
+dispatch with the exact tag repeats the same verification.
+
+GitHub supplies release attestations for public repositories on the current
+plan. The verifier also runs `gh release verify` after the repository becomes
+public. Private repository attestations require GitHub Enterprise Cloud; the
+[GitHub availability contract](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+defines that qualification boundary.
 
 Repository release immutability was enabled on 2026-08-12. Earlier private
 qualification releases remain mutable and are not public distribution
@@ -122,8 +127,9 @@ is `autolean`.
 
 Configure a PyPI trusted publisher for this repository, the `Publish Python`
 workflow, and the `pypi` environment. Then dispatch the workflow with the exact
-Hashver tag. The workflow verifies GitHub's release attestation, downloads the
-qualified wheel and source distribution, and exchanges its GitHub OIDC token
+Hashver tag. The workflow verifies the immutable release, source identity,
+manifest, and downloaded distributions. Public repositories also require the
+GitHub release attestation. The publisher exchanges its GitHub OIDC token
 directly with PyPI.
 
 GitHub OIDC supplies a short-lived publication credential. PyPI's immutable

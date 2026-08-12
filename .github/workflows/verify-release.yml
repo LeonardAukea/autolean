@@ -12,6 +12,7 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: read
 
 concurrency:
@@ -22,7 +23,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Release attestation
+    name: Release integrity
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event.workflow_run.conclusion == 'success' &&
@@ -40,28 +41,62 @@ jobs:
         id: release
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
           SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
           if test "$EVENT_NAME" = workflow_dispatch; then
             tag="$REQUESTED_TAG"
+            source_sha="$(gh release view "$tag" --repo "$REPOSITORY" \
+              --json targetCommitish --jq .targetCommitish)"
           else
             hashver="$(python3 -m autolean.release --revision "$SOURCE_SHA" id)"
             tag="v$hashver"
+            source_sha="$SOURCE_SHA"
           fi
           test -n "$tag"
+          test -n "$source_sha"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Verify release attestation
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.source_sha }}
+          persist-credentials: false
+      - name: Verify immutable release and artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" \
+            --json isImmutable,targetCommitish)"
+          test "$(jq -r .isImmutable <<< "$release_json")" = true
+          test "$(jq -r .targetCommitish <<< "$release_json")" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          release_dir="$(mktemp -d "$RUNNER_TEMP/autolean-release.XXXXXX")"
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" \
+            --dir "$release_dir"
+          python3 -m autolean.release --revision "$SOURCE_SHA" verify \
+            --manifest "$release_dir/release-manifest.json" \
+            --directory "$release_dir"
+      - name: Verify public release attestation
+        if: ${{ github.event.repository.visibility == 'public' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
           for attempt in {1..60}; do
-            if gh release verify "$RELEASE_TAG"; then
+            if gh release verify "$RELEASE_TAG" --repo "$REPOSITORY"; then
               exit 0
             fi
             if test "$attempt" -eq 60; then

@@ -38,13 +38,16 @@ def test_python_matrix_uses_one_pinned_grammar_and_exact_interpreters() -> None:
     assert "sys.version_info[:2] == expected" in workflow
 
 
-def test_release_attestation_verification_is_independently_retriable() -> None:
+def test_release_integrity_is_independently_verifiable() -> None:
     workflow = (WORKFLOWS / "verify-release.yml").read_text(encoding="utf-8")
 
     assert "workflow_run:" in workflow
     assert "workflows: [CI]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "github.event.workflow_run.head_branch == 'main'" in workflow
+    assert "--json isImmutable,targetCommitish" in workflow
+    assert "python3 -m autolean.release --revision" in workflow
+    assert "github.event.repository.visibility == 'public'" in workflow
     assert 'gh release verify "$RELEASE_TAG"' in workflow
     assert "for attempt in {1..60}" in workflow
     assert "sleep 15" in workflow
@@ -56,5 +59,7 @@ def test_pypi_publication_requires_a_named_immutable_release() -> None:
     assert "workflow_dispatch:" in workflow
     assert "environment: pypi" in workflow
     assert "id-token: write" in workflow
-    assert "--json isImmutable" in workflow
+    assert "--json isImmutable,targetCommitish" in workflow
+    assert "python3 -m autolean.release --revision" in workflow
+    assert "github.event.repository.visibility == 'public'" in workflow
     assert 'gh release verify "$RELEASE_TAG"' in workflow
