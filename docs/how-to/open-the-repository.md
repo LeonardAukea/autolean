@@ -23,6 +23,9 @@ advisory process, issue labels, issue forms, pull-request template, license,
 citation record, code of conduct, changelog, and release notes. Read each page
 as a first-time contributor and remove private operational detail.
 
+Reserve the `autolean-proof` PyPI distribution and configure its trusted
+publisher for the `Publish Python` workflow and `pypi` environment.
+
 Confirm that one maintainer can acknowledge security reports and review pull
 requests while another person is unavailable. Record any single-maintainer
 limit in the launch decision.
@@ -51,7 +54,8 @@ After changing visibility:
    graph, Dependabot alerts, and Dependabot security updates through the
    [security settings];
 3. add the supported [Nix ecosystem] to Dependabot for `flake.lock`;
-4. enable immutable releases when the repository setting is available;
+4. verify release immutability, full-SHA action pinning, and the selected-action
+   allowlist;
 5. verify Issues, Discussions, security advisories, merge policy, topic labels,
    the community profile, and the unauthenticated README links;
 6. run the public CI and download the resulting release as an anonymous user.

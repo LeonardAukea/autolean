@@ -89,9 +89,20 @@ SHA-256 and the full source commit.
 
 ```bash
 gh release view --repo LeonardAukea/autolean
+gh release view --repo LeonardAukea/autolean \
+  --json tagName,isImmutable,targetCommitish
+gh release verify --repo LeonardAukea/autolean
 gh release download --repo LeonardAukea/autolean --dir release
 python -m json.tool release/release-manifest.json
 ```
+
+The release job attaches every asset before publication. GitHub locks the tag
+and assets at publication and emits the release attestation checked by
+`gh release verify`.
+
+Repository release immutability was enabled on 2026-08-12. Earlier private
+qualification releases remain mutable and are not public distribution
+artifacts.
 
 Do not move or reuse a release tag. Correct a failed release with a new pull
 request; the resulting commit receives its own identity and evidence.
@@ -101,3 +112,18 @@ identity recorded in every accepted result.
 
 The repository remains private until the separate
 [public launch gate](open-the-repository.md) passes.
+
+## 5. Publish the Python distribution
+
+Python publication is an explicit maintainer action from an immutable GitHub
+release. The distribution name is `autolean-proof` and the installed command
+is `autolean`.
+
+Configure a PyPI trusted publisher for this repository, the `Publish Python`
+workflow, and the `pypi` environment. Then dispatch the workflow with the exact
+Hashver tag. The workflow verifies GitHub's release attestation, downloads the
+qualified wheel and source distribution, and exchanges its GitHub OIDC token
+directly with PyPI.
+
+GitHub OIDC supplies a short-lived publication credential. PyPI's immutable
+version records make a repeated version fail closed.

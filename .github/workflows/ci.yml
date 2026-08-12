@@ -348,7 +348,7 @@ jobs:
             --output release/release-manifest.json release/*
           echo "hashver=$hashver" >> "$GITHUB_OUTPUT"
           echo "tag=v$hashver" >> "$GITHUB_OUTPUT"
-      - name: Publish immutable release
+      - name: Publish and verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.identity.outputs.tag }}
@@ -358,10 +358,13 @@ jobs:
           if existing="$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish 2>/dev/null)"; then
             test "$existing" = "$GITHUB_SHA"
             echo "Release $RELEASE_TAG already identifies $GITHUB_SHA"
-            exit 0
+          else
+            gh release create "$RELEASE_TAG" release/* \
+              --target "$GITHUB_SHA" \
+              --title "${{ steps.identity.outputs.hashver }}" \
+              --generate-notes \
+              --latest
           fi
-          gh release create "$RELEASE_TAG" release/* \
-            --target "$GITHUB_SHA" \
-            --title "${{ steps.identity.outputs.hashver }}" \
-            --generate-notes \
-            --latest
+          immutable="$(gh release view "$RELEASE_TAG" --json isImmutable --jq .isImmutable)"
+          test "$immutable" = true
+          gh release verify "$RELEASE_TAG"

@@ -1,0 +1,47 @@
+name: Publish Python
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable GitHub release tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: PyPI trusted publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download qualified distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          immutable="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isImmutable --jq .isImmutable)"
+          test "$immutable" = true
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          mkdir dist
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.whl' \
+            --pattern '*.tar.gz' \
+            --dir dist
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" = 1
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" = 1
+      - name: Publish with PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist

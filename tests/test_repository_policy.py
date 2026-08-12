@@ -1,0 +1,38 @@
+"""Repository policy stays executable at the release boundary."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).parents[1]
+WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+def test_external_actions_use_full_commit_ids() -> None:
+    for workflow in WORKFLOWS.glob("*.yml"):
+        for line in workflow.read_text(encoding="utf-8").splitlines():
+            match = re.search(r"\buses:\s+([^\s#]+)", line)
+            if match is None or match.group(1).startswith("./"):
+                continue
+            assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", match.group(1)), (
+                f"{workflow.name} contains an unpinned action: {match.group(1)}"
+            )
+
+
+def test_release_job_requires_immutability_attestation() -> None:
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "--json isImmutable" in workflow
+    assert 'test "$immutable" = true' in workflow
+    assert 'gh release verify "$RELEASE_TAG"' in workflow
+
+
+def test_pypi_publication_requires_a_named_immutable_release() -> None:
+    workflow = (WORKFLOWS / "publish-pypi.yml").read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "environment: pypi" in workflow
+    assert "id-token: write" in workflow
+    assert "--json isImmutable" in workflow
+    assert 'gh release verify "$RELEASE_TAG"' in workflow

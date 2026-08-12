@@ -1,18 +1,17 @@
 # Changelog
 
-AutoLean release names use [Hashver] with the form
-`YYYY.MM.DD+<12-character-commit>`. The Python package version states API
-compatibility. The release manifest binds both identities to the full commit
-and artifact hashes.
+This file records Python API compatibility and the product narrative. Exact
+build chronology, commit-derived Hashver identities, assets, and generated
+notes live in [GitHub Releases].
 
-## Unreleased
+## 0.5.0
 
 ### Proof workflows
 
 - Generate one bounded model strategy per proof target and preserve the exact
   accepted response identity with every experiment.
-- Isolate natural-language theorems in their own generated modules so an
-  unrelated local source error cannot contaminate formalization.
+- Give each natural-language theorem a generated module that defines its
+  formalization scope.
 - Continue existing open-problem workspaces through durable sessions with a
   five-cycle default budget and explicit model switching.
 
@@ -20,10 +19,12 @@ and artifact hashes.
 
 - Acquire arXiv HTML with Lightpanda and read PDFs with layout-aware extraction
   and selective OCR.
-- Audit the reviewed 25-item Ionescu-Tulcea profile through 33 closed Lean
-  aliases in one sandboxed evidence module.
-- Export exact model responses, coverage, source, proof environment, session,
-  Lean project, and companion LaTeX source as one linked artifact.
+- Audit reviewed paper profiles through closed Lean aliases in one sandboxed
+  evidence module.
+- Export model responses, coverage, source, proof environment, session, Lean
+  project, and companion LaTeX source as one linked artifact.
+- Keep the AGPL or commercially licensed PyMuPDF document stack in the explicit
+  `pdf` installation extra.
 
 ### Release engineering
 
@@ -31,12 +32,7 @@ and artifact hashes.
   closure.
 - Qualify Python 3.11 through 3.14, the Lean/Nix closure, containment attacks,
   dependency SBOM, and reproducible distributions in the aggregate CI gate.
+- Bind each qualified `main` commit to an immutable Hashver release, artifact
+  manifest, and GitHub attestation.
 
-## 2026.08.11+04665ad96d5f
-
-- Published the first content-addressed Python distributions, dependency SBOM,
-  proof-environment record, and release manifest.
-- Added the private repository maintenance, citation, security, contribution,
-  and documentation structure.
-
-[Hashver]: https://miniscruff.github.io/hashver/
+[GitHub Releases]: https://github.com/LeonardAukea/autolean/releases

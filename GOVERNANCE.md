@@ -18,10 +18,10 @@ suite. A passing check establishes only the boundary named by that check.
 
 ## Releases
 
-CI publishes a Hashver release from each qualified `main` commit. Release
-assets are immutable evidence for that commit. The maintainer may stop release
-publication when a boundary is uncertain; the next qualified commit receives
-a new identity.
+CI publishes a Hashver release from each qualified `main` commit. GitHub locks
+the tag and assets when the release is published and emits an attestation for
+them. The maintainer may stop publication when a boundary is uncertain; the
+next qualified commit receives a new identity.
 
 The repository remains private until the
 [public launch gate](docs/how-to/open-the-repository.md) passes. Visibility
