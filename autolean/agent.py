@@ -575,7 +575,7 @@ class AutoLeanAgent:
         # Every target source is elaborated inside the generated-code sandbox.
         # Direct Lean invocation writes compiler artifacts only to scratch.
         target_files = sorted({target.file.resolve() for target in targets})
-        console.print("\n[bold]Initial sandboxed Lean check...[/]")
+        ui.phase("Initial sandboxed Lean check")
         for target_file in target_files:
             with ui.status(f"Checking {target_file.name}..."):
                 build = self.project.check_file(
@@ -609,10 +609,10 @@ class AutoLeanAgent:
             console.print("\n[yellow]DRY RUN — skipping tactic pre-search.[/]")
             all_presearch = []
         else:
-            console.print(
-                f"\n[bold]Tactic pre-search ({len(all_presearch)} tactics: "
+            ui.phase(
+                f"Tactic pre-search ({len(all_presearch)} tactics: "
                 f"{len(FAST_TACTICS)} fast + {len(extra_standard)} standard + "
-                f"{len(COMPOUND_TACTICS)} compound)...[/]"
+                f"{len(COMPOUND_TACTICS)} compound)"
             )
         presearch_proved = 0
         presearch_targets = (
@@ -744,7 +744,7 @@ class AutoLeanAgent:
             )
 
         # -- Main loop ------------------------------------------------------
-        console.print("\n[bold green]Starting autonomous loop...[/]\n")
+        ui.phase("Autonomous loop")
         session_start = time.monotonic()
 
         run_cycles = 0
@@ -841,18 +841,21 @@ class AutoLeanAgent:
                 if len(err_lines) > 4:
                     console.print(f"    [dim]... ({len(err_lines) - 4} more lines)[/dim]")
 
-            # Progress bar
-            bar_width = 30
-            filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
-            bar = "█" * filled + "░" * (bar_width - filled)
-            console.print(
-                f"  [{bar}] "
+            # Progress: the bar segment is animation, so logs keep only the
+            # numeric stats.
+            stats = (
                 f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
                 f"({coverage:.0f}%) | "
                 f"{remaining} left | "
                 f"{rate:.1f}/hr | "
                 f"{elapsed / 60:.0f}m elapsed"
             )
+            if console.is_terminal:
+                bar_width = 30
+                filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
+                bar = "█" * filled + "░" * (bar_width - filled)
+                stats = f"[{bar}] {stats}"
+            console.print(f"  {stats}")
             self._consider_model_escalation(target, record)
 
         # -- Session complete — full report -----------------------------------

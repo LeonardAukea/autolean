@@ -977,7 +977,8 @@ def prove(
     lean_root = program.parent / cfg.lean_project_path
     project = LeanProject(lean_root)
 
-    console.print(f"[bold]Planning:[/] {statement}\n")
+    ui.phase("Plan")
+    console.print(f"{statement}\n")
     with _connected_llm(model, backend, cfg) as llm:
         with ui.status(f"Consulting {llm.config.model}..."):
             proof_plan = _proof_plan(statement, llm, guide)
@@ -988,7 +989,7 @@ def prove(
                 proof_plan = _proof_plan(statement, llm, (*guide, revision))
             _show_proof_plan(proof_plan)
 
-        console.print("\n[bold]Formalizing and compiling the statement...[/]")
+        ui.phase("Formalize")
         try:
             with ui.status("Formalizing with the pinned Lean kernel..."):
                 theorem = formalize_theorem(
@@ -1016,7 +1017,7 @@ def prove(
     console.print(f"[green]Accepted {target_file}[/]\n")
 
     attempts_label = "unlimited" if max_attempts == 0 else str(max_attempts)
-    console.print(f"[bold]Attempting proof ({attempts_label} attempts)...[/]\n")
+    ui.phase(f"Prove ({attempts_label} attempts)")
     agent = _agent_for(
         program,
         model=model,
