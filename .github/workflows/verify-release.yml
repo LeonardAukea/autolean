@@ -1,0 +1,73 @@
+name: Verify release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable Hashver tag to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    verify-release-${{ github.event.workflow_run.head_sha || inputs.tag ||
+      github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Release attestation
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out released source
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Resolve release tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test "$EVENT_NAME" = workflow_dispatch; then
+            tag="$REQUESTED_TAG"
+          else
+            hashver="$(python3 -m autolean.release --revision "$SOURCE_SHA" id)"
+            tag="v$hashver"
+          fi
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Verify release attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..60}; do
+            if gh release verify "$RELEASE_TAG"; then
+              exit 0
+            fi
+            if test "$attempt" -eq 60; then
+              echo "GitHub release attestation did not become available" >&2
+              exit 1
+            fi
+            echo "Waiting for GitHub release attestation ($attempt/60)"
+            sleep 15
+          done

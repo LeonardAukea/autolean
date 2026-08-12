@@ -367,21 +367,3 @@ jobs:
           fi
           immutable="$(gh release view "$RELEASE_TAG" --json isImmutable --jq .isImmutable)"
           test "$immutable" = true
-      - name: Verify immutable release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in {1..30}; do
-            if gh release verify "$RELEASE_TAG"; then
-              exit 0
-            fi
-            if test "$attempt" -eq 30; then
-              echo "GitHub release attestation did not become available" >&2
-              exit 1
-            fi
-            echo "Waiting for GitHub release attestation ($attempt/30)"
-            sleep 10
-          done

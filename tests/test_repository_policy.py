@@ -20,15 +20,23 @@ def test_external_actions_use_full_commit_ids() -> None:
             )
 
 
-def test_release_job_requires_immutability_attestation() -> None:
+def test_release_job_requires_immutability() -> None:
     workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
     assert "--json isImmutable" in workflow
     assert 'test "$immutable" = true' in workflow
+
+
+def test_release_attestation_verification_is_independently_retriable() -> None:
+    workflow = (WORKFLOWS / "verify-release.yml").read_text(encoding="utf-8")
+
+    assert "workflow_run:" in workflow
+    assert "workflows: [CI]" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "github.event.workflow_run.head_branch == 'main'" in workflow
     assert 'gh release verify "$RELEASE_TAG"' in workflow
-    assert "for attempt in {1..30}" in workflow
-    assert "sleep 10" in workflow
-    assert workflow.index("gh release create") < workflow.index("gh release verify")
+    assert "for attempt in {1..60}" in workflow
+    assert "sleep 15" in workflow
 
 
 def test_pypi_publication_requires_a_named_immutable_release() -> None:

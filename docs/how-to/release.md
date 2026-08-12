@@ -96,10 +96,10 @@ gh release download --repo LeonardAukea/autolean --dir release
 python -m json.tool release/release-manifest.json
 ```
 
-The release job attaches every asset before publication. GitHub locks the tag
-and assets, then emits the release attestation. The workflow allows five
-minutes for that asynchronous record to appear before `gh release verify`
-checks it.
+The CI release job attaches every asset and publishes the immutable release.
+The `Verify release` workflow begins after successful CI and allows 15 minutes
+for GitHub's asynchronous release attestation to appear. A manual dispatch
+with the exact tag repeats verification against the same immutable assets.
 
 Repository release immutability was enabled on 2026-08-12. Earlier private
 qualification releases remain mutable and are not public distribution
