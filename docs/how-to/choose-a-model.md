@@ -23,6 +23,32 @@ The registry in `autolean/models.py` is the source of truth for shipped
 profiles. Provider catalogs change; the command reports the profiles in the
 installed AutoLean version.
 
+## Use the machine default
+
+`model: auto` selects an authenticated subscription CLI first, followed by a
+configured hosted API. Claude is the stable tie-breaker when both Claude and
+Codex subscriptions are ready. The selected provider always receives its
+strongest tuned profile and `max` reasoning effort:
+
+- Claude CLI: `fable`
+- Codex CLI: `gpt-5.6-sol`
+- Anthropic API: `claude-fable-5`
+- OpenAI API: `gpt-5.6-sol`
+
+The mappings follow Anthropic's
+[model guidance](https://platform.claude.com/docs/en/about-claude/models/choosing-a-model)
+and [effort control](https://platform.claude.com/docs/en/build-with-claude/effort),
+and OpenAI's [model catalog](https://developers.openai.com/api/docs/models).
+
+Choose a provider while retaining its strongest model with `--backend`:
+
+```bash
+autolean doctor --backend codex_cli
+autolean prove "1 + 1 = 2" --backend anthropic
+```
+
+Select the exact model for local and self-hosted backends.
+
 ## Set the project default
 
 Put the profile name in `program.md` when a project should begin every run with

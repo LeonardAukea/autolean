@@ -22,7 +22,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Ri
 from textual.widgets.option_list import Option
 
 from autolean.llm import BACKEND_NAMES, BACKENDS
-from autolean.models import ModelProfile, profile_groups, resolve_profile
+from autolean.models import AUTO_PROFILE, ModelProfile, profile_groups, resolve_profile
 from autolean.program import ProgramConfig, parse_program
 from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
 from autolean.scanner import SorryTarget, difficulty_score, prioritize_targets, scan_project
@@ -219,7 +219,7 @@ def render_program(config: ProgramConfig, lean_root: Path) -> str:
 
 def _profile_options() -> list[tuple[str, str]]:
     """Return discoverable profile labels in registry display order."""
-    options: list[tuple[str, str]] = []
+    options = [("auto · Strongest authenticated provider", AUTO_PROFILE)]
     for group, profiles in profile_groups():
         options.extend((f"{profile.name} · {group}", profile.name) for profile in profiles)
     options.append(("Custom model ID…", CUSTOM_MODEL))
@@ -418,8 +418,15 @@ class AutoLeanWorkbench(App[None]):
 
     def compose(self) -> ComposeResult:
         initial_profile = resolve_profile(self.session.config.model)
-        profile_value = initial_profile.name if initial_profile is not None else CUSTOM_MODEL
-        custom_value = "" if initial_profile is not None else self.session.config.model
+        is_automatic = self.session.config.model == AUTO_PROFILE
+        profile_value = (
+            AUTO_PROFILE
+            if is_automatic
+            else initial_profile.name
+            if initial_profile is not None
+            else CUSTOM_MODEL
+        )
+        custom_value = "" if initial_profile is not None or is_automatic else self.session.config.model
         backend_value = self.session.config.backend or PROFILE_DEFAULT
         effort_value = self.session.config.effort or PROFILE_DEFAULT
 
@@ -444,7 +451,7 @@ class AutoLeanWorkbench(App[None]):
                     value=custom_value,
                     placeholder="provider/model-or-local-tag",
                     id="custom-model",
-                    disabled=initial_profile is not None,
+                    disabled=initial_profile is not None or is_automatic,
                 )
                 yield Label("Backend", classes="field-label")
                 yield Select(
@@ -728,6 +735,12 @@ class AutoLeanWorkbench(App[None]):
             value = self._profile_value()
         except WorkbenchInputError:
             details.update("")
+            return
+        if value == AUTO_PROFILE:
+            details.update(
+                "Strongest profile for an authenticated provider.\n"
+                "Select a hosted backend to choose its maximum explicitly."
+            )
             return
         profile: ModelProfile | None = resolve_profile(value) if value != CUSTOM_MODEL else None
         if profile is None:

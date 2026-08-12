@@ -316,6 +316,19 @@ class TestCodexClient:
 
 
 class TestCliBackend:
+    def test_probe_is_silent_and_reports_missing_binary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(sub.shutil, "which", lambda _: None)
+
+        status = claude().probe()
+
+        assert status.ready is False
+        assert "claude not found" in status.detail
+        assert capsys.readouterr().out == ""
+
     def test_ping_false_when_binary_is_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sub.shutil, "which", lambda _: None)
         assert claude().ping() is False
@@ -339,6 +352,32 @@ class TestCliBackend:
         fake_run.stdout = "Logged in using ChatGPT"
         assert codex().ping() is True
         assert fake_run.argv == ["codex", "login", "status"]
+
+    @pytest.mark.parametrize(
+        ("backend", "expected_binary"),
+        [("claude_cli", "claude"), ("codex_cli", "codex")],
+    )
+    def test_shared_subscription_probe_uses_the_backend_client(
+        self,
+        backend: str,
+        expected_binary: str,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_run: FakeRun,
+    ) -> None:
+        monkeypatch.setattr(sub.shutil, "which", lambda _: f"/usr/bin/{expected_binary}")
+        fake_run.stdout = (
+            json.dumps(
+                {
+                    "loggedIn": True,
+                    "authMethod": "claude.ai",
+                    "subscriptionType": "max",
+                }
+            )
+            if backend == "claude_cli"
+            else "Logged in using ChatGPT"
+        )
+
+        assert sub.probe_subscription_backend(backend).ready is True
 
     def test_api_billing_modes_are_rejected(self, monkeypatch: pytest.MonkeyPatch, fake_run: FakeRun) -> None:
         monkeypatch.setattr(sub.shutil, "which", lambda name: f"/usr/bin/{name}")
