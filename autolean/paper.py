@@ -32,7 +32,6 @@ from rich.console import Console
 
 from autolean.generated_code import (
     GeneratedCodeError,
-    safe_lean_comment_text,
     validate_generated_declarations,
 )
 from autolean.llm import (
@@ -60,9 +59,62 @@ class Claim:
     lean_name: str = ""  # Generated Lean identifier
     lean_code: str = ""  # Formalized Lean 4 code
     proof_sketch: str = ""  # Proof from the paper (if available)
-    kind: str = ""  # "theorem", "lemma", "definition", "proposition", etc.
-    input_ref: str = ""  # source delivered to the extractor
-    input_sha256: str = ""  # exact extractor input bytes
+    kind: str = "claim"  # theorem, lemma, definition, conjecture, or context
+    input_ref: str = ""  # acquired source supplied for extraction
+    input_sha256: str = ""  # SHA-256 of the acquired source bytes
+    lean_declarations: tuple[str, ...] = ()  # reviewed declarations in the pinned closure
+    evidence_names: tuple[str, ...] = ()  # closed aliases emitted for kernel checking
+    profile_id: str = ""  # reviewed profile that owns the mapping
+    profile_scope: str = ""  # background, core construction, or application
+    elaborated: bool = False  # complete evidence source passed Lean acceptance
+
+    @property
+    def disposition(self) -> ClaimDisposition:
+        """Return the workflow assigned to this mathematical item."""
+        return claim_disposition(self.kind)
+
+
+class ClaimDisposition(StrEnum):
+    """The action permitted for one extracted mathematical item."""
+
+    PROVE = "prove"
+    DEFINE = "define"
+    CONTEXT = "context"
+    OPEN = "open"
+
+
+_KIND_ALIASES = {
+    "cor": "corollary",
+    "def": "definition",
+    "defi": "definition",
+    "defn": "definition",
+    "lem": "lemma",
+    "nota": "notation",
+    "prop": "proposition",
+    "thm": "theorem",
+}
+_PROOF_KINDS = {"claim", "corollary", "lemma", "proposition", "theorem"}
+_DEFINITION_KINDS = {"definition", "notation"}
+_OPEN_KINDS = {"conjecture", "open problem", "problem", "question"}
+
+
+def normalize_claim_kind(kind: str) -> str:
+    """Return the canonical lower-case name of a paper environment."""
+    normalized = re.sub(r"[_-]+", " ", kind.strip().casefold())
+    normalized = " ".join(normalized.split())
+    return _KIND_ALIASES.get(normalized, normalized or "context")
+
+
+def claim_disposition(kind: str) -> ClaimDisposition:
+    """Assign a fail-closed workflow to one paper environment."""
+    normalized = normalize_claim_kind(kind)
+    if normalized in _PROOF_KINDS:
+        return ClaimDisposition.PROVE
+    if normalized in _DEFINITION_KINDS:
+        return ClaimDisposition.DEFINE
+    if normalized in _OPEN_KINDS:
+        return ClaimDisposition.OPEN
+    return ClaimDisposition.CONTEXT
 
 
 class PdfEngine(StrEnum):
@@ -93,6 +145,20 @@ class PaperArtifact:
     pdf_path: Path | None
     input_sha256: str
     text_sha256: str
+    pdf_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class PreparedPaper:
+    """Accepted Lean evidence and its exact source artifacts."""
+
+    lean_path: Path
+    source: PaperArtifact
+    coverage_path: Path
+    plan_path: Path
+    profile_id: str = ""
+    model: str = ""
+    backend: str = ""
 
 
 def _sha256_file(path: Path) -> str:
@@ -154,10 +220,14 @@ def materialize_paper(document: PaperDocument, project_root: Path) -> PaperArtif
     if re.fullmatch(r"[0-9a-f]{64}", input_sha256) is None:
         raise ValueError("paper input SHA-256 must be 64 lowercase hexadecimal characters")
     markdown = root / "AutoLean" / "Papers" / f"Paper_{input_sha256[:12]}_{text_sha256[:12]}.md"
+    cached_pdf = _cache_paper_pdf(document, root)
+    pdf_sha256 = _sha256_file(cached_pdf) if cached_pdf is not None else ""
+    pdf_record = f"\nPDF SHA-256: `{pdf_sha256}`\n" if pdf_sha256 else ""
     content = (
         f"# {document.title or 'Untitled paper'}\n\n"
         f"Source: {document.input_ref or 'unknown'}\n\n"
-        f"Input SHA-256: `{input_sha256}`\n\n"
+        f"Source SHA-256: `{input_sha256}`\n"
+        f"{pdf_record}\n"
         f"Extractor: {document.extractor or 'unknown'}\n\n"
         "## Extracted document\n\n"
         f"{extracted_text}\n"
@@ -165,9 +235,10 @@ def materialize_paper(document: PaperDocument, project_root: Path) -> PaperArtif
     _write_exact_text(markdown, content, label="paper artifact")
     return PaperArtifact(
         markdown,
-        _cache_paper_pdf(document, root),
+        cached_pdf,
         input_sha256,
         text_sha256,
+        pdf_sha256,
     )
 
 
@@ -377,14 +448,16 @@ def _ordered_arxiv_nodes(soup: Any) -> list[tuple[str, Any, str]]:
     ordered: list[tuple[str, Any, str]] = []
     for node in soup.find_all("div"):
         classes = _html_classes(node)
+        if "ltx_proof" in classes:
+            ordered.append(("proof", node, ""))
+            continue
         theorem_class = next(
-            (name for name in classes if name.startswith("ltx_theorem_")),
+            (name for name in classes if name.startswith("ltx_theorem_") and name != "ltx_theorem_proof"),
             None,
         )
         if "ltx_theorem" in classes and theorem_class is not None:
-            ordered.append(("theorem", node, theorem_class.removeprefix("ltx_theorem_")))
-        elif "ltx_proof" in classes:
-            ordered.append(("proof", node, ""))
+            kind = normalize_claim_kind(theorem_class.removeprefix("ltx_theorem_"))
+            ordered.append(("theorem", node, kind))
     return ordered
 
 
@@ -418,7 +491,7 @@ def _claim_from_html_node(node: Any, kind: str, proof_sketch: str) -> Claim | No
         label=label,
         statement=statement[:1000],
         lean_name=_to_lean_name(label),
-        kind=kind,
+        kind=normalize_claim_kind(kind),
         proof_sketch=proof_sketch[:500],
     )
 
@@ -460,6 +533,55 @@ def _html_fragment_text(fragment: Any, *, remove_tags: bool = False) -> str:
         for tag in root.select(".ltx_tag"):
             tag.decompose()
     return " ".join(root.stripped_strings)
+
+
+_MARKDOWN_ENVIRONMENT = re.compile(
+    r"\*\*(?P<kind>Definition|Lemma|Theorem|Proposition|Corollary|"
+    r"Conjecture|Remark)\s+(?P<number>\d+(?:\.\d+)*)(?:\.)?\*\*",
+    re.IGNORECASE,
+)
+_LEAN_DECLARATION = re.compile(r"(?m)^[ \t]*(?P<code>(?:theorem|lemma|def)\s+[A-Za-z_][A-Za-z0-9_']*.*)")
+
+
+def extract_claims_from_markdown(text: str) -> list[Claim]:
+    """Recover numbered mathematical environments from layout Markdown."""
+    matches = list(_MARKDOWN_ENVIRONMENT.finditer(text))
+    claims: list[Claim] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        fragment = text[match.end() : end].strip()
+        fragment = re.sub(r"^\s*\([^\n)]{1,120}\)\s*\*\*\.\*\*\s*", "", fragment)
+        paragraphs = [" ".join(item.split()) for item in re.split(r"\n\s*\n", fragment) if item.strip()]
+        if not paragraphs:
+            continue
+        statement = paragraphs[0]
+        proof = ""
+        proof_match = re.search(r"(?is)(?:^|\n\s*\n)Proof\.\s*(.*)", fragment)
+        if proof_match is not None:
+            proof = " ".join(proof_match.group(1).split())
+        elif lean_match := _LEAN_DECLARATION.search(fragment):
+            proof = " ".join(lean_match.group("code").split())
+        kind = normalize_claim_kind(match.group("kind"))
+        label = f"{kind.capitalize()} {match.group('number')}"
+        claims.append(
+            Claim(
+                label=label,
+                statement=statement[:1000],
+                lean_name=_to_lean_name(label),
+                kind=kind,
+                proof_sketch=proof[:500],
+            )
+        )
+    return claims
+
+
+def _paper_title_from_text(text: str, fallback: str) -> str:
+    """Read the first Markdown heading emitted by the PDF engine."""
+    for line in text.splitlines()[:40]:
+        candidate = line.strip().lstrip("#").strip().strip("*").strip()
+        if 8 <= len(candidate) <= 300:
+            return candidate
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +901,7 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
         label = m.group(2).strip()
         statement = m.group(3).strip()
         lean_name = _to_lean_name(label)
-        kind = label.split()[0].lower() if label else "claim"
+        kind = normalize_claim_kind(label.split()[0] if label else "claim")
         if statement:
             claims.append(
                 Claim(
@@ -805,7 +927,7 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
         label = m.group(2).strip()
         statement = m.group(3).strip()
         lean_name = _to_lean_name(label)
-        kind = label.split()[0].lower() if label else "claim"
+        kind = normalize_claim_kind(label.split()[0] if label else "claim")
         if statement:
             claims.append(
                 Claim(
@@ -837,11 +959,13 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
             statement = content
 
         if statement:
+            inferred_kind = normalize_claim_kind(label.split()[0] if label else "context")
             claims.append(
                 Claim(
                     label=label,
                     statement=statement[:500],
                     lean_name=_to_lean_name(label),
+                    kind=inferred_kind,
                 )
             )
         i += 2
@@ -901,11 +1025,18 @@ def read_paper(
                 paddleocr_url=paddleocr_url,
             )
             if text.strip():
+                pdf_sha256 = _sha256_file(pdf_path)
+                input_ref = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                claims = extract_claims_from_markdown(text)
+                for claim in claims:
+                    claim.input_ref = input_ref
+                    claim.input_sha256 = pdf_sha256
                 return PaperDocument(
-                    title=paper_title,
+                    title=_paper_title_from_text(text, paper_title),
+                    claims=claims,
                     text=text,
-                    input_ref=str(pdf_path),
-                    input_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    input_ref=input_ref,
+                    input_sha256=pdf_sha256,
                     pdf_path=pdf_path,
                     extractor=pdf_engine.value,
                 )
@@ -933,11 +1064,18 @@ def read_paper(
             engine=pdf_engine,
             paddleocr_url=paddleocr_url,
         )
+        source_sha256 = _sha256_file(source_path)
+        input_ref = str(source_path.resolve())
+        claims = extract_claims_from_markdown(text)
+        for claim in claims:
+            claim.input_ref = input_ref
+            claim.input_sha256 = source_sha256
         return PaperDocument(
-            title=source_path.stem,
+            title=_paper_title_from_text(text, source_path.stem),
+            claims=claims,
             text=text,
-            input_ref=str(source_path.resolve()),
-            input_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            input_ref=input_ref,
+            input_sha256=source_sha256,
             pdf_path=source_path.resolve(),
             extractor=pdf_engine.value,
         )
@@ -987,6 +1125,9 @@ def formalize_claim(
     system: str = "You are a Lean 4 formalization expert using Mathlib4.",
 ) -> Claim:
     """Formalize a single claim into Lean 4 code."""
+    if claim.disposition is not ClaimDisposition.PROVE:
+        return claim
+
     # Include proof sketch if available — helps the LLM formalize
     proof_hint = ""
     if claim.proof_sketch:
@@ -1009,84 +1150,6 @@ def formalize_claim(
     except (LLMError, GeneratedCodeError) as e:
         console.print(f"  [yellow]Formalization failed for {claim.label}: {e}[/]")
     return claim
-
-
-# ---------------------------------------------------------------------------
-# Lean file generation
-# ---------------------------------------------------------------------------
-
-
-def render_verification_source(
-    claims: list[Claim],
-    paper_title: str = "Unknown Paper",
-) -> str:
-    """Render complete Lean source for formalized paper claims."""
-    safe_title = safe_lean_comment_text(paper_title)
-    parts = [
-        "/-!",
-        f"# Verification: {safe_title}",
-        "",
-        "Auto-generated from paper by AutoLean verify.",
-        "Each theorem corresponds to a claim in the paper.",
-        "Pending theorems contain explicit sorry targets for the agent.",
-    ]
-    inputs = sorted({(claim.input_ref, claim.input_sha256) for claim in claims if claim.input_sha256})
-    for reference, digest in inputs:
-        parts.append(f"Extractor input: {safe_lean_comment_text(reference or 'inline')}")
-        parts.append(f"Extractor input SHA-256: {digest}")
-    parts.extend(["-/", "", "import Mathlib", ""])
-
-    for c in claims:
-        label = safe_lean_comment_text(c.label)
-        statement = safe_lean_comment_text(c.statement)
-        parts.append(f"-- [{label}]: {statement[:120]}")
-        if c.proof_sketch:
-            sketch = safe_lean_comment_text(c.proof_sketch)
-            parts.append(f"-- Proof sketch: {sketch[:100]}...")
-
-        if c.lean_code:
-            validated_code = validate_generated_declarations(c.lean_code)
-            code_lines = [
-                line
-                for line in validated_code.split("\n")
-                if not line.strip().startswith(("import ", "-- import"))
-            ]
-            parts.append("\n".join(code_lines))
-        else:
-            lean_name = safe_lean_comment_text(c.lean_name)
-            parts.append(f"-- Formalization pending: {statement[:80]}")
-            parts.append(f"-- theorem {lean_name} : sorry := sorry")
-        parts.append("")
-
-    return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Paper structure analysis
-# ---------------------------------------------------------------------------
-
-
-def analyze_paper_structure(claims: list[Claim]) -> dict[str, Any]:
-    """Analyze the structure of extracted claims.
-
-    Returns a summary dict with counts by kind, proof coverage, etc.
-    """
-    by_kind: dict[str, int] = {}
-    with_proof = 0
-    for c in claims:
-        kind = c.kind or "unknown"
-        by_kind[kind] = by_kind.get(kind, 0) + 1
-        if c.proof_sketch:
-            with_proof += 1
-
-    return {
-        "total_claims": len(claims),
-        "by_kind": by_kind,
-        "with_proof": with_proof,
-        "provable": [c for c in claims if c.kind in ("theorem", "lemma", "proposition", "corollary")],
-        "definitions": [c for c in claims if c.kind == "definition"],
-        "remarks": [c for c in claims if c.kind == "remark"],
-    }
 
 
 # ---------------------------------------------------------------------------

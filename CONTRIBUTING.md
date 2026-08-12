@@ -75,8 +75,8 @@ plain sentences. Wrap prose at 80 columns.
 The terminal demo is reproducible:
 
 ```console
-python scripts/record_pythagorean_demo.py
-vhs docs/demos/pythagorean.tape
+python scripts/record_paper_demo.py
+vhs docs/demos/ionescu-tulcea.tape
 ```
 
 ## Commits and pull requests

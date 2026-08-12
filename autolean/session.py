@@ -73,6 +73,7 @@ class ProofSession:
     escalation_after_failures: int = DEFAULT_ESCALATION_AFTER
     target_file: str = ""
     target_filter: str = ""
+    artifacts: tuple[str, ...] = ()
     guidance: tuple[str, ...] = ()
     model_transitions: tuple[ModelTransition, ...] = ()
     remaining_targets: int | None = None
@@ -99,6 +100,7 @@ class ProofSession:
         record["kind"] = self.kind.value
         record["status"] = self.status.value
         record["escalation_policy"] = self.escalation_policy.value
+        record["artifacts"] = list(self.artifacts)
         record["guidance"] = list(self.guidance)
         record["model_transitions"] = [item.as_dict() for item in self.model_transitions]
         return record
@@ -126,6 +128,7 @@ class ProofSession:
                 ),
                 target_file=str(record.get("target_file", "")),
                 target_filter=str(record.get("target_filter", "")),
+                artifacts=tuple(str(item) for item in record.get("artifacts", [])),
                 guidance=tuple(str(item) for item in record.get("guidance", [])),
                 model_transitions=tuple(
                     ModelTransition.from_dict(item) for item in record.get("model_transitions", [])
@@ -176,6 +179,34 @@ class SessionStore:
             raise SessionError("proof session target escapes the Lean project") from error
         return candidate
 
+    def artifact_paths(self, session: ProofSession) -> tuple[Path, ...]:
+        """Resolve and validate the source artifacts owned by a session."""
+        paths: list[Path] = []
+        for relative in session.artifacts:
+            candidate = (self.project_root / relative).resolve()
+            try:
+                candidate.relative_to(self.project_root)
+            except ValueError as error:
+                raise SessionError("proof session artifact escapes the Lean project") from error
+            if not candidate.is_file():
+                raise SessionError(f"proof session artifact does not exist: {relative}")
+            paths.append(candidate)
+        return tuple(paths)
+
+    def relative_artifacts(self, artifacts: tuple[Path, ...]) -> tuple[str, ...]:
+        """Encode source artifact paths inside the project root."""
+        relative: list[str] = []
+        for artifact in artifacts:
+            if not artifact.is_file():
+                raise SessionError(f"proof session artifact does not exist: {artifact}")
+            try:
+                path = artifact.resolve().relative_to(self.project_root).as_posix()
+            except ValueError as error:
+                raise SessionError("proof session artifact must be inside the Lean project") from error
+            if path not in relative:
+                relative.append(path)
+        return tuple(relative)
+
     def create(
         self,
         *,
@@ -189,6 +220,7 @@ class SessionStore:
         escalation_after_failures: int = DEFAULT_ESCALATION_AFTER,
         target_file: Path | None = None,
         target_filter: str = "",
+        artifacts: tuple[Path, ...] = (),
         guidance: tuple[str, ...] = (),
         session_id: str | None = None,
     ) -> ProofSession:
@@ -212,6 +244,7 @@ class SessionStore:
             escalation_after_failures=escalation_after_failures,
             target_file=self.relative_target(target_file),
             target_filter=target_filter,
+            artifacts=self.relative_artifacts(artifacts),
             guidance=guidance,
         )
         if self._path(session.id).exists():
@@ -249,6 +282,7 @@ class SessionStore:
         if session.id != session_id:
             raise SessionError(f"proof session ID does not match its filename: {session_id}")
         self.target_path(session)
+        self.artifact_paths(session)
         return session
 
     def list(self) -> list[ProofSession]:

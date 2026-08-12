@@ -126,7 +126,8 @@ jobs:
           nix develop . --command actionlint .github/workflows/*.yml
           nix develop . --command cffconvert --validate -i CITATION.cff
           nix develop . --command lychee --offline --include-fragments \
-            README.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md docs
+            README.md CONTRIBUTING.md SECURITY.md SUPPORT.md GOVERNANCE.md \
+            CODE_OF_CONDUCT.md CHANGELOG.md docs
       - name: Check repository boundaries
         shell: bash
         run: |
@@ -134,6 +135,8 @@ jobs:
           tracked_runtime="$(git ls-files -- \
             workspace/.overnight.pid \
             'workspace/AutoLean/Generated/**' \
+            'workspace/AutoLean/Papers/**' \
+            'workspace/AutoLean/Paper_*.lean' \
             workspace/AutoLean/UserTheorems.lean \
             'workspace/skills/*.json' \
             'workspace/training_data/**' \
@@ -249,6 +252,8 @@ jobs:
               */workspace/.autolean/* | \
               */workspace/.lake/* | \
               */workspace/AutoLean/Generated/* | \
+              */workspace/AutoLean/Papers/* | \
+              */workspace/AutoLean/Paper_*.lean | \
               */workspace/AutoLean/UserTheorems.lean | \
               */workspace/logs/* | \
               */workspace/skills/* | \

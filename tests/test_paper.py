@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,18 +14,30 @@ from autolean.generated_code import GeneratedCodeError
 from autolean.llm import Capabilities, DocumentInput, LLMResponse
 from autolean.paper import (
     Claim,
+    ClaimDisposition,
     PaperDocument,
     PdfEngine,
     _extract_arxiv_id,
     _fetch_arxiv_html_with_lightpanda,
     _parse_arxiv_html_theorems,
     _parse_page_selection,
+    claim_disposition,
+    extract_claims_from_markdown,
     extract_document_claims,
     materialize_paper,
     read_paper,
     read_pdf,
-    render_verification_source,
 )
+from autolean.paper_evidence import (
+    analyze_paper_structure,
+    bind_reviewed_paper,
+    mark_reviewed_paper_elaborated,
+    render_verification_source,
+    write_paper_coverage,
+    write_paper_plan,
+)
+from autolean.paper_profiles import IONESCU_TULCEA_V5, PaperProfileError
+from autolean.strategy import PlanAttempt, parse_proof_plan
 
 
 def test_materialized_paper_preserves_exact_text_and_pdf(
@@ -51,7 +64,57 @@ def test_materialized_paper_preserves_exact_text_and_pdf(
     assert artifact.pdf_path.read_bytes() == source.read_bytes()
     markdown = artifact.markdown_path.read_text(encoding="utf-8")
     assert markdown.endswith(text + "\n")
-    assert "Input SHA-256: `" + "a" * 64 + "`" in markdown
+    assert "Source SHA-256: `" + "a" * 64 + "`" in markdown
+    assert artifact.pdf_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert f"PDF SHA-256: `{artifact.pdf_sha256}`" in markdown
+
+
+def test_paper_plan_preserves_the_exact_model_response(tmp_path: Path) -> None:
+    artifact = materialize_paper(
+        PaperDocument(title="Fixture", text="A theorem.", input_sha256="a" * 64),
+        tmp_path,
+    )
+    payload: dict[str, object] = {
+        "objective": "Audit one exact declaration.",
+        "formalization": [],
+        "observations": [],
+        "invariants": [],
+        "obstructions": [],
+        "reductions": [],
+        "premises": [],
+        "methods": ["Elaborate the generated declaration."],
+        "partial_results": [],
+        "risks": ["Elaboration does not prove source fidelity."],
+        "completion_criteria": ["Lean reports zero errors."],
+        "checkpoints": [],
+        "revision_triggers": [],
+    }
+    raw_response = json.dumps(payload, indent=2)
+    plan = parse_proof_plan(raw_response)
+    response = PlanAttempt(
+        attempt=1,
+        guidance=("Keep the evidence boundary explicit.",),
+        response=raw_response,
+        model="opus",
+        input_tokens=101,
+        output_tokens=202,
+        duration_seconds=3.5,
+    )
+
+    path = write_paper_plan(
+        artifact,
+        plan,
+        model="opus",
+        backend="claude_cli",
+        responses=(response,),
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+
+    assert record["schema"] == "autolean.paper-plan.v2"
+    assert record["responses"][0]["response"] == raw_response
+    assert record["responses"][0]["response_sha256"] == response.response_sha256
+    assert record["accepted_response_sha256"] == response.response_sha256
+    assert len(record["trace_sha256"]) == 64
 
 
 def test_materialized_paper_rejects_non_digest_identity(tmp_path: Path) -> None:
@@ -206,6 +269,255 @@ def test_html_parser_handles_nested_blocks_and_math_alttext() -> None:
     assert "x < y" in claims[0].statement
     assert claims[0].proof_sketch == "Apply the ordering axiom."
     assert claims[1].proof_sketch == ""
+
+
+def test_html_parser_does_not_promote_proof_environments_to_claims() -> None:
+    html = """
+    <html><body>
+      <div class="ltx_theorem ltx_theorem_thm">
+        <span class="ltx_tag">Theorem 1.</span><p>A statement.</p>
+      </div>
+      <div class="ltx_theorem ltx_theorem_proof ltx_proof">
+        <span class="ltx_tag">Proof.</span><p>The proof.</p>
+      </div>
+    </body></html>
+    """
+
+    claims = _parse_arxiv_html_theorems(html)
+
+    assert [(claim.label, claim.kind) for claim in claims] == [("Theorem 1", "theorem")]
+    assert claims[0].proof_sketch == "The proof."
+
+
+def test_layout_markdown_recovers_numbered_paper_inventory() -> None:
+    markdown = """
+    # A probability paper
+
+    **Definition 2.1.** A kernel sends points to probability measures.
+
+    **Theorem 2.2** (Ionescu-Tulcea) **.** There is a unique trajectory
+    kernel with the prescribed finite-dimensional marginals.
+
+    The construction uses an extension theorem.
+
+    **Lemma 3.1.** Partial trajectories compose.
+
+    theorem partialTraj_comp_partialTraj : True := by trivial
+
+    **Conjecture 4.1.** Brownian motion admits a future extension.
+    """
+
+    claims = extract_claims_from_markdown(markdown)
+
+    assert [claim.label for claim in claims] == [
+        "Definition 2.1",
+        "Theorem 2.2",
+        "Lemma 3.1",
+        "Conjecture 4.1",
+    ]
+    assert claims[0].disposition is ClaimDisposition.DEFINE
+    assert claims[1].disposition is ClaimDisposition.PROVE
+    assert claims[2].proof_sketch.startswith("theorem partialTraj_comp_partialTraj")
+    assert claims[3].disposition is ClaimDisposition.OPEN
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("thm", ClaimDisposition.PROVE),
+        ("definition", ClaimDisposition.DEFINE),
+        ("conjecture", ClaimDisposition.OPEN),
+        ("remark", ClaimDisposition.CONTEXT),
+        ("proof", ClaimDisposition.CONTEXT),
+        ("unknown environment", ClaimDisposition.CONTEXT),
+    ],
+)
+def test_claim_disposition_is_fail_closed(
+    kind: str,
+    expected: ClaimDisposition,
+) -> None:
+    assert claim_disposition(kind) is expected
+
+
+def test_paper_coverage_records_every_item_without_proving_conjectures(
+    tmp_path: Path,
+) -> None:
+    claims = [
+        Claim("Theorem 1", "A proved result.", kind="theorem", lean_code="theorem t : True := by trivial"),
+        Claim("Definition 1", "A definition.", kind="definition"),
+        Claim("Conjecture 1", "An open problem.", kind="conjecture"),
+        Claim("Remark 1", "Context.", kind="remark"),
+    ]
+    document = PaperDocument(title="Fixture", claims=claims, input_sha256="a" * 64)
+    artifact = materialize_paper(document, tmp_path / "project")
+
+    coverage = write_paper_coverage(artifact, claims)
+    analysis = analyze_paper_structure(claims)
+    source = render_verification_source(claims)
+
+    assert analysis["by_disposition"] == {
+        "prove": 1,
+        "define": 1,
+        "context": 1,
+        "open": 1,
+    }
+    assert coverage.is_file()
+    assert '"disposition": "open"' in coverage.read_text(encoding="utf-8")
+    assert "theorem t" in source
+    assert "Conjecture 1" in source
+    assert "Recorded as a source boundary" in source
+
+
+def _ionescu_tulcea_claims() -> list[Claim]:
+    return [
+        Claim(
+            item.label,
+            f"Extracted statement for {item.label}.",
+            kind=item.label.split()[0],
+            input_ref="https://arxiv.org/pdf/2506.18616v5.pdf",
+            input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        )
+        for item in IONESCU_TULCEA_V5.items
+    ]
+
+
+def test_reviewed_paper_binds_all_items_to_closed_lean_aliases(tmp_path: Path) -> None:
+    claims = _ionescu_tulcea_claims()
+    artifact = materialize_paper(
+        PaperDocument(
+            title=IONESCU_TULCEA_V5.title,
+            claims=claims,
+            input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        ),
+        tmp_path,
+    )
+    artifact = artifact.__class__(
+        artifact.markdown_path,
+        artifact.pdf_path,
+        artifact.input_sha256,
+        artifact.text_sha256,
+        IONESCU_TULCEA_V5.pdf_sha256,
+    )
+
+    profile = bind_reviewed_paper(claims, artifact)
+
+    assert profile is IONESCU_TULCEA_V5
+    assert len(claims) == 25
+    assert sum(len(claim.evidence_names) for claim in claims) == 33
+    assert all("noncomputable abbrev" in claim.lean_code for claim in claims)
+    assert all("sorry" not in claim.lean_code for claim in claims)
+    assert claims[10].lean_declarations == (
+        "ProbabilityTheory.Kernel.traj",
+        "ProbabilityTheory.Kernel.traj_map_frestrictLe",
+        "ProbabilityTheory.Kernel.eq_traj",
+    )
+
+
+def test_reviewed_paper_coverage_records_elaborated_item_mappings(tmp_path: Path) -> None:
+    claims = _ionescu_tulcea_claims()
+    artifact = materialize_paper(
+        PaperDocument(
+            title=IONESCU_TULCEA_V5.title,
+            claims=claims,
+            input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        ),
+        tmp_path,
+    )
+    artifact = artifact.__class__(
+        artifact.markdown_path,
+        artifact.pdf_path,
+        artifact.input_sha256,
+        artifact.text_sha256,
+        IONESCU_TULCEA_V5.pdf_sha256,
+    )
+    profile = bind_reviewed_paper(claims, artifact)
+    assert profile is not None
+    mark_reviewed_paper_elaborated(claims, profile)
+
+    coverage = write_paper_coverage(
+        artifact,
+        claims,
+        lean_evidence={
+            "declaration_count": 33,
+            "error_count": 0,
+            "module": "AutoLean/Evidence.lean",
+            "source_sha256": "b" * 64,
+            "success": True,
+        },
+    )
+    record = json.loads(coverage.read_text(encoding="utf-8"))
+
+    assert record["schema"] == "autolean.paper-coverage.v2"
+    assert record["profile"]["id"] == IONESCU_TULCEA_V5.id
+    assert record["total_items"] == 25
+    assert record["elaborated_items"] == 25
+    assert record["lean_evidence"]["declaration_count"] == 33
+    assert record["lean_evidence"]["success"] is True
+    assert {item["status"] for item in record["claims"]} == {"elaborated"}
+    assert all(item["statement"] for item in record["claims"])
+    assert all(len(item["statement_sha256"]) == 64 for item in record["claims"])
+
+
+def test_elaborated_paper_coverage_requires_lean_evidence(tmp_path: Path) -> None:
+    claims = _ionescu_tulcea_claims()
+    artifact = materialize_paper(
+        PaperDocument(
+            title=IONESCU_TULCEA_V5.title,
+            claims=claims,
+            input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
+        ),
+        tmp_path,
+    )
+    artifact = artifact.__class__(
+        artifact.markdown_path,
+        artifact.pdf_path,
+        artifact.input_sha256,
+        artifact.text_sha256,
+        IONESCU_TULCEA_V5.pdf_sha256,
+    )
+    profile = bind_reviewed_paper(claims, artifact)
+    assert profile is not None
+    mark_reviewed_paper_elaborated(claims, profile)
+
+    with pytest.raises(ValueError, match="requires Lean evidence"):
+        write_paper_coverage(artifact, claims)
+
+
+def test_reviewed_paper_rejects_an_incomplete_inventory(tmp_path: Path) -> None:
+    claims = _ionescu_tulcea_claims()[:-1]
+    artifact = materialize_paper(
+        PaperDocument(title="Fixture", claims=claims, input_sha256="a" * 64),
+        tmp_path,
+    )
+    artifact = artifact.__class__(
+        artifact.markdown_path,
+        artifact.pdf_path,
+        artifact.input_sha256,
+        artifact.text_sha256,
+        IONESCU_TULCEA_V5.pdf_sha256,
+    )
+
+    with pytest.raises(PaperProfileError, match=r"missing: Theorem 4\.1"):
+        bind_reviewed_paper(claims, artifact)
+
+
+def test_verification_source_starts_with_lean_imports() -> None:
+    source = render_verification_source(
+        [Claim("Theorem 1", "A statement.", lean_code="theorem t : True := by trivial")]
+    )
+
+    assert source.startswith("import Mathlib\n\n/-!")
+
+
+def test_reviewed_profile_uses_its_exact_import_closure() -> None:
+    source = render_verification_source(
+        [],
+        IONESCU_TULCEA_V5.title,
+        imports=IONESCU_TULCEA_V5.imports,
+    )
+
+    assert source.startswith("import Mathlib.Probability.ProductMeasure\n")
+    assert "\nimport Mathlib\n" not in source
 
 
 def test_page_selection_is_sorted_unique_and_bounds_checked() -> None:

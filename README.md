@@ -4,6 +4,14 @@
 [![Lean 4.33.0](https://img.shields.io/badge/Lean-4.33.0-0d9488)](https://github.com/leanprover/lean4/releases/tag/v4.33.0)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
+```text
+ ______     __  __     ______   ______     __         ______     ______     __   __
+/\  __ \   /\ \/\ \   /\__  _\ /\  __ \   /\ \       /\  ___\   /\  __ \   /\ "-.\ \
+\ \  __ \  \ \ \_\ \  \/_/\ \/ \ \ \/\ \  \ \ \____  \ \  __\   \ \  __ \  \ \ \-.  \
+ \ \_\ \_\  \ \_____\    \ \_\  \ \_____\  \ \_____\  \ \_____\  \ \_\ \_\  \ \_\\"\_\
+  \/_/\/_/   \/_____/     \/_/   \/_____/   \/_____/   \/_____/   \/_/\/_/   \/_/ \/_/
+```
+
 AutoLean turns a mathematical goal into a reviewable plan, a Lean 4
 declaration, and a kernel-checked proof. Model output is untrusted source code.
 AutoLean accepts it only after source-policy checks, operating-system
@@ -15,22 +23,26 @@ faithfully expresses an informal claim.
 
 <p align="center">
   <img
-    src="https://raw.githubusercontent.com/LeonardAukea/autolean/main/docs/assets/autolean-pythagorean.gif"
-    alt="AutoLean plans, formalizes, and proves the Pythagorean theorem"
+    src="docs/assets/autolean-ionescu-tulcea.gif"
+    alt="AutoLean audits the Ionescu-Tulcea formalization paper"
     width="960"
   >
 </p>
 
 <p align="center">
-  <a href="https://github.com/LeonardAukea/autolean/raw/main/docs/assets/autolean-pythagorean.mp4">MP4</a>
+  <a href="docs/assets/autolean-ionescu-tulcea.mp4">MP4</a>
   ·
-  <a href="docs/demos/pythagorean.tape">VHS source</a>
+  <a href="docs/demos/ionescu-tulcea.tape">VHS source</a>
+  ·
+  <a href="docs/demos/ionescu-tulcea.json">Run manifest</a>
 </p>
 
-The recording uses deterministic local model responses. Its first proof has a
-type mismatch. The next cycle reads Lean's diagnostic, corrects the proof,
-learns a reusable skill, and records both attempts. Planning, sandboxing, axiom
-inspection, source installation, and the proof commit run normally.
+The recording uses the configured Claude backend and the exact PDF for
+arXiv:2506.18616v5. It shows provider-generated planning, human revision, all
+25 paper items, 33 mapped Lean declarations, sandboxed elaboration, durable
+session state, and a standalone Lean and LaTeX export. The tape contains the
+live command and explicit human review guidance. Provider responses enter the
+generated provenance records at runtime.
 
 ## Start here
 
@@ -44,7 +56,7 @@ nix develop
 autolean models
 claude                    # enter /login once for the default profile
 autolean doctor
-autolean prove "the Pythagorean theorem" --review-plan
+autolean prove "the Pythagorean theorem" --review-plan --max-attempts 5
 ```
 
 Use `autolean workbench` for the interactive interface. The
@@ -111,12 +123,14 @@ The documentation follows the four-part
 - [Run a research session](docs/how-to/run-a-research-session.md)
 - [Verify a paper](docs/how-to/verify-a-paper.md)
 - [Qualify and publish a release](docs/how-to/release.md)
+- [Open the repository](docs/how-to/open-the-repository.md)
 
 ### Reference
 
 - [Command-line interface](docs/reference/cli.md)
 - [`program.md` configuration](docs/reference/program.md)
 - [Proof environments and provenance](docs/reference/environment.md)
+- [Research artifact records](docs/reference/research-artifacts.md)
 
 ### Explanation
 
@@ -140,7 +154,8 @@ containment tools.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing code or documentation.
 Report vulnerabilities through the private process in
-[SECURITY.md](SECURITY.md). Questions and design proposals belong in GitHub
-Discussions; reproducible defects belong in Issues.
+[SECURITY.md](SECURITY.md). [SUPPORT.md](SUPPORT.md) routes questions and bug
+reports. [GOVERNANCE.md](GOVERNANCE.md) states ownership and decisions.
+User-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 AutoLean is available under the [MIT License](LICENSE).

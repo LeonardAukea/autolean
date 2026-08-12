@@ -40,6 +40,16 @@ def test_sorry_declaration_is_allowed_for_formalization() -> None:
     assert validate_generated_declarations(code) == code
 
 
+def test_noncomputable_definition_is_allowed_as_a_closed_declaration() -> None:
+    code = "noncomputable def generated := Classical.choice"
+    assert validate_generated_closed_declarations(code) == code
+
+
+def test_noncomputable_declaration_cannot_escape_a_proof_body() -> None:
+    with pytest.raises(GeneratedCodeError, match="command-level escape"):
+        validate_generated_proof("exact True.intro\nnoncomputable def injected := 1")
+
+
 def test_closed_declaration_rejects_a_placeholder() -> None:
     with pytest.raises(GeneratedCodeError, match="proof placeholder"):
         validate_generated_closed_declarations("theorem generated : True := by sorry")

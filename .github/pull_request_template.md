@@ -19,4 +19,5 @@ What adjacent claim remains untested or outside this pull request?
 - [ ] The change has one clear owner and no unrelated edits.
 - [ ] Success, rejection, and boundary cases are tested.
 - [ ] Documentation has one home for each changed contract.
+- [ ] User-visible changes are recorded in `CHANGELOG.md`.
 - [ ] Generated research state and credentials are absent from the diff.

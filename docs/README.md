@@ -16,6 +16,7 @@ How-to guides solve a named operational problem.
 - [Run a research session](how-to/run-a-research-session.md)
 - [Verify a paper](how-to/verify-a-paper.md)
 - [Qualify and publish a release](how-to/release.md)
+- [Open the repository](how-to/open-the-repository.md)
 
 ## Reference
 
@@ -24,6 +25,7 @@ Reference pages state exact interfaces, defaults, and records.
 - [Command-line interface](reference/cli.md)
 - [`program.md` configuration](reference/program.md)
 - [Proof environments and provenance](reference/environment.md)
+- [Research artifact records](reference/research-artifacts.md)
 
 ## Explanation
 

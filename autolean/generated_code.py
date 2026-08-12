@@ -23,10 +23,14 @@ _UNSOUND_DECLARATION = re.compile(r"\b(?:admit|sorryAx|axiom|constant)\b")
 _PLACEHOLDER = re.compile(r"\b(?:sorry|admit|sorryAx)\b")
 _COMMAND_ESCAPE = re.compile(
     r"(?m)^\s*(?:#|import\b|namespace\b|section\b|end\b|open\b|"
+    r"noncomputable\s+(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b|"
     r"theorem\b|lemma\b|def\b|abbrev\b|instance\b|structure\b|"
     r"class\b|inductive\b|axiom\b|opaque\b|set_option\b)"
 )
-_DECLARATION = re.compile(r"(?m)^\s*(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b")
+_DECLARATION = re.compile(
+    r"(?m)^\s*(?:noncomputable\s+)?"
+    r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b"
+)
 
 
 def validate_generated_proof(proof: str) -> str:

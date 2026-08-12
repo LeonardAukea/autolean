@@ -108,6 +108,34 @@ class TestClaudeCodeClient:
         assert resp.model == "claude-sonnet-5"
         assert resp.cost_usd is None
 
+    def test_identifies_the_model_that_generated_a_multi_model_response(
+        self,
+        fake_run: FakeRun,
+    ) -> None:
+        fake_run.stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "trivial",
+                "usage": {"input_tokens": 179, "output_tokens": 4},
+                "modelUsage": {
+                    "claude-haiku-4-5-20251001": {
+                        "inputTokens": 520,
+                        "outputTokens": 11,
+                    },
+                    "claude-opus-5": {
+                        "inputTokens": 179,
+                        "outputTokens": 4,
+                    },
+                },
+            }
+        )
+
+        response = claude().generate("be terse", "prove True")
+
+        assert response.model == "claude-opus-5"
+
     def test_runs_in_print_mode_with_json_output(self, fake_run: FakeRun) -> None:
         fake_run.stdout = CLAUDE_JSON
         claude().generate("be terse", "prove 1+1=2")

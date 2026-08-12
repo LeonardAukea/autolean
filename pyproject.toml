@@ -83,6 +83,8 @@ exclude = [
     "/workspace/.codedb",
     "/workspace/.lake",
     "/workspace/AutoLean/Generated",
+    "/workspace/AutoLean/Papers",
+    "/workspace/AutoLean/Paper_*.lean",
     "/workspace/AutoLean/UserTheorems.lean",
     "/workspace/logs",
     "/workspace/skills",
