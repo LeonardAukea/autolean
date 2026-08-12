@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 from rich.panel import Panel
 
-from autolean import cli_runtime
+from autolean import cli_runtime, ui
 from autolean.challenges import OpenProblem
 from autolean.llm import LLMError
 from autolean.provenance import ProofEnvironmentError
@@ -90,10 +90,10 @@ def diff(project: Path) -> None:
         raise click.ClickException(f"Git log failed: {detail or 'no detail'}")
     proved = [entry for entry in log_result.stdout.strip().split("\n") if entry]
     if proved:
-        console.print(f"\n[bold green]{len(proved)} recent proofs:[/]")
+        console.print(f"\n[bold]{len(proved)} recent proofs:[/]", style="ok")
         for entry in proved:
             name = entry.removeprefix("proof: Prove ")
-            console.print(f"  [green]OK[/] {name}")
+            ui.ok(name)
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +282,7 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
         console.print(f"  Use DPOTrainer with config from {config_path}")
 
     # Summary
-    console.print("\n[bold]Self-improving loop:[/]")
+    console.print("\n[bold]Fine-tuning loop:[/]")
     console.print("  1. Run agent:      uv run autolean solve --overnight")
     console.print("  2. Export data:     uv run autolean export-training")
     console.print(f"  3. Fine-tune:      {framework} train ...")

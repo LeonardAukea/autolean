@@ -59,7 +59,7 @@ from autolean.scanner import (
 )
 from autolean.structure import LeanStructureProvider
 from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
-from autolean.ui import console
+from autolean.ui import GLYPH_FAIL, GLYPH_OK, GLYPH_SKIP, console
 
 log = logging.getLogger("autolean")
 
@@ -819,11 +819,11 @@ class AutoLeanAgent:
 
             # Outcome with color
             if record.outcome in (Outcome.SUCCESS, Outcome.VALIDATED):
-                icon, style = "✓", "bold green"
+                icon, style = GLYPH_OK, "ok"
             elif record.outcome in (Outcome.SKIPPED, Outcome.GAP_FILLED):
-                icon, style = "→", "yellow"
+                icon, style = GLYPH_SKIP, "skip"
             else:
-                icon, style = "✗", "red"
+                icon, style = GLYPH_FAIL, "fail"
 
             console.print(
                 f"  [{style}]{icon} {record.outcome.value}[/{style}]"
@@ -1767,7 +1767,6 @@ class AutoLeanAgent:
         if not self.dry_run and stats["total_examples"] > 0:
             exported = self.collector.export_all()
             data_lines = [
-                "[bold]Training Data Collected[/bold]",
                 f"Total examples:    {stats['total_examples']}",
                 f"Positive (SFT):    {stats['positive']}",
                 f"Negative (DPO):    {stats['negative']}",
@@ -1795,8 +1794,8 @@ class AutoLeanAgent:
             console.print(
                 Panel(
                     "\n".join(data_lines),
-                    title="Self-Improving Loop",
-                    border_style="magenta",
+                    title="Training data",
+                    border_style="note",
                     width=70,
                 )
             )

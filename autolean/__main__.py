@@ -11,7 +11,7 @@ import click
 from rich.panel import Panel
 from rich.text import Text
 
-from autolean import __version__, cli_runtime
+from autolean import __version__, cli_runtime, ui
 from autolean.cli_sessions import register_commands as _register_session_commands
 from autolean.cli_workflows import register_commands as _register_workflow_commands
 from autolean.llm import LLMBackend, LLMError
@@ -498,12 +498,12 @@ def _doctor_preflight(llm: LLMBackend) -> str | None:
     try:
         ready = llm.ping()
     except LLMError as error:
-        console.print(f"  [red]FAIL[/] Preflight: {error}")
+        ui.fail(f"Preflight: {error}")
         return f"backend preflight: {error}"
     if ready:
-        console.print("  [green]OK[/] Preflight passed")
+        ui.ok("Preflight passed")
         return None
-    console.print("  [red]FAIL[/] Backend preflight did not pass — see `autolean models`.")
+    ui.fail("Backend preflight did not pass — see `autolean models`.")
     return "backend preflight did not pass"
 
 
@@ -520,12 +520,14 @@ def _doctor_generate_proof(llm: LLMBackend) -> str:
         ),
         user="Fill the proof of `theorem AutoLeanBackendSmoke : True := by sorry`.",
     )
-    console.print("  [green]OK[/] Response: ", Text(response.text[:60]), sep="")
+    from rich.markup import escape
+
+    ui.ok(f"Response: {escape(response.text[:60])}")
     proof = validate_generated_proof(clean_llm_proof(response.text, tactic_mode=True))
-    console.print(f"  [green]OK[/] Proof SHA-256: {sha256_text(proof)}")
+    ui.ok(f"Proof SHA-256: {sha256_text(proof)}")
     if llm.capabilities.token_counts and response.output_tokens:
-        console.print(
-            f"  [green]OK[/] {response.output_tokens} tokens "
+        ui.ok(
+            f"{response.output_tokens} tokens "
             f"in {response.duration_seconds:.1f}s "
             f"({response.tokens_per_second:.1f} tok/s)"
         )
@@ -545,7 +547,7 @@ def _doctor_model(
     try:
         llm = _llm_for(model, backend, config)
     except (LLMError, ValueError) as error:
-        console.print(f"  [red]FAIL[/] Configuration: {error}")
+        ui.fail(f"Configuration: {error}")
         return "", [f"model configuration: {error}"]
     console.print(f"  Model:   {llm.config.model}")
     console.print(f"  Backend: {llm.config.backend}")
@@ -566,7 +568,7 @@ def _doctor_model(
             return _doctor_generate_proof(llm), failures
         except (GeneratedCodeError, LLMError) as error:
             failures.append(f"model generation: {error}")
-            console.print(f"  [red]FAIL[/] Generation: {error}")
+            ui.fail(f"Generation: {error}")
             return "", failures
 
 
@@ -588,10 +590,12 @@ def _doctor_validate_proof(
         expected_environment=environment.sha256,
     )
     if smoke.success:
-        console.print(f"  [green]OK[/] Model proof passed sandboxed Lean ({smoke.duration_seconds:.1f}s)")
+        ui.ok(f"Model proof passed sandboxed Lean ({smoke.duration_seconds:.1f}s)")
         return None
+    from rich.markup import escape
+
     detail = smoke.stderr or (smoke.errors[0].message if smoke.errors else "Lean rejected the model proof")
-    console.print(f"  [red]FAIL[/] Model proof: {detail[:300]}")
+    ui.fail(f"Model proof: {escape(detail[:300])}")
     return f"model proof validation: {detail[:300]}"
 
 
@@ -604,10 +608,10 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
     lean_root = program.parent / config.lean_project_path
     try:
         project = LeanProject(lean_root)
-        console.print(f"  [green]OK[/] Project: {project.root}")
-        console.print(f"  [green]OK[/] Lean files: {len(project.lean_files())}")
+        ui.ok(f"Project: {project.root}")
+        ui.ok(f"Lean files: {len(project.lean_files())}")
         environment = project.proof_environment()
-        console.print(f"  [green]OK[/] Environment: sha256:{environment.sha256}")
+        ui.ok(f"Environment: sha256:{environment.sha256}")
         if model_proof:
             proof_failure = _doctor_validate_proof(project, environment, model_proof)
             if proof_failure:
@@ -615,13 +619,13 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
         console.print("  Building...")
         build = project.build(timeout=120)
         if build.success:
-            console.print(f"  [green]OK[/] Build succeeded ({build.duration_seconds:.1f}s)")
+            ui.ok(f"Build succeeded ({build.duration_seconds:.1f}s)")
         else:
             failures.append("Lean project build failed")
-            console.print(f"  [red]FAIL[/] Build errors: {len(build.errors)}")
+            ui.fail(f"Build errors: {len(build.errors)}")
     except (FileNotFoundError, OSError, ProofEnvironmentError) as error:
         failures.append(f"Lean toolchain: {error}")
-        console.print(f"  [red]FAIL[/] {error}")
+        ui.fail(str(error))
     return failures
 
 
@@ -633,13 +637,12 @@ def _doctor_research_tools() -> list[str]:
     console.print("\n[bold]Checking research tools...[/]")
     for tool in research_tools():
         if tool.available:
-            style = "green]OK"
+            ui.ok(tool.identity)
         elif tool.required:
-            style = "red]FAIL"
             failures.append(tool.identity)
+            ui.fail(tool.identity)
         else:
-            style = "yellow]WARN"
-        console.print(f"  [{style}[/] {tool.identity}")
+            ui.warn(tool.identity)
     return failures
 
 

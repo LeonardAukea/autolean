@@ -33,6 +33,7 @@ from autolean.paper_profiles import PaperProfile, PaperProfileError
 from autolean.program import ProgramConfig, parse_program
 from autolean.provenance import sha256_text
 from autolean.strategy import PlanAttempt, ProofPlan
+from autolean.ui import GLYPH_OK, GLYPH_SKIP
 
 
 class ConnectLLM(Protocol):
@@ -311,7 +312,7 @@ def prepare_paper(
             for claim in claims:
                 names = ", ".join(claim.lean_declarations)
                 services.console.print(
-                    "  [green]MAP[/] ",
+                    f"  [green]{GLYPH_OK}[/] ",
                     Text(f"{claim.label} → {names}"),
                     sep="",
                 )
@@ -321,9 +322,9 @@ def prepare_paper(
                 with services.console.status(f"[dim]Formalizing {claim.label}..."):
                     paper_api.formalize_claim(claim, formalizer.generate)
                 if claim.lean_code:
-                    services.console.print(f"  [green]OK[/] {claim.label} -> {claim.lean_name}")
+                    services.console.print(f"  [green]{GLYPH_OK}[/] {claim.label} -> {claim.lean_name}")
                 else:
-                    services.console.print(f"  [yellow]SKIP[/] {claim.label}")
+                    services.console.print(f"  [yellow]{GLYPH_SKIP}[/] {claim.label}")
 
         formalized = sum(bool(claim.lean_code) for claim in claims)
         if formalized == 0:
