@@ -37,7 +37,9 @@ It is read once at command start.
 
 `model`
 
-: Profile alias or raw model name. The default profile is `opus`.
+: Profile alias or raw model name. `auto` is the default and resolves a
+  machine provider as described in
+  [Choose and switch models](../how-to/choose-a-model.md).
 
 `backend`
 
@@ -121,7 +123,7 @@ workspace
 
 ## LLM Configuration
 
-model: opus
+model: auto
 temperature: 0.4
 max_output_tokens: 32768
 max_retries_per_sorry: 5

@@ -133,14 +133,14 @@ model_option = click.option(
     "-m",
     type=str,
     default=None,
-    help="Model profile, alias, or raw model string (see `autolean models`).",
+    help="Model profile or ID; auto selects the strongest authenticated provider.",
 )
 backend_option = click.option(
     "--backend",
     "-b",
     type=click.Choice(BACKEND_NAMES),
     default=None,
-    help="Override the backend the model profile selects.",
+    help="Select a provider; auto maps hosted providers to their strongest profile.",
 )
 program_option = click.option(
     "--program",
@@ -258,7 +258,10 @@ def _connected_llm(
     The caller owns the returned backend — use it as a context manager, or
     call `close()` explicitly.
     """
-    llm = _llm_for(model, backend, program_config, timeout=timeout)
+    try:
+        llm = _llm_for(model, backend, program_config, timeout=timeout)
+    except (LLMError, ValueError) as error:
+        raise click.ClickException(f"Model selection failed: {error}") from error
     console.print(f"[dim]Model:[/] {llm.config.model} [dim]via[/] {llm.config.backend}")
     if llm.config.model_revision:
         console.print(f"[dim]Revision:[/] {llm.config.model_revision}")
@@ -853,7 +856,11 @@ def _doctor_model(
 
     failures: list[str] = []
     console.print("[bold]Checking the model backend...[/]")
-    llm = _llm_for(model, backend, config)
+    try:
+        llm = _llm_for(model, backend, config)
+    except (LLMError, ValueError) as error:
+        console.print(f"  [red]FAIL[/] Configuration: {error}")
+        return "", [f"model configuration: {error}"]
     console.print(f"  Model:   {llm.config.model}")
     console.print(f"  Backend: {llm.config.backend}")
     if llm.config.base_url:
@@ -1638,8 +1645,7 @@ def _create_program(path: Path) -> bool:
         "## Lean Project Path\n\n"
         f"{path}\n\n"
         "## LLM Configuration\n\n"
-        "model: opus\n"
-        "effort: high\n"
+        "model: auto\n"
         "max_output_tokens: 32768\n"
         "max_retries_per_sorry: 5\n"
         "escalation_policy: ask\n"

@@ -54,10 +54,15 @@ cd autolean
 nix develop
 
 autolean models
-claude                    # enter /login once for the default profile
+claude                    # enter /login
+# or: codex login
 autolean doctor
 autolean prove "the Pythagorean theorem" --review-plan --max-attempts 5
 ```
+
+The automatic default selects the strongest profile for an authenticated
+provider. See [Choose and switch models](docs/how-to/choose-a-model.md) to pin
+a provider or model.
 
 Use `autolean workbench` for the interactive interface. The
 [first-proof tutorial](docs/tutorials/first-proof.md) explains each step and

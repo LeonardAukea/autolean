@@ -68,10 +68,10 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         model="fable",
         backend="claude_cli",
         temperature=None,
-        effort="high",
+        effort="max",
         description="Claude Fable 5 — strongest long-horizon Claude model",
         setup_command="claude  # then /login",
-        aliases=("claude-fable", "fable-5"),
+        aliases=("claude", "claude-fable", "fable-5"),
     ),
     ModelProfile(
         name="opus",
@@ -81,7 +81,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         effort="high",
         description="Claude Opus 5 — complex coding and proof work",
         setup_command="claude  # then /login",
-        aliases=("claude", "claude-opus", "opus-5"),
+        aliases=("claude-opus", "opus-5"),
         escalates_to="fable",
     ),
     ModelProfile(
@@ -100,7 +100,7 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         model="gpt-5.6-sol",
         backend="codex_cli",
         temperature=None,
-        effort="high",
+        effort="max",
         description="GPT-5.6 Sol — OpenAI frontier reasoning (ChatGPT subscription)",
         setup_command="codex login",
         aliases=("gpt", "openai", "gpt-5"),
@@ -139,10 +139,10 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         model="claude-fable-5",
         backend="anthropic",
         temperature=None,
-        effort="high",
+        effort="max",
         description="Claude Fable 5 over the Messages API (ANTHROPIC_API_KEY)",
         setup_command="export ANTHROPIC_API_KEY=... && uv sync --extra anthropic",
-        aliases=("claude-fable-api",),
+        aliases=("anthropic", "claude-api", "claude-fable-api"),
     ),
     ModelProfile(
         name="opus-api",
@@ -152,7 +152,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         effort="high",
         description="Claude Opus 5 over the Messages API (ANTHROPIC_API_KEY)",
         setup_command="export ANTHROPIC_API_KEY=... && uv sync --extra anthropic",
-        aliases=("claude-api", "anthropic"),
+        aliases=(),
         escalates_to="fable-api",
     ),
     ModelProfile(
@@ -171,7 +171,7 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
         model="gpt-5.6-sol",
         backend="openai",
         temperature=None,
-        effort="high",
+        effort="max",
         description="GPT-5.6 Sol over the Responses API (OPENAI_API_KEY)",
         setup_command="export OPENAI_API_KEY=... && uv sync --extra openai",
         aliases=("openai-api",),
@@ -309,8 +309,63 @@ _LOCAL: tuple[ModelProfile, ...] = (
 
 PROFILES: dict[str, ModelProfile] = {p.name: p for p in (*_SUBSCRIPTION, *_HOSTED_API, *_LOCAL)}
 
+AUTO_PROFILE = "auto"
+
+#: Strongest tuned profile for each automatically selectable provider.
+MAX_PROFILE_BY_BACKEND = {
+    "claude_cli": "fable",
+    "codex_cli": "codex",
+    "anthropic": "fable-api",
+    "openai": "gpt-api",
+}
+
+#: Subscription transports are preferred because they use the user's account.
+_AUTO_SUBSCRIPTION_BACKENDS = ("claude_cli", "codex_cli")
+_AUTO_API_BACKENDS = ("anthropic", "openai")
+_API_CREDENTIAL_ENV = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "openai": ("OPENAI_API_KEY",),
+}
+
 #: Used when neither program.md nor the CLI names a model.
-DEFAULT_PROFILE = "opus"
+DEFAULT_PROFILE = AUTO_PROFILE
+
+
+class ModelSelectionError(ValueError):
+    """The machine has no provider that can satisfy automatic selection."""
+
+
+def maximum_profile_for_backend(backend: str) -> ModelProfile:
+    """Return the strongest tuned profile for one selectable provider."""
+    profile_name = MAX_PROFILE_BY_BACKEND.get(backend)
+    if profile_name is None:
+        raise ModelSelectionError(
+            f"backend {backend!r} requires an explicit model; "
+            "automatic selection supports Claude, Codex, Anthropic, and OpenAI"
+        )
+    return PROFILES[profile_name]
+
+
+def detect_default_profile(backend: str | None = None) -> ModelProfile:
+    """Select the strongest profile for an authenticated provider."""
+    if backend is not None:
+        return maximum_profile_for_backend(backend)
+
+    from autolean.llm.subscription import probe_subscription_backend
+
+    for candidate in _AUTO_SUBSCRIPTION_BACKENDS:
+        if probe_subscription_backend(candidate).ready:
+            return maximum_profile_for_backend(candidate)
+
+    for candidate in _AUTO_API_BACKENDS:
+        if any(os.environ.get(name) for name in _API_CREDENTIAL_ENV[candidate]):
+            return maximum_profile_for_backend(candidate)
+
+    raise ModelSelectionError(
+        "automatic model selection found no authenticated provider; run "
+        "`claude` and /login, run `codex login`, configure a hosted API key, "
+        "or pass `--model`"
+    )
 
 
 def resolve_profile(name: str) -> ModelProfile | None:
@@ -360,7 +415,7 @@ def resolve_llm_config(
     `backend` or inferred from the string. Reasoning profiles retain their
     required default sampling configuration.
     """
-    profile = resolve_profile(model)
+    profile = detect_default_profile(backend) if model == AUTO_PROFILE else resolve_profile(model)
     if profile is not None:
         config = profile.to_config()
     else:
@@ -402,10 +457,6 @@ def profile_groups() -> list[tuple[str, tuple[ModelProfile, ...]]]:
 # Availability
 # ---------------------------------------------------------------------------
 
-_API_CREDENTIAL_ENV = {
-    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
-    "openai": ("OPENAI_API_KEY",),
-}
 _CLI_BINARY = {"claude_cli": "claude", "codex_cli": "codex"}
 
 
@@ -443,6 +494,16 @@ def profile_status(profile: ModelProfile, installed_ollama: set[str]) -> str:
 def print_models_table() -> None:
     """Print every profile with its backend, readiness, and description."""
     installed = probe_installed_models(DEFAULT_OLLAMA_URL)
+
+    try:
+        automatic = detect_default_profile()
+    except ModelSelectionError as error:
+        console.print(f"[bold]Automatic default:[/] [yellow]setup required[/] — {error}")
+    else:
+        console.print(
+            f"[bold]Automatic default:[/] {automatic.name} "
+            f"[dim]({automatic.model} via {automatic.backend}, effort {automatic.effort})[/]"
+        )
 
     for group, profiles in profile_groups():
         table = Table(title=f"{group} models", title_justify="left", header_style="bold")

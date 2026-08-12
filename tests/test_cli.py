@@ -682,12 +682,22 @@ class TestDiffCommand:
 
 
 class TestModelsCommand:
+    @pytest.fixture(autouse=True)
+    def automatic_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autolean.models import PROFILES
+
+        monkeypatch.setattr(
+            "autolean.models.detect_default_profile",
+            lambda: PROFILES["fable"],
+        )
+
     def test_models_lists_profiles(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["models"])
         # Should complete even if Ollama is down (shows "not installed")
         assert result.exit_code == 0
         assert "gemma4" in result.output
         assert "deepseek-prover" in result.output
+        assert "Automatic default" in result.output
 
     def test_models_shows_setup_commands(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["models"])

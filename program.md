@@ -42,7 +42,9 @@ workspace
 ## LLM Configuration
 
 <!--
-Run `autolean models` to see every profile and its local setup state.
+`auto` selects the strongest profile for an authenticated subscription CLI,
+then a configured hosted provider. Use `backend` to select one provider or
+`model` to select an exact profile. Run `autolean models` to see setup state.
 Subscription profiles include fable, opus, sonnet, codex, codex-terra, and
 codex-luna. Hosted profiles append `-api`. Local profiles include muse-glimmer,
 gemma4, and deepseek-prover. A raw model string also works, for example
@@ -57,7 +59,7 @@ escalation_policy: never, ask, or auto; ask is silent in non-interactive runs.
 escalation_model: optional exact stronger profile or raw model ID.
 escalation_after_failures: eligible kernel failures before a routing decision.
 -->
-model: opus
+model: auto
 temperature: 0.0
 max_retries_per_sorry: 5
 escalation_policy: ask

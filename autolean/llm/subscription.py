@@ -28,6 +28,7 @@ from autolean.llm.base import (
     BaseBackend,
     Capabilities,
     LLMAuthenticationError,
+    LLMConfig,
     LLMError,
     LLMRateLimitError,
     LLMResponse,
@@ -85,6 +86,14 @@ _CODEX_CONFIG_OVERRIDES = (
 )
 
 
+@dataclass(frozen=True)
+class SubscriptionStatus:
+    """Result of one silent local subscription preflight."""
+
+    ready: bool
+    detail: str = ""
+
+
 @dataclass
 class CliBackend(BaseBackend):
     """Common process handling for a vendor CLI in non-interactive mode."""
@@ -101,15 +110,17 @@ class CliBackend(BaseBackend):
         env_override = os.environ.get(f"AUTOLEAN_{self.binary.upper()}_BIN")
         return env_override or self.binary
 
-    def ping(self) -> bool:
-        """Check the CLI is installed and its active credential resolves."""
+    def probe(self) -> SubscriptionStatus:
+        """Inspect the CLI and its active credential without writing output."""
         binary = self.resolved_binary()
         if shutil.which(binary) is None:
-            console.print(
-                f"[red]{binary} not found on PATH.[/] "
-                f"Install it and sign in to use the {self.config.backend} backend."
+            return SubscriptionStatus(
+                ready=False,
+                detail=(
+                    f"{binary} not found on PATH. Install it and sign in to use "
+                    f"the {self.config.backend} backend."
+                ),
             )
-            return False
         try:
             with tempfile.TemporaryDirectory(prefix="autolean-llm-", ignore_cleanup_errors=True) as scratch:
                 result = subprocess.run(
@@ -120,18 +131,28 @@ class CliBackend(BaseBackend):
                     cwd=scratch,
                     env=self._environment(),
                 )
-        except (OSError, subprocess.SubprocessError) as e:
-            console.print(f"[red]{binary} failed to start:[/] {e}")
-            return False
+        except (OSError, subprocess.SubprocessError) as error:
+            return SubscriptionStatus(ready=False, detail=f"{binary} failed to start: {error}")
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()[:300]
-            console.print(f"[red]{binary} authentication preflight exited {result.returncode}:[/] {detail}")
-            return False
+            return SubscriptionStatus(
+                ready=False,
+                detail=f"{binary} authentication preflight exited {result.returncode}: {detail}",
+            )
         problem = self._preflight_problem(result)
         if problem:
-            console.print(f"[red]{binary} subscription preflight failed:[/] {problem}")
-            return False
-        return True
+            return SubscriptionStatus(
+                ready=False,
+                detail=f"{binary} subscription preflight failed: {problem}",
+            )
+        return SubscriptionStatus(ready=True)
+
+    def ping(self) -> bool:
+        """Check the CLI is installed and its active credential resolves."""
+        status = self.probe()
+        if not status.ready:
+            console.print(f"[red]{status.detail}[/]")
+        return status.ready
 
     def _preflight_problem(self, result: subprocess.CompletedProcess[str]) -> str | None:
         """Return a billing/authentication mismatch, if present."""
@@ -336,6 +357,18 @@ class CodexClient(CliBackend):
             output_tokens=usage.get("output_tokens", 0),
             duration_seconds=elapsed,
         )
+
+
+def probe_subscription_backend(backend: str) -> SubscriptionStatus:
+    """Probe one supported subscription transport without generating text."""
+    clients: dict[str, type[CliBackend]] = {
+        "claude_cli": ClaudeCodeClient,
+        "codex_cli": CodexClient,
+    }
+    client_type = clients.get(backend)
+    if client_type is None:
+        raise ValueError(f"backend {backend!r} is not a subscription transport")
+    return client_type(LLMConfig(model="preflight", backend=backend)).probe()
 
 
 def _generating_model(payload: dict[str, object], requested_model: str) -> str:

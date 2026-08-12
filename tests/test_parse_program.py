@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from autolean.models import DEFAULT_PROFILE
+from autolean.models import DEFAULT_PROFILE, PROFILES
 from autolean.program import parse_program
 from autolean.routing import EscalationPolicy
 
@@ -41,7 +41,7 @@ class TestParseProgram:
         cfg = parse_program(program_md)
         assert cfg.strategy_hints
 
-    def test_parse_real_program_md(self) -> None:
+    def test_parse_real_program_md(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Parse the actual program.md shipped with the project."""
         real = Path(__file__).resolve().parents[1] / "program.md"
         if not real.exists():
@@ -58,6 +58,10 @@ class TestParseProgram:
         assert len(cfg.strategy_hints) >= 1
         # The shipped program.md documents each key in an HTML comment; those
         # must not be mistaken for settings.
+        monkeypatch.setattr(
+            "autolean.models.detect_default_profile",
+            lambda backend=None: PROFILES["fable"],
+        )
         assert cfg.llm_config().backend == "claude_cli"
 
     def test_html_comments_are_not_parsed_as_settings(self, tmp_path: Path) -> None:
@@ -87,6 +91,15 @@ class TestBackendSelection:
     def test_profile_name_resolves_to_its_backend(self, tmp_path: Path) -> None:
         cfg = parse_program(self._write(tmp_path, "model: opus\n"))
         assert cfg.llm_config().backend == "claude_cli"
+
+    def test_auto_with_provider_backend_uses_its_maximum(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: auto\nbackend: codex_cli\n"))
+        resolved = cfg.llm_config()
+        assert (resolved.model, resolved.backend, resolved.effort) == (
+            "gpt-5.6-sol",
+            "codex_cli",
+            "max",
+        )
 
     def test_explicit_backend_overrides_the_profile(self, tmp_path: Path) -> None:
         cfg = parse_program(self._write(tmp_path, "model: opus\nbackend: ollama\n"))
@@ -126,15 +139,15 @@ class TestBackendSelection:
         assert (resolved.model, resolved.backend) == ("gemma4:26b", "ollama")
 
     def test_max_output_tokens_is_read(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "max_output_tokens: 4096\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nmax_output_tokens: 4096\n"))
         assert cfg.llm_config().max_output_tokens == 4096
 
     def test_num_predict_is_accepted_as_the_ollama_spelling(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "num_predict: 512\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nnum_predict: 512\n"))
         assert cfg.llm_config().max_output_tokens == 512
 
     def test_llm_timeout_is_read(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "llm_timeout_seconds: 90\n"))
+        cfg = parse_program(self._write(tmp_path, "model: gemma4\nllm_timeout_seconds: 90\n"))
         assert cfg.llm_config().timeout == pytest.approx(90.0)
 
     def test_model_escalation_policy_is_read(self, tmp_path: Path) -> None:

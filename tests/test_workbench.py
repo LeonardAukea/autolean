@@ -17,6 +17,7 @@ from autolean.workbench import (
     WorkbenchInputError,
     WorkbenchSession,
     WorkbenchSettings,
+    _profile_options,
 )
 
 
@@ -54,6 +55,25 @@ def _program(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return program
+
+
+def test_automatic_profile_is_the_first_workbench_choice() -> None:
+    assert _profile_options()[0] == ("auto · Strongest authenticated provider", "auto")
+
+
+def test_workbench_preserves_automatic_machine_selection(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        program = _program(tmp_path)
+        source = program.read_text(encoding="utf-8").replace("model: opus", "model: auto")
+        program.write_text(source, encoding="utf-8")
+        app = AutoLeanWorkbench(WorkbenchSession.load(program))
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#model-profile", Select).value == "auto"
+            assert app.query_one("#custom-model", Input).disabled
+
+    asyncio.run(exercise())
 
 
 def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> None:

@@ -6,10 +6,15 @@ import pytest
 
 from autolean.llm import BACKENDS
 from autolean.models import (
+    AUTO_PROFILE,
     DEFAULT_PROFILE,
+    MAX_PROFILE_BY_BACKEND,
     PROFILES,
     ModelProfile,
+    ModelSelectionError,
+    detect_default_profile,
     infer_backend,
+    maximum_profile_for_backend,
     profile_groups,
     profile_status,
     resolve_llm_config,
@@ -18,8 +23,8 @@ from autolean.models import (
 
 
 class TestProfileTable:
-    def test_default_profile_exists(self) -> None:
-        assert DEFAULT_PROFILE in PROFILES
+    def test_default_profile_is_machine_detection(self) -> None:
+        assert DEFAULT_PROFILE == AUTO_PROFILE == "auto"
 
     @pytest.mark.parametrize("profile", PROFILES.values(), ids=lambda p: p.name)
     def test_every_profile_targets_a_known_backend(self, profile: ModelProfile) -> None:
@@ -61,6 +66,31 @@ class TestProfileTable:
         assert PROFILES["gpt-terra-api"].model == "gpt-5.6-terra"
         assert PROFILES["gpt-luna-api"].model == "gpt-5.6-luna"
 
+    @pytest.mark.parametrize(
+        ("backend", "profile", "model"),
+        [
+            ("claude_cli", "fable", "fable"),
+            ("codex_cli", "codex", "gpt-5.6-sol"),
+            ("anthropic", "fable-api", "claude-fable-5"),
+            ("openai", "gpt-api", "gpt-5.6-sol"),
+        ],
+    )
+    def test_provider_maxima_use_maximum_reasoning(
+        self,
+        backend: str,
+        profile: str,
+        model: str,
+    ) -> None:
+        assert MAX_PROFILE_BY_BACKEND[backend] == profile
+        resolved = maximum_profile_for_backend(backend)
+        assert resolved.model == model
+        assert resolved.effort == "max"
+
+    def test_generic_provider_aliases_select_the_maximum_profile(self) -> None:
+        assert resolve_profile("claude") is PROFILES["fable"]
+        assert resolve_profile("anthropic") is PROFILES["fable-api"]
+        assert resolve_profile("openai") is PROFILES["codex"]
+
     def test_muse_glimmer_profile_is_pinned_and_deterministic(self) -> None:
         profile = PROFILES["muse-glimmer"]
 
@@ -79,7 +109,7 @@ class TestResolveProfile:
         assert resolve_profile("opus") is PROFILES["opus"]
 
     def test_by_alias(self) -> None:
-        assert resolve_profile("claude") is PROFILES["opus"]
+        assert resolve_profile("claude") is PROFILES["fable"]
 
     def test_unknown_name_is_not_a_profile(self) -> None:
         assert resolve_profile("gemma4:26b") is None
@@ -106,6 +136,21 @@ class TestResolveLLMConfig:
     def test_profile_supplies_backend_and_model(self) -> None:
         cfg = resolve_llm_config("opus")
         assert (cfg.model, cfg.backend) == ("opus", "claude_cli")
+
+    def test_auto_with_explicit_provider_selects_its_maximum(self) -> None:
+        cfg = resolve_llm_config(AUTO_PROFILE, backend="codex_cli")
+        assert (cfg.model, cfg.backend, cfg.effort) == ("gpt-5.6-sol", "codex_cli", "max")
+
+    def test_explicit_profile_does_not_run_machine_detection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unexpected_detection(backend: str | None = None) -> ModelProfile:
+            raise AssertionError(f"unexpected automatic detection for {backend}")
+
+        monkeypatch.setattr("autolean.models.detect_default_profile", unexpected_detection)
+
+        assert resolve_llm_config("sonnet").model == "sonnet"
 
     def test_raw_model_string_infers_its_backend(self) -> None:
         cfg = resolve_llm_config("claude-opus-5")
@@ -185,3 +230,67 @@ class TestProfileStatus:
         gemma = PROFILES["gemma4"]
         assert "pulled" in profile_status(gemma, {gemma.model})
         assert "not pulled" in profile_status(gemma, set())
+
+
+class TestAutomaticProfileDetection:
+    def test_authenticated_claude_selects_fable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.llm.subscription import SubscriptionStatus
+
+        monkeypatch.setattr(
+            "autolean.llm.subscription.probe_subscription_backend",
+            lambda backend: SubscriptionStatus(ready=backend == "claude_cli"),
+        )
+
+        assert detect_default_profile() is PROFILES["fable"]
+
+    def test_authenticated_codex_is_used_when_claude_is_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.llm.subscription import SubscriptionStatus
+
+        monkeypatch.setattr(
+            "autolean.llm.subscription.probe_subscription_backend",
+            lambda backend: SubscriptionStatus(ready=backend == "codex_cli"),
+        )
+
+        assert detect_default_profile() is PROFILES["codex"]
+
+    def test_hosted_credential_is_a_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.llm.subscription import SubscriptionStatus
+
+        monkeypatch.setattr(
+            "autolean.llm.subscription.probe_subscription_backend",
+            lambda backend: SubscriptionStatus(ready=False),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+        assert detect_default_profile() is PROFILES["gpt-api"]
+
+    def test_missing_provider_fails_with_setup_advice(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.llm.subscription import SubscriptionStatus
+
+        monkeypatch.setattr(
+            "autolean.llm.subscription.probe_subscription_backend",
+            lambda backend: SubscriptionStatus(ready=False),
+        )
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+        with pytest.raises(ModelSelectionError, match=r"claude|codex login"):
+            detect_default_profile()
+
+    def test_local_backend_requires_an_explicit_model(self) -> None:
+        with pytest.raises(ModelSelectionError, match="explicit model"):
+            maximum_profile_for_backend("ollama")

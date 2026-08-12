@@ -22,14 +22,14 @@ model_option = click.option(
     "-m",
     type=str,
     default=None,
-    help="Model profile, alias, or raw model string (see `autolean models`).",
+    help="Model profile or ID; auto selects the strongest authenticated provider.",
 )
 backend_option = click.option(
     "--backend",
     "-b",
     type=click.Choice(BACKEND_NAMES),
     default=None,
-    help="Override the backend the model profile selects.",
+    help="Select a provider; auto maps hosted providers to their strongest profile.",
 )
 program_option = click.option(
     "--program",
