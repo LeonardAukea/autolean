@@ -19,6 +19,8 @@ pytestmark = pytest.mark.skipif(
     reason="set AUTOLEAN_RUN_SANDBOX_E2E=1 for host sandbox checks",
 )
 
+_MATHLIB_E2E_TIMEOUT_SECONDS = 240
+
 
 @pytest.fixture()
 def project_and_source() -> tuple[LeanProject, Path]:
@@ -254,6 +256,7 @@ theorem pythagorean_theorem
         lambda _system, _user: LLMResponse(text=scaffold, model="fixture"),
         project,
         max_repairs=0,
+        timeout=_MATHLIB_E2E_TIMEOUT_SECONDS,
     )
 
     proof_source = theorem.source.replace(
@@ -265,6 +268,7 @@ theorem pythagorean_theorem
         proof_source,
         declaration=theorem.declaration_name,
         declaration_line=theorem.declaration_line,
+        timeout=_MATHLIB_E2E_TIMEOUT_SECONDS,
     )
 
     assert theorem.declaration_name == "pythagorean_theorem"
