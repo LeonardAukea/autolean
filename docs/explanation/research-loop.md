@@ -40,6 +40,37 @@ Each cycle performs the same steps:
 The order is stable. Prompt layers are separate: system rules, project
 guidance, and ephemeral target evidence have different ownership and hashes.
 
+The complete cycle, including what failure feeds back into the next attempt:
+
+```mermaid
+flowchart TD
+    select["select highest-priority target"]
+    context["read Lean goal +<br/>bounded structural context"]
+    evidence["add fixed-budget search,<br/>learned skills, prior failures"]
+    strategy["model strategy<br/>for this target"]
+    candidate["one candidate proof<br/>under that strategy"]
+    validate["source policy +<br/>sandboxed Lean validation"]
+    record["record plan, candidate,<br/>outcome, provenance"]
+    install["install accepted source,<br/>commit, rescan"]
+    classify["classify diagnostics:<br/>syntax / elaboration / tactic /<br/>environment / structural"]
+    stopTarget(["stop this target:<br/>same error, no new evidence"])
+    stopRun(["stop the run:<br/>auth / quota / network / project"])
+    escalate["bounded model escalation:<br/>at most one switch per invocation"]
+
+    select --> context --> evidence --> strategy --> candidate
+    candidate --> validate --> record
+    record -- "accepted" --> install --> select
+    record -- "rejected" --> classify
+    classify -- "new evidence" --> evidence
+    classify -- "repeated error" --> stopTarget --> select
+    classify -- "environment failure" --> stopRun
+    classify -- "eligible proof failures" --> escalate --> candidate
+```
+
+Each box is a recorded step: the session holds the plan response, the
+candidate, the classified outcome, and the provenance for every cycle, so a
+stopped run can be inspected and resumed without losing evidence.
+
 ## Failure changes the next question
 
 Lean diagnostics are classified into syntax, elaboration, tactic, environment,
@@ -54,13 +85,15 @@ a substitute for repairing the formalization.
 
 ## Sessions outlive commands
 
-Every mutating workflow writes an atomic session record under
-`.autolean/sessions` in the Lean project. `resume` continues the latest active
-session or an explicit ID. Guidance and model choice can change without losing
-the evidence already gathered.
+Every mutating workflow writes an atomic session record in the Lean project;
+the [artifact reference](../reference/research-artifacts.md) states its
+location and shape. `resume` continues the latest active session or an
+explicit ID. Guidance and model choice can change without losing the evidence
+already gathered.
 
-The default is five cycles. An unbounded run requires `--overnight` or a zero
-budget. This makes a normal command cheap to stop, inspect, and continue.
+A run is bounded by default; unbounded work requires `--overnight` or an
+explicit zero budget ([`max_cycles`](../reference/program.md)). This makes a
+normal command cheap to stop, inspect, and continue.
 
 ## Mathematical discipline
 
