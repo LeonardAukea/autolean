@@ -1,21 +1,23 @@
-# AutoLean
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+            srcset="docs/assets/banner-dark.svg">
+    <img src="docs/assets/banner-light.svg" alt="AutoLean" width="900">
+  </picture>
+</p>
 
-[![CI](https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml/badge.svg)](https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml)
-[![Lean 4.33.0](https://img.shields.io/badge/Lean-4.33.0-0d9488)](https://github.com/leanprover/lean4/releases/tag/v4.33.0)
-[![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml"><img src="https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/leanprover/lean4/releases/tag/v4.33.0"><img src="https://img.shields.io/badge/Lean-4.33.0-0d9488" alt="Lean 4.33.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb.svg" alt="License: MIT"></a>
+</p>
 
-```text
- ______     __  __     ______   ______     __         ______     ______     __   __
-/\  __ \   /\ \/\ \   /\__  _\ /\  __ \   /\ \       /\  ___\   /\  __ \   /\ "-.\ \
-\ \  __ \  \ \ \_\ \  \/_/\ \/ \ \ \/\ \  \ \ \____  \ \  __\   \ \  __ \  \ \ \-.  \
- \ \_\ \_\  \ \_____\    \ \_\  \ \_____\  \ \_____\  \ \_____\  \ \_\ \_\  \ \_\\"\_\
-  \/_/\/_/   \/_____/     \/_/   \/_____/   \/_____/   \/_____/   \/_/\/_/   \/_/ \/_/
-```
-
-AutoLean turns a mathematical goal into a reviewable plan, a Lean 4
-declaration, and a kernel-checked proof. Model output is untrusted source code.
-AutoLean accepts it only after source-policy checks, operating-system
-isolation, Lean elaboration, declaration-range checks, and an axiom audit.
+AutoLean turns a mathematical goal into a reviewable research plan, a Lean 4
+declaration, and a kernel-checked proof. It treats the model as an untrusted
+programmer: generated source is accepted only after a source policy, an
+operating-system sandbox, elaboration by a pinned Lean toolchain, and a
+declaration and axiom audit. What survives is committed with its provenance —
+model, prompt, environment, and axiom report.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
@@ -37,12 +39,11 @@ faithfully expresses an informal claim.
   <a href="docs/demos/ionescu-tulcea.json">Run manifest</a>
 </p>
 
-The recording uses the configured Claude backend and the exact PDF for
-arXiv:2506.18616v5. It shows provider-generated planning, human revision, all
-25 paper items, 33 mapped Lean declarations, sandboxed elaboration, durable
-session state, and a standalone Lean and LaTeX export. The tape contains the
-live command and explicit human review guidance. Provider responses enter the
-generated provenance records at runtime.
+The recording audits a real formalization paper (arXiv:2506.18616v5) with the
+configured Claude backend: provider-planned claim extraction, human revision,
+sandboxed elaboration of every mapped declaration, and a standalone Lean and
+LaTeX export. The tape holds the live command; the manifest identifies the
+run.
 
 ## Start here
 
@@ -61,12 +62,14 @@ autolean prove "the Pythagorean theorem" --review-plan --max-attempts 5
 ```
 
 The automatic default selects the strongest profile for an authenticated
-provider. See [Choose and switch models](docs/how-to/choose-a-model.md) to pin
-a provider or model.
+provider — a Claude or Codex subscription, a hosted API, or a local model.
+See [Choose and switch models](docs/how-to/choose-a-model.md).
 
 Use `autolean workbench` for the interactive interface. The
-[first-proof tutorial](docs/tutorials/first-proof.md) explains each step and
-ends with a standalone Lean project and companion LaTeX paper.
+[first-proof tutorial](docs/tutorials/first-proof.md) walks each step and ends
+with a standalone Lean project and companion LaTeX paper. CI replays that
+tutorial against a scripted model on every change, so the documented path
+stays the working path.
 
 ## Workflows
 
@@ -76,77 +79,44 @@ ends with a standalone Lean project and companion LaTeX paper.
   session.
 - `autolean solve` works through existing `sorry` targets; `autolean resume`
   continues saved work.
-- `autolean verify SOURCE` extracts and formalizes claims from arXiv HTML, PDF,
-  or a local paper.
+- `autolean verify SOURCE` extracts and formalizes claims from arXiv HTML,
+  PDF, or a local paper.
 - `autolean problems` searches curated open problems and creates bounded work.
 - `autolean export OUTPUT` writes a standalone Lean project, provenance
   manifest, and companion LaTeX paper.
 
-Every mutating workflow records a resumable session. Five proof cycles is the
-default budget. Unlimited work requires `--overnight` or an explicit zero
-budget.
+Every mutating workflow records a resumable session and runs under an explicit
+cycle budget. The [research loop](docs/explanation/research-loop.md) explains
+how plans, experiments, and failure evidence drive each cycle.
 
-## Trust boundary
+## How a proof gets accepted
 
-The Lean project and pinned dependencies are trusted inputs. Model responses,
-paper text, nearby comments, search results, and learned skills are untrusted.
-
-```text
-goal + bounded context
-        |
-        v
-   model proposal
-        |
-        v
- source policy -> OS sandbox -> pinned Lean
-                                  |
-                                  v
-                     declaration + axiom audit
-                                  |
-                             success only
-                                  v
-                         exact source edit
+```mermaid
+flowchart LR
+    goal["goal +<br/>bounded context"] --> model["model<br/>proposal"]
+    model --> policy["source<br/>policy"]
+    policy --> sandbox["OS sandbox<br/>no network"]
+    sandbox --> lean["pinned Lean<br/>elaboration"]
+    lean --> audit["declaration +<br/>axiom audit"]
+    audit --> commit["exact<br/>source commit"]
+    lean -. "diagnostics become<br/>next-cycle evidence" .-> model
 ```
 
-Tree-sitter supplies advisory structure for prompts. Lean's parser,
-elaborator, and kernel decide acceptance. The
-[trust-boundary explanation](docs/explanation/trust-boundary.md) states the
-complete security and data-handling model.
+The Lean project and pinned dependencies are trusted inputs. Model responses,
+paper text, search results, and learned skills are untrusted data. Lean's
+parser, elaborator, and kernel decide acceptance; everything before them can
+only reject early. The
+[trust boundary](docs/explanation/trust-boundary.md) states the complete
+security and data-handling model, including
+[why elaboration runs in an OS sandbox](docs/explanation/trust-boundary.md#why-an-operating-system-sandbox).
 
 ## Documentation
 
-The documentation follows the four-part
-[Diátaxis](https://diataxis.fr/) structure.
-
-### Tutorials
-
-- [Prove a first theorem](docs/tutorials/first-proof.md)
-
-### How-to guides
-
-- [Choose and switch models](docs/how-to/choose-a-model.md)
-- [Run a research session](docs/how-to/run-a-research-session.md)
-- [Verify a paper](docs/how-to/verify-a-paper.md)
-- [Qualify and publish a release](docs/how-to/release.md)
-- [Open the repository](docs/how-to/open-the-repository.md)
-
-### Reference
-
-- [Command-line interface](docs/reference/cli.md)
-- [`program.md` configuration](docs/reference/program.md)
-- [Proof environments and provenance](docs/reference/environment.md)
-- [Python installation and dependencies](docs/reference/dependencies.md)
-- [Research artifact records](docs/reference/research-artifacts.md)
-
-### Explanation
-
-- [Trust boundary](docs/explanation/trust-boundary.md)
-- [Research and proof loop](docs/explanation/research-loop.md)
-- [Architecture](docs/explanation/architecture.md)
-- [Engineering discipline](docs/explanation/engineering.md)
-
-The [documentation index](docs/README.md) describes where each kind of
-information belongs.
+The documentation follows the four-part [Diátaxis](https://diataxis.fr/)
+structure; the [documentation index](docs/README.md) lists every page. Start
+with the [first-proof tutorial](docs/tutorials/first-proof.md), the
+[architecture](docs/explanation/architecture.md), and the
+[trust boundary](docs/explanation/trust-boundary.md).
 
 ## Requirements
 
@@ -154,14 +124,11 @@ information belongs.
 - Nix with flakes enabled
 - a supported model subscription, hosted API, or local inference server
 
-The Python package supports Python 3.11 through 3.14. The Nix development
-shell is the release-qualified path because it also pins Lean and native
-containment tools.
-
-The Python core is MIT licensed. PDF extraction is an explicit extra backed by
-PyMuPDF and PyMuPDF4LLM, which carry GNU AGPL or commercial terms. The
+The Python package supports Python 3.11 through 3.14; the Nix development
+shell is the release-qualified environment. The core is MIT licensed; PDF
+extraction is an explicit extra with its own license terms. The
 [dependency reference](docs/reference/dependencies.md) lists installation
-profiles and their license boundary.
+profiles and the license boundary.
 
 ## Contributing and security
 
