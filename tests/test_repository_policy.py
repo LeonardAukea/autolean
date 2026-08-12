@@ -26,6 +26,9 @@ def test_release_job_requires_immutability_attestation() -> None:
     assert "--json isImmutable" in workflow
     assert 'test "$immutable" = true' in workflow
     assert 'gh release verify "$RELEASE_TAG"' in workflow
+    assert "for attempt in {1..12}" in workflow
+    assert "sleep 5" in workflow
+    assert workflow.index("gh release create") < workflow.index("gh release verify")
 
 
 def test_pypi_publication_requires_a_named_immutable_release() -> None:
