@@ -113,15 +113,13 @@ wheels = [
 ]
 
 [[package]]
-name = "autolean"
+name = "autolean-proof"
 version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "click" },
     { name = "httpx" },
-    { name = "pymupdf" },
-    { name = "pymupdf4llm" },
     { name = "pyyaml" },
     { name = "rich" },
     { name = "textual" },
@@ -134,6 +132,8 @@ all = [
     { name = "anthropic" },
     { name = "lean-interact" },
     { name = "openai" },
+    { name = "pymupdf" },
+    { name = "pymupdf4llm" },
 ]
 anthropic = [
     { name = "anthropic" },
@@ -153,6 +153,10 @@ lean = [
 openai = [
     { name = "openai" },
 ]
+pdf = [
+    { name = "pymupdf" },
+    { name = "pymupdf4llm" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -168,8 +172,10 @@ requires-dist = [
     { name = "openai", marker = "extra == 'all'", specifier = ">=2.54.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.54.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.1" },
-    { name = "pymupdf", specifier = ">=1.28.2" },
-    { name = "pymupdf4llm", specifier = ">=1.28.2" },
+    { name = "pymupdf", marker = "extra == 'all'", specifier = ">=1.28.2" },
+    { name = "pymupdf", marker = "extra == 'pdf'", specifier = ">=1.28.2" },
+    { name = "pymupdf4llm", marker = "extra == 'all'", specifier = ">=1.28.2" },
+    { name = "pymupdf4llm", marker = "extra == 'pdf'", specifier = ">=1.28.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.23.1" },
@@ -180,7 +186,7 @@ requires-dist = [
     { name = "tree-sitter-language-pack", specifier = ">=1.14.3" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20260724" },
 ]
-provides-extras = ["lean", "anthropic", "openai", "dev", "all"]
+provides-extras = ["lean", "pdf", "anthropic", "openai", "dev", "all"]
 
 [[package]]
 name = "beautifulsoup4"

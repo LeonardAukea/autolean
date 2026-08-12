@@ -1,5 +1,5 @@
 [project]
-name = "autolean"
+name = "autolean-proof"
 version = "0.5.0"
 description = "Autonomous Lean 4 proof agent with sandboxed, content-addressed verification."
 readme = "README.md"
@@ -29,14 +29,16 @@ dependencies = [
     "textual>=8.2.8",
     "click>=8.4.2",
     "pyyaml>=6.0.3",
-    "pymupdf>=1.28.2",
-    "pymupdf4llm>=1.28.2",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.14.3",
 ]
 
 [project.optional-dependencies]
 lean = ["lean-interact>=0.11.5"]
+pdf = [
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
+]
 # Hosted API providers use their official Python SDKs. Subscription providers
 # invoke the installed Claude Code and Codex CLIs.
 anthropic = ["anthropic>=0.121.0"]
@@ -52,6 +54,8 @@ dev = [
 ]
 all = [
     "lean-interact>=0.11.5",
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
     "anthropic>=0.121.0",
     "openai>=2.54.0",
 ]
@@ -69,6 +73,9 @@ autolean = "autolean.__main__:main"
 [build-system]
 requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autolean"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [

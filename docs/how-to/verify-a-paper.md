@@ -14,6 +14,12 @@ then the paper PDF. HTML extraction preserves theorem and proof environments
 and MathML alternative text. The PDF path uses PyMuPDF4LLM and PyMuPDF Layout
 for reading order, tables, formulas, and selective OCR.
 
+The Nix shell includes the PDF runtime. A uv checkout installs it explicitly:
+
+```bash
+uv sync --extra pdf
+```
+
 Restrict a large PDF to relevant pages:
 
 ```bash

@@ -25,6 +25,7 @@ Reference pages state exact interfaces, defaults, and records.
 - [Command-line interface](reference/cli.md)
 - [`program.md` configuration](reference/program.md)
 - [Proof environments and provenance](reference/environment.md)
+- [Python installation and dependencies](reference/dependencies.md)
 - [Research artifact records](reference/research-artifacts.md)
 
 ## Explanation
@@ -33,6 +34,7 @@ Explanation pages describe the design and the constraints that shape it.
 
 - [Trust boundary](explanation/trust-boundary.md)
 - [Research and proof loop](explanation/research-loop.md)
+- [Architecture](explanation/architecture.md)
 
 These four homes follow [Diátaxis](https://diataxis.fr/). A page should answer
 one kind of question. Link to another page when the reader's question changes.

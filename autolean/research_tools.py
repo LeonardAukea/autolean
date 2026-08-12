@@ -31,7 +31,7 @@ def research_tools() -> tuple[ResearchTool, ...]:
     lightpanda = lightpanda_identity()
     codedb = CodeDBSearchProvider().identity()
     return (
-        ResearchTool("PDF extraction", pdf_identity, pdf_available, required=True),
+        ResearchTool("PDF extraction", pdf_identity, pdf_available),
         ResearchTool("browser extraction", lightpanda, not lightpanda.endswith("unavailable")),
         ResearchTool("code search", codedb, not codedb.endswith("unavailable")),
     )
