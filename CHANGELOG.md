@@ -32,7 +32,7 @@ notes live in [GitHub Releases].
   closure.
 - Qualify Python 3.11 through 3.14, the Lean/Nix closure, containment attacks,
   dependency SBOM, and reproducible distributions in the aggregate CI gate.
-- Bind each qualified `main` commit to an immutable Hashver release, artifact
-  manifest, and GitHub attestation.
+- Bind each qualified `main` commit to an immutable Hashver release and
+  artifact manifest. Public releases also carry GitHub's release attestation.
 
 [GitHub Releases]: https://github.com/LeonardAukea/autolean/releases

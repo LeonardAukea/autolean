@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: read
 
 jobs:
@@ -18,29 +19,54 @@ jobs:
     timeout-minutes: 10
     environment: pypi
     permissions:
+      attestations: read
       contents: read
       id-token: write
     steps:
-      - name: Download qualified distributions
+      - name: Resolve qualified release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          immutable="$(gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isImmutable --jq .isImmutable)"
-          test "$immutable" = true
-          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          release_json="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --json isImmutable,targetCommitish)"
+          test "$(jq -r .isImmutable <<< "$release_json")" = true
+          source_sha="$(jq -r .targetCommitish <<< "$release_json")"
+          test -n "$source_sha"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.source_sha }}
+          persist-credentials: false
+      - name: Verify immutable release and distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          release_dir="$(mktemp -d "$RUNNER_TEMP/autolean-release.XXXXXX")"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$release_dir"
+          python3 -m autolean.release --revision "$SOURCE_SHA" verify \
+            --manifest "$release_dir/release-manifest.json" \
+            --directory "$release_dir"
           mkdir dist
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.whl' \
-            --pattern '*.tar.gz' \
-            --dir dist
+          cp "$release_dir"/*.whl "$release_dir"/*.tar.gz dist/
           test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" = 1
           test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" = 1
+      - name: Verify public release attestation
+        if: ${{ github.event.repository.visibility == 'public' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
       - name: Publish with PyPI trusted publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
