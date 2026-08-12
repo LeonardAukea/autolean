@@ -106,9 +106,24 @@ public. Private repository attestations require GitHub Enterprise Cloud; the
 [GitHub availability contract](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
 defines that qualification boundary.
 
+Two attestations cover every asset. The release attestation establishes that
+GitHub bound the asset digest to the immutable release, its tag, and its
+commit. The build provenance attestation establishes that the CI release
+workflow run built exactly those bytes from that commit (SLSA Build Level 2).
+Verify a downloaded asset with gh 2.81 or later:
+
+```bash
+gh release verify-asset --repo LeonardAukea/autolean <tag> \
+  release/autolean_proof-*.whl
+gh attestation verify release/autolean_proof-*.whl \
+  --repo LeonardAukea/autolean \
+  --signer-workflow LeonardAukea/autolean/.github/workflows/ci.yml
+```
+
 Repository release immutability was enabled on 2026-08-12. Earlier private
 qualification releases remain mutable and are not public distribution
-artifacts.
+artifacts. Build provenance exists for releases created after the repository
+became public.
 
 Do not move or reuse a release tag. Correct a failed release with a new pull
 request; the resulting commit receives its own identity and evidence.
@@ -129,8 +144,18 @@ Configure a PyPI trusted publisher for this repository, the `Publish Python`
 workflow, and the `pypi` environment. Then dispatch the workflow with the exact
 Hashver tag. The workflow verifies the immutable release, source identity,
 manifest, and downloaded distributions. Public repositories also require the
-GitHub release attestation. The publisher exchanges its GitHub OIDC token
-directly with PyPI.
+GitHub release attestation and build provenance for each distribution. The
+publisher exchanges its GitHub OIDC token directly with PyPI.
 
 GitHub OIDC supplies a short-lived publication credential. PyPI's immutable
 version records make a repeated version fail closed.
+
+PyPI records a PEP 740 attestation establishing that this repository's
+trusted publisher uploaded each distribution. Verify a published file with
+[pypi-attestations](https://pypi.org/project/pypi-attestations/):
+
+```bash
+pypi-attestations verify pypi \
+  --repository https://github.com/LeonardAukea/autolean \
+  pypi:autolean_proof-<version>-py3-none-any.whl
+```

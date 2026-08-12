@@ -27,6 +27,16 @@ def test_release_job_requires_immutability() -> None:
     assert 'test "$immutable" = true' in workflow
 
 
+def test_release_job_attests_build_provenance() -> None:
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    assert "attestations: write" in workflow
+    assert "id-token: write" in workflow
+    assert "uses: actions/attest-build-provenance@" in workflow
+    assert "subject-path: release/*" in workflow
+    assert "if: ${{ github.event.repository.visibility == 'public' }}" in workflow
+
+
 def test_python_matrix_uses_one_pinned_grammar_and_exact_interpreters() -> None:
     workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
 
@@ -70,6 +80,9 @@ def test_release_integrity_is_independently_verifiable() -> None:
     assert 'gh release verify "$RELEASE_TAG"' in workflow
     assert "for attempt in {1..60}" in workflow
     assert "sleep 15" in workflow
+    assert 'gh release verify-asset "$RELEASE_TAG"' in workflow
+    assert 'gh attestation verify "$asset"' in workflow
+    assert "--signer-workflow" in workflow
 
 
 def test_pypi_publication_requires_a_named_immutable_release() -> None:
@@ -82,3 +95,5 @@ def test_pypi_publication_requires_a_named_immutable_release() -> None:
     assert "python3 -m autolean.release --revision" in workflow
     assert "github.event.repository.visibility == 'public'" in workflow
     assert 'gh release verify "$RELEASE_TAG"' in workflow
+    assert 'gh attestation verify "$dist"' in workflow
+    assert "--signer-workflow" in workflow
