@@ -106,3 +106,22 @@ jobs:
             echo "Waiting for GitHub release attestation ($attempt/60)"
             sleep 15
           done
+      - name: Verify build provenance
+        if: ${{ github.event.repository.visibility == 'public' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_dir="$(mktemp -d "$RUNNER_TEMP/autolean-assets.XXXXXX")"
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" \
+            --dir "$asset_dir"
+          for asset in "$asset_dir"/*; do
+            gh release verify-asset "$RELEASE_TAG" "$asset" \
+              --repo "$REPOSITORY"
+            gh attestation verify "$asset" \
+              --repo "$REPOSITORY" \
+              --signer-workflow "$REPOSITORY/.github/workflows/ci.yml"
+          done
