@@ -135,12 +135,14 @@ The documentation follows the four-part
 - [Command-line interface](docs/reference/cli.md)
 - [`program.md` configuration](docs/reference/program.md)
 - [Proof environments and provenance](docs/reference/environment.md)
+- [Python installation and dependencies](docs/reference/dependencies.md)
 - [Research artifact records](docs/reference/research-artifacts.md)
 
 ### Explanation
 
 - [Trust boundary](docs/explanation/trust-boundary.md)
 - [Research and proof loop](docs/explanation/research-loop.md)
+- [Architecture](docs/explanation/architecture.md)
 
 The [documentation index](docs/README.md) describes where each kind of
 information belongs.
@@ -154,6 +156,11 @@ information belongs.
 The Python package supports Python 3.11 through 3.14. The Nix development
 shell is the release-qualified path because it also pins Lean and native
 containment tools.
+
+The Python core is MIT licensed. PDF extraction is an explicit extra backed by
+PyMuPDF and PyMuPDF4LLM, which carry GNU AGPL or commercial terms. The
+[dependency reference](docs/reference/dependencies.md) lists installation
+profiles and their license boundary.
 
 ## Contributing and security
 

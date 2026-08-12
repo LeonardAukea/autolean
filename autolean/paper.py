@@ -596,7 +596,7 @@ def _load_pdf_stack() -> tuple[Any, Any]:
         import pymupdf4llm
     except ImportError as error:
         raise ImportError(
-            "PyMuPDF4LLM is required for PDF reading.\nInstall the locked AutoLean environment with: uv sync"
+            "PyMuPDF4LLM is required for PDF reading.\nInstall the locked PDF stack with: uv sync --extra pdf"
         ) from error
     return pymupdf, pymupdf4llm
 
