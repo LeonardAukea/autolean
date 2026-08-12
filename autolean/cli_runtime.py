@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import click
 
+from autolean import ui
 from autolean.llm import BACKEND_NAMES, LLMBackend, LLMError, create_llm_client
 from autolean.ui import console
 
@@ -144,15 +145,16 @@ def connected_llm(
         llm = llm_for(model, backend, program_config, timeout=timeout)
     except (LLMError, ValueError) as error:
         raise click.ClickException(f"Model selection failed: {error}") from error
-    console.print(f"[dim]Model:[/] {llm.config.model} [dim]via[/] {llm.config.backend}")
+    ui.kv("Model", f"{llm.config.model} [provenance]via {llm.config.backend}[/]")
     if llm.config.model_revision:
-        console.print(f"[dim]Revision:[/] {llm.config.model_revision}")
+        ui.kv("Revision", llm.config.model_revision)
     if llm.config.model_artifact_sha256:
-        console.print(f"[dim]Weight SHA-256:[/] {llm.config.model_artifact_sha256}")
+        ui.kv("Weight SHA-256", llm.config.model_artifact_sha256)
     if llm.config.seed is not None:
-        console.print(f"[dim]Sampling seed:[/] {llm.config.seed}")
+        ui.kv("Sampling seed", str(llm.config.seed))
     try:
-        reachable = llm.ping()
+        with ui.status(f"Preflighting {llm.config.backend}..."):
+            reachable = llm.ping()
     except LLMError as error:
         llm.close()
         raise click.ClickException(str(error)) from error
@@ -256,7 +258,7 @@ def run_session_agent(
             message="",
         )
     )
-    console.print(f"[dim]Session:[/] {running.id}  [dim]resume with[/] autolean resume {running.id}")
+    ui.kv("Session", f"{running.id}  [provenance]resume with[/] autolean resume {running.id}")
 
     try:
         result = _execute_agent(agent)

@@ -616,8 +616,8 @@ def _doctor_lean(program: Path, config: ProgramConfig, model_proof: str) -> list
             proof_failure = _doctor_validate_proof(project, environment, model_proof)
             if proof_failure:
                 failures.append(proof_failure)
-        console.print("  Building...")
-        build = project.build(timeout=120)
+        with ui.status("Building Lean project..."):
+            build = project.build(timeout=120)
         if build.success:
             ui.ok(f"Build succeeded ({build.duration_seconds:.1f}s)")
         else:
@@ -979,22 +979,25 @@ def prove(
 
     console.print(f"[bold]Planning:[/] {statement}\n")
     with _connected_llm(model, backend, cfg) as llm:
-        proof_plan = _proof_plan(statement, llm, guide)
+        with ui.status(f"Consulting {llm.config.model}..."):
+            proof_plan = _proof_plan(statement, llm, guide)
         _show_proof_plan(proof_plan)
         while review_plan and not click.confirm("Use this plan?", default=True):
             revision = click.prompt("Additional guidance", type=str).strip()
-            proof_plan = _proof_plan(statement, llm, (*guide, revision))
+            with ui.status(f"Consulting {llm.config.model}..."):
+                proof_plan = _proof_plan(statement, llm, (*guide, revision))
             _show_proof_plan(proof_plan)
 
         console.print("\n[bold]Formalizing and compiling the statement...[/]")
         try:
-            theorem = formalize_theorem(
-                statement,
-                proof_plan,
-                llm.generate,
-                project,
-                max_repairs=formalization_repairs,
-            )
+            with ui.status("Formalizing with the pinned Lean kernel..."):
+                theorem = formalize_theorem(
+                    statement,
+                    proof_plan,
+                    llm.generate,
+                    project,
+                    max_repairs=formalization_repairs,
+                )
         except FormalizationError as error:
             raise click.ClickException(str(error)) from error
 

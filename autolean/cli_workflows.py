@@ -350,7 +350,7 @@ def build_library(
     console.print(f"[bold]Output:[/] {output}\n")
 
     try:
-        with console.status(f"[dim]Generating {topic} library..."):
+        with ui.status(f"Generating {topic} library..."):
             content = generate_library_source(topic, llm.generate)
     except LLMError as e:
         raise click.ClickException(str(e)) from e
@@ -544,7 +544,7 @@ def improve(
             )
 
             try:
-                with console.status("[dim]Generating improved proof..."):
+                with ui.status("Generating improved proof..."):
                     response = llm.generate(system, user_prompt)
             except LLMError as e:
                 raise click.ClickException(f"Proof improvement failed: {e}") from e
@@ -570,7 +570,7 @@ def improve(
             new_lines[proof_start:proof_end] = replacement
             new_content = "\n".join(new_lines)
 
-            with console.status("[dim]Verifying proof and axioms..."):
+            with ui.status("Verifying proof and axioms..."):
                 build = project.validate_candidate(
                     file_path,
                     new_content,

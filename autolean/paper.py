@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from autolean import ui
 from autolean.generated_code import (
     GeneratedCodeError,
     validate_generated_declarations,
@@ -282,8 +283,10 @@ def fetch_arxiv(arxiv_id_or_url: str, output_dir: Path | None = None) -> Path:
         console.print(f"  [dim]Using cached: {output_path}[/]")
         return output_path
 
-    console.print(f"  Downloading [cyan]{pdf_url}[/]...")
-    with httpx.stream("GET", pdf_url, follow_redirects=True, timeout=120.0) as resp:
+    with (
+        ui.status(f"Downloading {pdf_url}..."),
+        httpx.stream("GET", pdf_url, follow_redirects=True, timeout=120.0) as resp,
+    ):
         resp.raise_for_status()
         with open(output_path, "wb") as f:
             for chunk in resp.iter_bytes():
@@ -785,13 +788,12 @@ def extract_claims_via_llm(
     truncated = _smart_truncate(text, max_text_chars)
     prompt = EXTRACT_CLAIMS_PROMPT.format(text=truncated)
 
-    console.print(f"  Sending {len(truncated):,} chars to LLM for claim extraction...")
-
     try:
-        response = llm_generate(
-            "You are a mathematical paper analyst. Extract all theorems precisely.",
-            prompt,
-        )
+        with ui.status(f"Extracting claims from {len(truncated):,} chars..."):
+            response = llm_generate(
+                "You are a mathematical paper analyst. Extract all theorems precisely.",
+                prompt,
+            )
     except LLMError as e:
         error_msg = str(e).lower()
         if "timeout" in error_msg or "timed out" in error_msg:

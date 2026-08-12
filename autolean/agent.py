@@ -14,6 +14,7 @@ from pathlib import Path
 from rich.panel import Panel
 from rich.text import Text
 
+from autolean import ui
 from autolean.error_classifier import (
     STRUCTURAL_ERRORS,
     ErrorCategory,
@@ -527,7 +528,8 @@ class AutoLeanAgent:
         )
 
         try:
-            connected = self.llm.ping()
+            with ui.status(f"Preflighting {llm_cfg.backend}..."):
+                connected = self.llm.ping()
         except LLMError as e:
             message = f"Backend preflight failed: {e}"
             console.print(f"[red]{message}[/]")
@@ -575,7 +577,7 @@ class AutoLeanAgent:
         target_files = sorted({target.file.resolve() for target in targets})
         console.print("\n[bold]Initial sandboxed Lean check...[/]")
         for target_file in target_files:
-            with console.status(f"[dim]Checking {target_file.name}...", spinner="dots"):
+            with ui.status(f"Checking {target_file.name}..."):
                 build = self.project.check_file(
                     target_file,
                     timeout=self.config.cycle_timeout_seconds,
@@ -950,7 +952,7 @@ class AutoLeanAgent:
         # Extract the goal once for this exact target source.
         if target.id not in self._goal_cache:
             self._step("Extracting goal state (hole-punch: sorry -> ?_)")
-            with console.status("[dim]Extracting goal state...", spinner="dots"):
+            with ui.status("Extracting goal state..."):
                 self._goal_cache[target.id] = self.project.get_goal_via_hole_punch(
                     file_path,
                     target.line,
@@ -1064,11 +1066,12 @@ class AutoLeanAgent:
         self._step(f"Querying {model}{knob}")
 
         try:
-            response = self.llm.generate(
-                system=SYSTEM_PROMPT,
-                user=user_prompt,
-                temperature=temp,
-            )
+            with ui.status(f"Waiting for {model}..."):
+                response = self.llm.generate(
+                    system=SYSTEM_PROMPT,
+                    user=user_prompt,
+                    temperature=temp,
+                )
         except LLMError as e:
             self._consecutive_llm_errors += 1
             if isinstance(e, (LLMAuthenticationError, LLMRateLimitError)):
@@ -1186,7 +1189,7 @@ class AutoLeanAgent:
         self._step("Verifying with the pinned Lean kernel...")
 
         try:
-            with console.status("[dim]Building...", spinner="dots"):
+            with ui.status("Building..."):
                 build = self.project.validate_candidate(
                     file_path,
                     new_content,
