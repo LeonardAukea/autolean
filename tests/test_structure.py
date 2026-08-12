@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import tree_sitter_language_pack
 
 from autolean.structure import LeanStructureProvider, ParseQuality
 
@@ -112,13 +113,17 @@ def test_source_change_invalidates_context_identity(
     assert (first.target.name, second.target.name) == ("one", "two")
 
 
-def test_missing_parser_degrades_without_blocking_source_inspection(
+def test_language_pack_failure_degrades_without_blocking_source_inspection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.delenv("AUTOLEAN_TREE_SITTER_LEAN_LIBRARY", raising=False)
+
+    def fail_to_download(_: str) -> None:
+        raise tree_sitter_language_pack.DownloadError("grammar service unavailable")
+
+    monkeypatch.setattr(tree_sitter_language_pack, "get_parser", fail_to_download)
     provider = LeanStructureProvider()
-    monkeypatch.setattr(provider, "_load_parser", lambda: None)
-    provider._unavailable_reason = "grammar unavailable"
 
     context = provider.inspect(
         tmp_path / "Unavailable.lean",
@@ -128,4 +133,18 @@ def test_missing_parser_degrades_without_blocking_source_inspection(
     )
 
     assert context.quality is ParseQuality.UNAVAILABLE
-    assert context.unavailable_reason == "grammar unavailable"
+    assert context.unavailable_reason == "grammar service unavailable"
+
+
+def test_language_pack_identity_hashes_the_cached_grammar(
+    provider: LeanStructureProvider,
+    tmp_path: Path,
+) -> None:
+    context = provider.inspect(
+        tmp_path / "Identity.lean",
+        "theorem target : True := by\n  sorry\n",
+        line=2,
+        col=2,
+    )
+
+    assert "grammar-sha256/" in context.parser

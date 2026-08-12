@@ -455,6 +455,7 @@
             codedb = codedb;
             default = autolean;
             lean = lean4Pinned;
+            lean-grammar = leanGrammar;
             lightpanda = lightpanda;
           }
           // lib.optionalAttrs pkgs.stdenv.isLinux {
