@@ -7,13 +7,7 @@ from enum import StrEnum
 
 
 class ErrorCategory(StrEnum):
-    """Categories of Lean build errors.
-
-    Each category suggests a different retry strategy for the LLM.
-    Structural errors (DUPLICATE_DECLARATION, FILE_STRUCTURE_ERROR,
-    LAKE_CONFIG_ERROR) indicate problems the LLM cannot fix — the agent
-    should skip or fix the file first.
-    """
+    """Categories of Lean build errors, one retry strategy each."""
 
     TYPE_MISMATCH = "type_mismatch"
     UNKNOWN_IDENTIFIER = "unknown_identifier"
@@ -24,7 +18,6 @@ class ErrorCategory(StrEnum):
     SORRY_REMAINS = "sorry_remains"
     SYNTAX_ERROR = "syntax_error"
     APPLICATION_ERROR = "application_error"
-    # Structural errors — LLM retries cannot fix these
     DUPLICATE_DECLARATION = "duplicate_declaration"
     FILE_STRUCTURE_ERROR = "file_structure_error"
     LAKE_CONFIG_ERROR = "lake_config_error"
@@ -43,17 +36,10 @@ STRUCTURAL_ERRORS: frozenset[ErrorCategory] = frozenset(
 
 
 def classify_error(message: str) -> ErrorCategory:
-    """Classify a Lean diagnostic message into an error category.
-
-    Uses pattern matching on the diagnostic text. Returns the most
-    specific category that matches.
-
-    Structural errors are detected first — these indicate problems the LLM
-    cannot fix (duplicate names, corrupted file structure, bad imports).
-    """
+    """Return the most specific category matching a Lean diagnostic."""
     msg = message.lower()
 
-    # --- Structural errors (check first — no point retrying with LLM) ---
+    # --- Structural errors, matched first ---
     if "has already been declared" in msg:
         return ErrorCategory.DUPLICATE_DECLARATION
     if "already declared" in msg and "in the current" in msg:

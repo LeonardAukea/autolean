@@ -238,7 +238,6 @@ class TrainingDataCollector:
         Format:
         {"prompt": "...", "chosen": "...", "rejected": "..."}
         """
-        # Group by theorem
         by_theorem: dict[str, list[ProofExample]] = {}
         for ex in self.examples:
             by_theorem.setdefault(ex.theorem_name, []).append(ex)

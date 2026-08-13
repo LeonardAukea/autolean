@@ -336,7 +336,6 @@ def build_library(
     cfg = parse_program(program)
     llm = _connected_llm(model, backend, cfg, timeout=600.0)
 
-    # Generate output path
     safe_topic = _re.sub(r"[^a-zA-Z0-9]", "", topic.title().replace(" ", ""))
     lean_root = program.parent / cfg.lean_project_path
     if output is None:
@@ -365,7 +364,6 @@ def build_library(
     console.print(f"[green]Generated {n_defs} definitions/theorems ({n_sorrys} sorry targets)[/]")
     console.print(f"  File: {path}\n")
 
-    # Show preview
     for line in content.split("\n")[:20]:
         console.print(f"  [dim]{line}[/]")
     if len(content.split("\n")) > 20:
@@ -748,7 +746,6 @@ def challenge(
         print_problems_table(filter_field=field, filter_difficulty=difficulty)
         return
 
-    # Find the problem
     problem = next((p for p in OPEN_PROBLEMS if p.id == problem_id), None)
     if not problem:
         # Try partial match

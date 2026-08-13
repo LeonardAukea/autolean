@@ -57,9 +57,6 @@ this repository.
 - Prefer small data types and functions with explicit inputs and results.
 - Return errors at the boundary that can act on them.
 
-Tests should cover success, rejection, and the edge that separates them. A test
-total is evidence of execution; its assertions carry the contract.
-
 AutoLean writes learned skills, proof attempts, generated sources, and training
 records under `workspace/`. These are local research state and do not belong in
 source-control changes.
@@ -68,8 +65,8 @@ source-control changes.
 
 Documentation follows [Diátaxis](https://diataxis.fr/); the
 [documentation index](docs/README.md) states where each kind of information
-belongs. Put each fact in one place and link to it elsewhere. Write current behaviour in
-plain sentences. Wrap prose at 80 columns.
+belongs and how facts are homed. Write current behaviour in plain sentences
+and wrap prose at 80 columns.
 
 The terminal demo is reproducible:
 
