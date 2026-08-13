@@ -125,6 +125,39 @@ qualification releases remain mutable and are not public distribution
 artifacts. Build provenance exists for releases created after the repository
 became public.
 
+## What signs a release
+
+Three signatures cover the path from a commit to a downloaded file, and each
+answers a different question.
+
+| Signature | Key | Answers |
+| --- | --- | --- |
+| Commit | the maintainer's SSH key, or GitHub's key on a squash merge | who wrote this source |
+| Release attestation | Sigstore, keyed to the repository | GitHub bound this digest to this tag and commit |
+| Build provenance | Sigstore, keyed to the workflow identity | this workflow run built these bytes from that commit |
+
+Commits are signed before they reach the repository. The maintainer signs
+locally with an SSH key; a squash merge is signed by GitHub, which reports
+both as verified. Enforce it so an unsigned commit cannot reach `main`:
+
+```bash
+gh api -X PUT repos/LeonardAukea/autolean/rulesets/<id> \
+  --input ruleset-with-required-signatures.json
+```
+
+Release assets are signed without a long-lived key. The CI job exchanges a
+short-lived OIDC token for a Sigstore certificate bound to the workflow
+identity, signs the asset digests, and records the signature in a public
+transparency log. `gh attestation verify --signer-workflow` fails unless the
+bytes came from that workflow in this repository.
+
+A stored signing key would weaken this. It would have to live in a repository
+secret, so anyone who could read that secret could sign anything, forever, and
+nothing outside the repository would record that it happened. The keyless
+certificate expires in minutes, names the workflow that requested it, and
+leaves a public log entry. The key that does belong to a person — the
+maintainer's — signs the commits a person actually wrote.
+
 Do not move or reuse a release tag. Correct a failed release with a new pull
 request; the resulting commit receives its own identity and evidence.
 
