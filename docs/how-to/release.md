@@ -66,9 +66,11 @@ runtime.
 
 ## 3. Merge through the required gate
 
-Open a pull request against `main`. The `Required` check aggregates the Python,
-dependency, Lean/Nix, sandbox, and reproducible-package jobs. Resolve every
-review thread and update the branch before squash merging.
+Open a pull request against `main`. The `Required` check aggregates the
+Lean-grammar, Python matrix, dependency-audit, dependency-review, Lean/Nix,
+and reproducible-package jobs; the sandbox containment attacks and the
+tutorial replay are steps inside the Lean/Nix job. Resolve every review thread
+and update the branch before squash merging.
 
 The repository accepts squash merges, keeps a linear history, and deletes
 merged topic branches. Branch-rule enforcement of the `Required` check is

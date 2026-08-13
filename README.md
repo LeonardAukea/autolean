@@ -14,12 +14,14 @@
 
 AutoLean turns a mathematical goal into a reviewable research plan, a Lean 4
 declaration, and a kernel-checked proof. Every accepted result is an auditable
-derivation: the exact Lean, Mathlib, and dependency closure, the model, the
-prompt layers, and the transitive axiom report are committed with the source,
-so the theorem can be re-checked in the same pinned environment. Acceptance
-itself is earned — a source policy, an operating-system sandbox, elaboration
-by the pinned toolchain, and a declaration and axiom audit stand between a
-model proposal and a commit.
+derivation: the proof commit binds the source to the identity of the exact
+Lean, Mathlib, and dependency closure that checked it, to the proof hash, and
+to the transitive axiom report, so the theorem can be re-checked in the same
+pinned environment. The model, prompt layers, and search evidence behind it
+are recorded per attempt and travel with an export. Acceptance itself is
+earned — a source policy, an operating-system sandbox, elaboration by the
+pinned toolchain, and a declaration and axiom audit stand between a proposal
+and a commit.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
@@ -41,10 +43,12 @@ faithfully expresses an informal claim.
   <a href="docs/demos/pythagorean.json">Run manifest</a>
 </p>
 
-The recording runs the front-page command live with the configured Claude
+The recording runs the front-page workflow live with the configured Claude
 backend: a reviewed mathematical plan, an isolated formalization compiled
 before proof search, a bounded proof session, and a kernel-checked commit
-exported as a standalone Lean project. A second recording
+exported as a standalone Lean project. It adds one `--guide` fixing the
+geometric statement and the Mathlib lemma that closes it, so the run is
+reproducible; the VHS source holds the exact command. A second recording
 [audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
 (arXiv:2506.18616v5) —
 [MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·
@@ -69,8 +73,9 @@ autolean prove "the Pythagorean theorem" --review-plan --max-attempts 5
 ```
 
 The automatic default selects the strongest profile for an authenticated
-provider — a Claude or Codex subscription, a hosted API, or a local model.
-See [Choose and switch models](docs/how-to/choose-a-model.md).
+Claude or Codex subscription, or an Anthropic or OpenAI API key. Name a local
+model explicitly with `--model` or in `program.md`. See
+[Choose and switch models](docs/how-to/choose-a-model.md).
 
 Use `autolean workbench` for the interactive interface. The
 [first-proof tutorial](docs/tutorials/first-proof.md) walks each step and ends
@@ -102,8 +107,10 @@ offered to later prompts. The
 
 ```mermaid
 flowchart LR
-    goal["goal +<br/>bounded context"] --> model["model<br/>proposal"]
-    model --> policy["source<br/>policy"]
+    goal["goal +<br/>bounded context"] --> tactics["fixed tactic<br/>pre-search"]
+    goal --> model["model<br/>proposal"]
+    tactics --> policy["source<br/>policy"]
+    model --> policy
     policy --> sandbox["OS sandbox<br/>no network"]
     sandbox --> lean["pinned Lean<br/>elaboration"]
     lean --> audit["declaration +<br/>axiom audit"]
@@ -116,8 +123,10 @@ paper text, search results, and learned skills are untrusted data. Lean's
 parser, elaborator, and kernel decide acceptance; everything before them can
 only reject early. The
 [trust boundary](docs/explanation/trust-boundary.md) states the complete
-security and data-handling model, including
-[why elaboration runs in an OS sandbox](docs/explanation/trust-boundary.md#why-an-operating-system-sandbox).
+security and data-handling model, including [why elaboration runs in an OS
+sandbox][sandbox-rationale].
+
+[sandbox-rationale]: docs/explanation/trust-boundary.md#why-an-operating-system-sandbox
 
 ## Documentation
 

@@ -26,16 +26,26 @@ a bad quantifier; an explicit formalization field cannot.
 
 ## One experiment
 
-Each cycle performs the same steps:
+Before any model is asked, a fixed list of tactics is tried against the
+target. A tactic that closes the goal is written, validated, and committed
+through the same sandbox, declaration, and axiom audit as any other
+candidate, recorded against a `deterministic-tactic-search` identity. Cheap
+goals never reach a provider.
+
+Every cycle then performs the same steps:
 
 1. Select the highest-priority target within the requested scope.
 2. Read its Lean goal and bounded structural context.
-3. Add fixed-budget local search, learned skills, and prior failure evidence.
-4. Ask the active model for a target-specific proof strategy.
-5. Ask that model for one candidate proof under the accepted strategy.
-6. Apply the source policy and sandboxed Lean validation.
-7. Record the plan response, candidate, outcome, and provenance.
-8. Install only an accepted candidate, then rescan.
+3. Add learned skills and prior failure evidence.
+4. Ask the active model for one candidate proof under the target's strategy.
+5. Apply the source policy and sandboxed Lean validation.
+6. Record the candidate, outcome, and provenance.
+7. Install only an accepted candidate, then rescan.
+
+The first cycle on a target also runs its fixed-budget local search and asks
+for a proof strategy. Both are cached for that target and requested again
+only after a model transition, so later cycles vary the candidate rather than
+the plan.
 
 The order is stable. Prompt layers are separate: system rules, project
 guidance, and ephemeral target evidence have different ownership and hashes.
@@ -67,9 +77,13 @@ flowchart TD
     classify -- "eligible proof failures" --> escalate --> candidate
 ```
 
-Each box is a recorded step: the session holds the plan response, the
-candidate, the classified outcome, and the provenance for every cycle, so a
-stopped run can be inspected and resumed without losing evidence.
+Each box is a recorded step. One experiment row per attempt holds the
+candidate, the classified outcome, and the prompt, strategy, environment, and
+proof identities; the session holds the scope, model routing, and cycle budget
+that let a stopped run resume. The
+[artifact reference](../reference/research-artifacts.md) states where each
+lives, so a stopped run can be inspected and continued without losing
+evidence.
 
 ## Failure changes the next question
 
@@ -79,9 +93,10 @@ work on that target. Authentication, quota, network, and project failures stop
 the run because they say nothing about the mathematics.
 
 A smaller model may recommend a stronger profile after eligible proof failures.
-The switch is bounded to one per invocation. It retains the plan, target,
-attempt budget, and recorded evidence. Model size is a resource decision, not
-a substitute for repairing the formalization.
+The switch is bounded to one per invocation. It retains the target, attempt
+budget, and recorded evidence, and asks the incoming model to plan the target
+again rather than inheriting a plan it did not make. Model size is a resource
+decision; repairing the formalization is the other one.
 
 ## Success compounds into skills
 
