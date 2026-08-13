@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.record_paper_demo import recording_environment
 from scripts.record_prove_demo import _assert_export, _assert_generated
 
 
@@ -67,3 +68,45 @@ def test_export_with_a_placeholder_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match="proof placeholder"):
         _assert_export(tmp_path)
+
+
+def test_a_term_mode_placeholder_is_rejected(tmp_path: Path) -> None:
+    _write_generated(
+        tmp_path,
+        "import Mathlib\n\ndef helper : Nat := sorry\n\ntheorem pythagorean : True := by\n  trivial\n",
+    )
+
+    with pytest.raises(SystemExit, match="proof placeholder"):
+        _assert_generated(tmp_path)
+
+
+def test_a_placeholder_after_a_tactic_is_rejected(tmp_path: Path) -> None:
+    _write_generated(
+        tmp_path,
+        "import Mathlib\n\ntheorem pythagorean : True := by\n  simp; sorry\n",
+    )
+
+    with pytest.raises(SystemExit, match="proof placeholder"):
+        _assert_generated(tmp_path)
+
+
+def test_the_word_sorry_in_a_comment_is_not_a_placeholder(tmp_path: Path) -> None:
+    _write_generated(
+        tmp_path,
+        "import Mathlib\n\n-- sorry, this needed a lemma\ntheorem pythagorean : True := by\n  trivial\n",
+    )
+
+    assert _assert_generated(tmp_path).name == "PythagoreanTheorem.lean"
+
+
+def test_the_recording_environment_keeps_terminal_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("CLICOLOR", "0")
+
+    environment = recording_environment(AUTOLEAN_DEMO_ROOT="/demo")
+
+    assert "NO_COLOR" not in environment
+    assert "CLICOLOR" not in environment
+    assert environment["AUTOLEAN_DEMO_ROOT"] == "/demo"

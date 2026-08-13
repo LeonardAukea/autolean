@@ -68,6 +68,19 @@ AutoLean first presents a mathematical plan. Read the formalization target,
 premises, reductions, completion criterion, and checkpoints. Accept the plan
 or revise it before Lean source is generated.
 
+An English sentence rarely names one Lean statement. "The Pythagorean theorem"
+admits a right-triangle form over the reals and a distance form in any
+Euclidean affine space, and the model picks one. Say which you want, either
+by revising the plan at the prompt or by passing it up front:
+
+```bash
+autolean prove "the Pythagorean theorem" --review-plan \
+  --guide "Use the distance form in a Euclidean affine space"
+```
+
+The recorded demonstration passes a guide of exactly this shape, which is why
+it reaches the same statement on every run.
+
 The formalization phase compiles the proposed declaration in isolation. Proof
 search begins only after the statement compiles. A successful proof then
 passes the same sandbox, declaration-range, environment, and axiom checks used

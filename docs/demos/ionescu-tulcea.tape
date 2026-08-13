@@ -42,14 +42,14 @@ Show
 
 Type `autolean verify "$AUTOLEAN_DEMO_PDF" --review-plan --max-cycles 5`
 Enter
-Wait@240s /Use this paper plan?/
+Wait@600s /Use this paper plan?/
 Sleep 4s
 Type "n"
 Enter
 Wait@30s /Additional guidance/
 Type "Separate the executable alias-elaboration audit from follow-up work. Do not claim signature comparison, mapping grades, paper-form equivalence, or per-declaration axiom audits."
 Enter
-Wait@240s /Use this paper plan?/
+Wait@600s /Use this paper plan?/
 Sleep 4s
 Type "y"
 Enter
@@ -101,6 +101,7 @@ Type `find paper-artifact -maxdepth 3 -type f | sort`
 Enter
 Sleep 7s
 
-Type `cd workspace && lake env lean AutoLean/Paper_arxiv_2506_18616v5.lean`
+Type `cd workspace && lake env lean AutoLean/Paper_arxiv_2506_18616v5.lean && echo "Lean accepted every mapped declaration"`
 Enter
-Sleep 10s
+Wait@300s /Lean accepted every mapped declaration/
+Sleep 5s
