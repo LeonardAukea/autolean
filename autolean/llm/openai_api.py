@@ -1,7 +1,6 @@
 """OpenAI hosted API backend: GPT via the official SDK's Responses API.
 
-Requires `OPENAI_API_KEY` and uses API credit. The `codex_cli` backend uses
-ChatGPT subscription access.
+Requires `OPENAI_API_KEY`.
 """
 
 from __future__ import annotations

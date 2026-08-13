@@ -6,11 +6,6 @@ Workflow:
   3. LLM formalizes each claim as a Lean 4 theorem with sorry
   4. Writes a .lean file into the workspace
   5. The normal agent loop attempts proofs
-
-Text extraction strategies (tried in order):
-  1. arXiv native HTML — structured theorem environments, proofs, math
-  2. PyMuPDF4LLM — layout-aware PDF Markdown and selective OCR
-  3. arXiv API abstract — minimal but always works
 """
 
 from __future__ import annotations
@@ -988,10 +983,7 @@ def read_paper(
 ) -> PaperDocument:
     """Acquire a paper once and return its best structured representation.
 
-    Tries strategies in order:
-      1. arXiv native HTML — structured theorem extraction (best)
-      2. Layout-aware PDF extraction
-      3. arXiv abstract (minimal)
+    Returns a title-only document when no source yields text.
     """
     arxiv_id = _extract_arxiv_id(source)
 

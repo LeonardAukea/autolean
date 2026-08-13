@@ -192,10 +192,10 @@ class SkillMemory:
         theorem_statement: str,
         proof: str,
     ) -> Skill | None:
-        """Extract a skill from a successful proof.
+        """Return the skill this proof instantiates.
 
-        Analyzes the proof to identify the tactic pattern and
-        creates a reusable skill.
+        Reinforces the stored record when the pattern is already known.
+        Returns None when no tactic can be extracted.
         """
         tactics = self._extract_tactics(proof)
         if not tactics:
@@ -229,10 +229,10 @@ class SkillMemory:
     # -- Injecting into prompts -----------------------------------------------
 
     def get_prompt_injection(self, goal_state: str, max_skills: int = 5) -> str:
-        """Generate a prompt section with relevant skills for the current goal.
+        """Return the top `max_skills` patterns scored against `goal_state`.
 
-        Ranks skills by relevance to the goal state and returns a
-        formatted string for injection into the LLM prompt.
+        The result is a formatted prompt section, empty when no pattern
+        scores above zero.
         """
         if not self.skills:
             return ""

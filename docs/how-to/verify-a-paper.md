@@ -10,9 +10,11 @@ autolean verify https://arxiv.org/abs/2404.12534 --extract-only
 ```
 
 AutoLean tries native arXiv HTML first, then the pinned Lightpanda renderer,
-then the paper PDF. HTML extraction preserves theorem and proof environments
-and MathML alternative text. The PDF path uses PyMuPDF4LLM and PyMuPDF Layout
-for reading order, tables, formulas, and selective OCR.
+then the paper PDF, and finally the arXiv abstract. HTML extraction preserves
+theorem and proof environments and MathML alternative text. The PDF path uses
+PyMuPDF4LLM and PyMuPDF Layout for reading order, tables, formulas, and
+selective OCR. A source that yields no text leaves a title-only document,
+which extracts no claims.
 
 The Nix shell includes the PDF runtime. A uv checkout installs it explicitly:
 

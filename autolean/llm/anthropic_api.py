@@ -1,8 +1,7 @@
 """Anthropic hosted API backend: Claude via the official SDK.
 
 Requires an API key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or an
-`ant auth login` profile). Hosted calls use API credit. The `claude_cli`
-backend uses Claude subscription access.
+`ant auth login` profile).
 """
 
 from __future__ import annotations
