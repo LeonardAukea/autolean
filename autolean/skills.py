@@ -188,10 +188,8 @@ class SkillMemory:
         if not tactics:
             return None
 
-        # Classify the proof pattern
         pattern_name, description, applicable = self._classify_pattern(tactics)
 
-        # Check if we already have this skill
         if pattern_name in self.skills:
             existing = self.skills[pattern_name]
             existing.times_succeeded += 1
@@ -204,7 +202,6 @@ class SkillMemory:
             )
             return existing
 
-        # Create new skill
         skill = Skill(
             name=pattern_name,
             description=description,
@@ -230,7 +227,6 @@ class SkillMemory:
         if not self.skills:
             return ""
 
-        # Rank skills by relevance (simple keyword matching for now)
         scored: list[tuple[float, Skill]] = []
         for skill in self.skills.values():
             score = self._relevance_score(skill, goal_state)
@@ -293,16 +289,13 @@ class SkillMemory:
         score = 0.0
         goal_lower = goal_state.lower()
 
-        # Keyword matching
         keywords = skill.applicable_when.lower().split()
         for kw in keywords:
             if kw in goal_lower:
                 score += 1.0
 
-        # Boost by historical success rate
         score *= 1.0 + skill.success_rate
 
-        # Boost frequently successful skills
         if skill.times_succeeded > 3:
             score *= 1.5
 
