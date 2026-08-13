@@ -100,3 +100,28 @@ def test_manifest_is_required(tmp_path: Path) -> None:
 
     with pytest.raises(ProofEnvironmentError, match=r"lake-manifest\.json is required"):
         capture_proof_environment(project, lean)
+
+
+def test_fingerprint_is_stable_for_an_unchanged_tree(tmp_path: Path) -> None:
+    project, lean = _environment(tmp_path)
+
+    first = provenance.environment_fingerprint(project, lean)
+    second = provenance.environment_fingerprint(project, lean)
+
+    assert first == second
+
+
+def test_fingerprint_tracks_artifact_and_configuration_changes(tmp_path: Path) -> None:
+    project, lean = _environment(tmp_path)
+    artifact = (
+        project / ".lake" / "packages" / "mathlib" / ".lake" / "build" / "lib" / "lean" / "Mathlib.olean"
+    )
+    before = provenance.environment_fingerprint(project, lean)
+
+    artifact.write_bytes(b"different-olean-content")
+    after_artifact = provenance.environment_fingerprint(project, lean)
+    (project / "lakefile.lean").write_text("import Lake\n-- changed\n")
+    after_config = provenance.environment_fingerprint(project, lean)
+
+    assert before != after_artifact
+    assert after_artifact != after_config

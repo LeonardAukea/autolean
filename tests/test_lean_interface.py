@@ -482,3 +482,50 @@ class TestReplaceSorryAt:
         )
 
         assert result == "theorem pair : True ∧ True := And.intro (by sorry) (by trivial)\n"
+
+
+class TestProofEnvironmentCaching:
+    def test_unchanged_tree_reuses_the_captured_identity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean import lean_interface, provenance
+        from tests.test_provenance import _environment
+
+        project_dir, lean = _environment(tmp_path)
+        monkeypatch.setattr(provenance, "_read_lean_version", lambda _: "Lean (version 4.33.0)")
+        monkeypatch.setattr(lean_interface, "_resolve_lean", lambda _: lean)
+        captures = 0
+        real_capture = lean_interface.capture_proof_environment
+
+        def counting_capture(root: Path, lean_path: Path) -> object:
+            nonlocal captures
+            captures += 1
+            return real_capture(root, lean_path)
+
+        monkeypatch.setattr(lean_interface, "capture_proof_environment", counting_capture)
+        project = lean_interface.LeanProject(project_dir)
+
+        first = project.proof_environment()
+        unchanged = project.proof_environment(refresh=True)
+
+        assert unchanged.sha256 == first.sha256
+        assert captures == 1
+
+        artifact = (
+            project_dir
+            / ".lake"
+            / "packages"
+            / "mathlib"
+            / ".lake"
+            / "build"
+            / "lib"
+            / "lean"
+            / "Mathlib.olean"
+        )
+        artifact.write_bytes(b"different-olean-content")
+        changed = project.proof_environment(refresh=True)
+
+        assert captures == 2
+        assert changed.sha256 != first.sha256
