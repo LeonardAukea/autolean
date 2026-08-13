@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)"
-            srcset="docs/assets/banner-dark.svg">
-    <img src="docs/assets/banner-light.svg" alt="AutoLean" width="900">
+            srcset="docs/assets/logo-dark.png">
+    <img src="docs/assets/logo-light.png" alt="AutoLean" width="220">
   </picture>
 </p>
 
