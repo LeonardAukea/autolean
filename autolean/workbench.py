@@ -801,7 +801,11 @@ class AutoLeanWorkbench(App[None]):
                 status.update(f"{plan.action.title()} {verb} successfully.")
                 self.notify(f"{plan.action.title()} {verb} successfully.")
                 if plan.mutates_project:
-                    self.session = WorkbenchSession.load(self.session.program_path)
+                    # The rescan reads every project source; keep the UI live.
+                    self.session = await asyncio.to_thread(
+                        WorkbenchSession.load,
+                        self.session.program_path,
+                    )
                     self._show_targets(self.session.targets)
             else:
                 status.update(f"{plan.action.title()} failed with exit code {return_code}.")
