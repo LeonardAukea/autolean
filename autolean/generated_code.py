@@ -21,11 +21,19 @@ _ELABORATOR_ESCAPE = re.compile(
 _IO_REFERENCE = re.compile(r"\b(?:IO|System|Process)\s*\.")
 _UNSOUND_DECLARATION = re.compile(r"\b(?:admit|sorryAx|axiom|constant)\b")
 _PLACEHOLDER = re.compile(r"\b(?:sorry|admit|sorryAx)\b")
+#: Attributes and modifiers Lean allows before a declaration keyword. A
+#: command is still a command behind them, so the keyword match has to look
+#: past `@[simp]`, `private`, `scoped`, and their combinations.
+_DECLARATION_PREFIX = (
+    r"(?:@\[[^\]\r\n]*\]\s*|"
+    r"(?:private|protected|noncomputable|scoped|local|nonrec|mutual)\s+)*"
+)
 _COMMAND_ESCAPE = re.compile(
-    r"(?m)^\s*(?:#|import\b|namespace\b|section\b|end\b|open\b|"
-    r"noncomputable\s+(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b|"
-    r"theorem\b|lemma\b|def\b|abbrev\b|instance\b|structure\b|"
-    r"class\b|inductive\b|axiom\b|opaque\b|set_option\b)"
+    r"(?m)^\s*(?:#|" + _DECLARATION_PREFIX + r"(?:"
+    r"import|namespace|section|end|open|theorem|lemma|def|abbrev|instance|"
+    r"structure|class|inductive|axiom|opaque|constant|example|attribute|"
+    r"set_option|notation|infix|infixl|infixr|prefix|postfix"
+    r")\b)"
 )
 _DECLARATION = re.compile(
     r"(?m)^\s*(?:noncomputable\s+)?"
@@ -42,7 +50,7 @@ def validate_generated_proof(proof: str) -> str:
     """
     proof = proof.strip()
     _validate_common(proof)
-    if _PLACEHOLDER.search(proof):
+    if _PLACEHOLDER.search(proof) or _UNSOUND_DECLARATION.search(proof):
         raise GeneratedCodeError("proof contains a placeholder or axiom escape")
     if _COMMAND_ESCAPE.search(proof):
         raise GeneratedCodeError("proof contains a command-level escape")
