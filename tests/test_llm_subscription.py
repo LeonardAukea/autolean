@@ -426,3 +426,30 @@ class TestCliBackend:
         assert codex().capabilities.stop_sequences is False
         assert claude().capabilities.output_limit is False
         assert codex().capabilities.output_limit is False
+
+
+class TestProbeCache:
+    def test_probe_runs_one_preflight_per_process(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        lookups = 0
+
+        def counting_which(_: str) -> None:
+            nonlocal lookups
+            lookups += 1
+            return None
+
+        monkeypatch.setattr(sub.shutil, "which", counting_which)
+
+        first = claude().probe()
+        second = claude().probe()
+
+        assert first == second
+        assert lookups == 1
+
+    def test_probe_is_cached_per_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sub.shutil, "which", lambda _: None)
+
+        assert "claude" in claude().probe().detail
+        assert "codex" in codex().probe().detail

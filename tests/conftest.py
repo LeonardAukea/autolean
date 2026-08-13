@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_probe_cache() -> Iterator[None]:
+    """Each test observes its own subscription preflight results."""
+    from autolean.llm import subscription
+
+    subscription._PROBE_CACHE.clear()
+    yield
+    subscription._PROBE_CACHE.clear()
 
 
 @pytest.fixture()

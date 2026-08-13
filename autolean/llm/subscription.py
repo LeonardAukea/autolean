@@ -91,6 +91,12 @@ class SubscriptionStatus:
     detail: str = ""
 
 
+#: One preflight subprocess per (binary, backend) per process. Model
+#: selection, construction, and run startup all preflight the same CLI;
+#: its credential state does not change within one invocation.
+_PROBE_CACHE: dict[tuple[str, str], SubscriptionStatus] = {}
+
+
 @dataclass
 class CliBackend(BaseBackend):
     """Common process handling for a vendor CLI in non-interactive mode."""
@@ -109,6 +115,13 @@ class CliBackend(BaseBackend):
 
     def probe(self) -> SubscriptionStatus:
         """Inspect the CLI and its active credential without writing output."""
+        key = (self.resolved_binary(), self.config.backend)
+        cached = _PROBE_CACHE.get(key)
+        if cached is None:
+            cached = _PROBE_CACHE[key] = self._probe_uncached()
+        return cached
+
+    def _probe_uncached(self) -> SubscriptionStatus:
         binary = self.resolved_binary()
         if shutil.which(binary) is None:
             return SubscriptionStatus(
