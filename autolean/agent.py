@@ -257,6 +257,22 @@ def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class AttemptEvidence:
+    """Content identities produced by one proof attempt.
+
+    An attempt that returns before reaching the model leaves these empty,
+    which is what its record must say.
+    """
+
+    input_tokens: int = 0
+    prompt_sha256: str = ""
+    structural_context_sha256: str = ""
+    indexed_context_sha256: str = ""
+    strategy_sha256: str = ""
+    strategy_response_sha256: str = ""
+
+
 class AutoLeanAgent:
     """The autonomous proof agent."""
 
@@ -314,12 +330,7 @@ class AutoLeanAgent:
 
         # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
-        self._prompt_sha256: dict[str, str] = {}
-        self._structural_context_sha256: dict[str, str] = {}
-        self._indexed_context_sha256: dict[str, str] = {}
-        self._strategy_sha256: dict[str, str] = {}
-        self._strategy_response_sha256: dict[str, str] = {}
-        self._response_input_tokens: dict[str, int] = {}
+        self._evidence = AttemptEvidence()
         self.structure = LeanStructureProvider()
         self.proof_context = ProofContextBuilder(self.project.root, self._step)
 
@@ -879,6 +890,7 @@ class AutoLeanAgent:
 
     def _try_fill_sorry(self, cycle: int, target: SorryTarget, attempt: int) -> ExperimentRecord:
         """Try to fill a single sorry target. Returns the experiment record."""
+        self._evidence = AttemptEvidence()
         t0 = time.monotonic()
         file_path = target.file
         original_content = self.project.read_file(file_path)
@@ -946,7 +958,7 @@ class AutoLeanAgent:
             declaration_name=target.decl_name,
         )
         structural_text = structural.render()
-        self._structural_context_sha256[target.id] = structural.sha256
+        self._evidence.structural_context_sha256 = structural.sha256
         file_context += f"\n\n{structural_text}"
         self._step(
             f"Structure: {structural.quality.value}, "
@@ -1041,9 +1053,9 @@ class AutoLeanAgent:
                 error_summary=message,
                 error_category="strategy_generation",
             )
-        self._indexed_context_sha256[target.id] = enrichment.indexed_sha256
-        self._strategy_sha256[target.id] = enrichment.strategy_sha256
-        self._strategy_response_sha256[target.id] = enrichment.strategy_response_sha256
+        self._evidence.indexed_context_sha256 = enrichment.indexed_sha256
+        self._evidence.strategy_sha256 = enrichment.strategy_sha256
+        self._evidence.strategy_response_sha256 = enrichment.strategy_response_sha256
         file_context += f"\n\n{enrichment.text}"
 
         # -- Step 2: Ask LLM -----------------------------------------------
@@ -1054,7 +1066,7 @@ class AutoLeanAgent:
             goal_state=goal_state or "(goal state unavailable -- try to infer from context)",
             failed_attempts=failed_str,
         )
-        self._prompt_sha256[target.id] = sha256_text(f"{SYSTEM_PROMPT}\0{user_prompt}")
+        self._evidence.prompt_sha256 = sha256_text(f"{SYSTEM_PROMPT}\0{user_prompt}")
 
         # Sampling backends can diversify bounded retries. Deterministic and
         # reasoning profiles retain their declared request configuration.
@@ -1112,7 +1124,7 @@ class AutoLeanAgent:
                 error_summary=f"LLM error: {e}",
                 error_category=provider_category,
             )
-        self._response_input_tokens[target.id] = response.input_tokens
+        self._evidence.input_tokens = response.input_tokens
         self._consecutive_llm_errors = 0
 
         # -- Step 3: Clean and apply proof ----------------------------------
@@ -1316,11 +1328,11 @@ class AutoLeanAgent:
                 model=response.model,
                 backend=self.llm.config.backend,
                 llm_input_tokens=response.input_tokens,
-                prompt_sha256=self._prompt_sha256.get(target.id, ""),
-                structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
-                indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
-                strategy_sha256=self._strategy_sha256.get(target.id, ""),
-                strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
+                prompt_sha256=self._evidence.prompt_sha256,
+                structural_context_sha256=self._evidence.structural_context_sha256,
+                indexed_context_sha256=self._evidence.indexed_context_sha256,
+                strategy_sha256=self._evidence.strategy_sha256,
+                strategy_response_sha256=self._evidence.strategy_response_sha256,
                 model_revision=self.llm.config.model_revision or "",
                 sampling_seed=self.llm.config.seed,
                 model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
@@ -1522,11 +1534,11 @@ class AutoLeanAgent:
             model=response.model,
             backend=self.llm.config.backend,
             llm_input_tokens=response.input_tokens,
-            prompt_sha256=self._prompt_sha256.get(target.id, ""),
-            structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
-            indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
-            strategy_sha256=self._strategy_sha256.get(target.id, ""),
-            strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
+            prompt_sha256=self._evidence.prompt_sha256,
+            structural_context_sha256=self._evidence.structural_context_sha256,
+            indexed_context_sha256=self._evidence.indexed_context_sha256,
+            strategy_sha256=self._evidence.strategy_sha256,
+            strategy_response_sha256=self._evidence.strategy_response_sha256,
             model_revision=self.llm.config.model_revision or "",
             sampling_seed=self.llm.config.seed,
             model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
@@ -1579,12 +1591,12 @@ class AutoLeanAgent:
             axioms=axioms,
             model=model or self.llm.config.model,
             backend=self.llm.config.backend,
-            llm_input_tokens=self._response_input_tokens.get(target.id, 0),
-            prompt_sha256=self._prompt_sha256.get(target.id, ""),
-            structural_context_sha256=self._structural_context_sha256.get(target.id, ""),
-            indexed_context_sha256=self._indexed_context_sha256.get(target.id, ""),
-            strategy_sha256=self._strategy_sha256.get(target.id, ""),
-            strategy_response_sha256=self._strategy_response_sha256.get(target.id, ""),
+            llm_input_tokens=self._evidence.input_tokens,
+            prompt_sha256=self._evidence.prompt_sha256,
+            structural_context_sha256=self._evidence.structural_context_sha256,
+            indexed_context_sha256=self._evidence.indexed_context_sha256,
+            strategy_sha256=self._evidence.strategy_sha256,
+            strategy_response_sha256=self._evidence.strategy_response_sha256,
             model_revision=self.llm.config.model_revision or "",
             sampling_seed=self.llm.config.seed,
             model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
