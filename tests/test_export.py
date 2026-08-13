@@ -298,3 +298,31 @@ def test_latex_identifier_uses_unicode_monospace_and_breakpoints() -> None:
     assert _latex_identifier("Kernel.partialTraj_map₂") == (
         r"\texttt{Kernel.\allowbreak{}partialTraj\_\allowbreak{}map₂}"
     )
+
+
+def test_a_whole_project_export_carries_the_generated_proofs(tmp_path: Path) -> None:
+    """The proofs a run accepted are the artifact's reason to exist."""
+    root = _project(tmp_path)
+    generated = root / "AutoLean" / "Generated"
+    generated.mkdir(parents=True)
+    (generated / "Result.lean").write_text("theorem accepted : True := by\n  trivial\n", encoding="utf-8")
+    (root / "AutoLean" / "UserTheorems.lean").write_text("-- scratch\n", encoding="utf-8")
+
+    result = export_project(root, tmp_path / "artifact", title="Artifact")
+
+    project = result.path / "project"
+    assert (project / "AutoLean" / "Generated" / "Result.lean").is_file()
+    assert not (project / "AutoLean" / "UserTheorems.lean").exists()
+    assert "import AutoLean.Generated.Result" in (project / "AutoLean.lean").read_text(encoding="utf-8")
+
+
+def test_a_nested_workspace_is_not_exported(tmp_path: Path) -> None:
+    """A run leaves a nested copy under the project; it is not source."""
+    root = _project(tmp_path)
+    stale = root / "workspace" / "AutoLean"
+    stale.mkdir(parents=True)
+    (stale / "Old.lean").write_text("theorem stale : True := by\n  trivial\n", encoding="utf-8")
+
+    result = export_project(root, tmp_path / "artifact", title="Artifact")
+
+    assert not (result.path / "project" / "workspace").exists()
