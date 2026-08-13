@@ -79,3 +79,21 @@ def test_line_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert lines[2] == "  ! cache miss"
     assert lines[3].startswith("  Model")
     assert lines[3].endswith(" auto")
+
+
+class TestCommandName:
+    def test_an_installed_console_script_names_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pip or Homebrew install runs `autolean`, not `uv run autolean`."""
+        monkeypatch.setattr(ui.sys, "argv", ["/opt/homebrew/bin/autolean", "solve"])
+
+        assert ui.command() == "autolean"
+
+    def test_the_module_form_names_the_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ui.sys, "argv", ["/src/autolean/__main__.py"])
+
+        assert ui.command() == "python -m autolean"
+
+    def test_a_missing_argv_still_names_something_runnable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ui.sys, "argv", [])
+
+        assert ui.command() == "python -m autolean"

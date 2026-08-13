@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from autolean import ui
 from autolean.ui import console
 
 log = logging.getLogger("autolean")
@@ -155,9 +156,9 @@ def trigger_local_finetune(
     console.print("    git clone https://github.com/mattmireles/gemma-tuner-multimodal")
     console.print(f"    cd gemma-tuner-multimodal && python finetune.py --data {csv_path}")
     console.print("\n  Option 2 (Axolotl):")
-    console.print("    uv run autolean finetune-config --framework axolotl")
+    console.print(f"    {ui.command()} finetune-config --framework axolotl")
     console.print("    accelerate launch -m axolotl.cli.train ...")
     console.print("\n  After training, import to Ollama:")
     console.print(f"    ollama create {output_name} -f Modelfile")
-    console.print(f"    uv run autolean solve --model {output_name}")
+    console.print(f"    {ui.command()} solve --model {output_name}")
     return True

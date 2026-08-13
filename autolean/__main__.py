@@ -1272,7 +1272,7 @@ def verify_paper(
         program=program,
     )
     if prepared is not None:
-        console.print("\n  Next: [cyan]uv run autolean solve[/] to attempt proofs")
+        console.print(f"\n  Next: [cyan]{ui.command()} solve[/] to attempt proofs")
 
 
 # ---------------------------------------------------------------------------
@@ -1400,8 +1400,8 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
         console.print("  program.md (preserved; update Lean Project Path to select this project)")
     console.print("\n  Next:")
     console.print(f"    cd {path} && lake update && lake exe cache get && lake build")
-    console.print(f"    uv run autolean targets -d {path}")
-    console.print("    uv run autolean solve")
+    console.print(f"    {ui.command()} targets -d {path}")
+    console.print(f"    {ui.command()} solve")
 
 
 # ---------------------------------------------------------------------------

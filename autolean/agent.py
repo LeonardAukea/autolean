@@ -1763,11 +1763,11 @@ class AutoLeanAgent:
             files_lines.append("")
             files_lines.append("[bold]Next steps:[/bold]")
             if remaining:
-                files_lines.append("  uv run autolean solve --resume")
-            files_lines.append("  uv run autolean changes")
-            files_lines.append("  uv run autolean results")
+                files_lines.append(f"  {ui.command()} solve --resume")
+            files_lines.append(f"  {ui.command()} changes")
+            files_lines.append(f"  {ui.command()} results")
             if exhausted:
-                files_lines.append("  uv run autolean solve --model deepseek-prover --resume")
+                files_lines.append(f"  {ui.command()} solve --model deepseek-prover --resume")
         elif not self.dry_run:
             files_lines.append("")
             files_lines.append("[bold green]All sorry targets resolved![/bold green]")
