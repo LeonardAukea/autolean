@@ -18,7 +18,7 @@ from autolean.llm import (
 from autolean.provenance import ProofEnvironment, sha256_text
 from autolean.routing import EscalationPolicy
 from autolean.scanner import SorryTarget
-from autolean.tracker import Outcome
+from autolean.tracker import TSV_FIELDS, Outcome
 
 
 class FakeBackend(BaseBackend):
@@ -428,3 +428,34 @@ def test_a_skipped_attempt_records_no_prompt_it_never_sent(
     assert unnamed.strategy_sha256 == ""
     assert unnamed.structural_context_sha256 == ""
     assert unnamed.llm_input_tokens == 0
+
+
+def test_resuming_remembers_which_targets_are_already_proved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run must not re-attempt a target a previous run proved."""
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    proved = "AutoLean/Target.lean:2:target"
+    attempted = "AutoLean/Target.lean:9:other"
+    rows = [
+        "\t".join(TSV_FIELDS),
+        "\t".join(
+            {"cycle": "3", "target_id": proved, "outcome": "success", "attempt": "2"}.get(f, "")
+            for f in TSV_FIELDS
+        ),
+        "\t".join(
+            {"cycle": "4", "target_id": attempted, "outcome": "fail_build", "attempt": "5"}.get(f, "")
+            for f in TSV_FIELDS
+        ),
+    ]
+    agent.tracker.results_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    agent._proved_ids.clear()
+    agent._attempts.clear()
+    agent._load_resume_state()
+
+    assert proved in agent._proved_ids, "a proved target must not be attempted again"
+    assert attempted not in agent._proved_ids
+    assert agent._attempts[attempted] == 5, "the retry budget must survive a resume"
+    assert agent.tracker._cycle == 4
