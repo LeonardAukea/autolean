@@ -89,23 +89,29 @@ An accepted proof also changes future questions. The skill memory extracts
 the proof's tactic sequence, names the pattern it instantiates — computation
 by `rfl`, simplification, induction with case analysis, arithmetic closure —
 and persists a small record: the tactics, an applicability condition, the
-theorem that produced it, and success counts.
+theorem that produced it, and the number of accepted proofs that reached the
+same pattern.
 
 Before each attempt, stored skills are ranked against the current goal state
-by keyword relevance weighted by historical success rate; the strongest few
-enter the prompt as named patterns. A pattern that keeps closing goals rises.
-A pattern that stops working fades.
+by keyword relevance, and a pattern reached by more than three accepted proofs
+takes a bounded tie-break. The strongest few enter the prompt as named
+patterns.
 
 ```mermaid
 flowchart LR
     accepted["accepted proof"] --> extract["extract tactic<br/>sequence"]
     extract --> classify["name the<br/>pattern"]
-    classify --> store[("skill record:<br/>tactics, condition,<br/>success counts")]
+    classify --> store[("skill record:<br/>tactics, condition,<br/>accepted-proof count")]
     store --> rank["rank against the<br/>next goal state"]
     rank --> inject["strongest patterns<br/>enter the prompt"]
     inject --> validate["candidate validated by<br/>policy, sandbox, Lean"]
     validate -- "accepted" --> store
 ```
+
+The count measures reuse, not a success rate. Only accepted proofs reach the
+store, and a prompt carries several patterns at once, so a rejected candidate
+names no pattern to charge it to. Ranking therefore rests on how well a
+pattern's applicability condition matches the goal in front of it.
 
 Skills are evidence, not authority. An injected pattern can only shape a
 proposal; the candidate it shapes passes the same source policy, sandbox,

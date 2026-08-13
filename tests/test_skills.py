@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from autolean.skills import SkillMemory
@@ -73,7 +74,35 @@ class TestSkillPersistence:
         sm = SkillMemory(skills_dir=tmp_path)
         sm.learn_from_proof("a", "1=1", "rfl")
         sm.learn_from_proof("b", "2=2", "rfl")
-        assert sm.skills["reflexivity"].times_succeeded == 2
+        assert sm.skills["reflexivity"].times_observed == 2
+
+    def test_observation_count_survives_a_reload(self, tmp_path: Path) -> None:
+        sm = SkillMemory(skills_dir=tmp_path)
+        sm.learn_from_proof("a", "1=1", "rfl")
+        sm.learn_from_proof("b", "2=2", "rfl")
+
+        assert SkillMemory(skills_dir=tmp_path).skills["reflexivity"].times_observed == 2
+
+    def test_a_stored_success_pair_becomes_an_observation_count(self, tmp_path: Path) -> None:
+        (tmp_path / "reflexivity.json").write_text(
+            json.dumps(
+                {
+                    "name": "reflexivity",
+                    "description": "Proves equalities by computation",
+                    "tactics": ["rfl"],
+                    "applicable_when": "Goal is an equality",
+                    "example_theorem": "t : 1 = 1",
+                    "times_used": 1,
+                    "times_succeeded": 4,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        skill = SkillMemory(skills_dir=tmp_path).skills["reflexivity"]
+
+        assert skill.times_observed == 4
+        assert not hasattr(skill, "success_rate")
 
 
 class TestSkillPromptInjection:

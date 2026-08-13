@@ -7,6 +7,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("autolean")
 
@@ -125,12 +126,25 @@ class Skill:
     tactics: list[str]  # e.g., ["rfl"]
     applicable_when: str  # e.g., "Goal is an equality where both sides reduce"
     example_theorem: str  # e.g., "trivial_rfl : 1 + 1 = 2"
-    times_used: int = 0
-    times_succeeded: int = 0
+    #: Accepted proofs whose tactic sequence instantiated this pattern. Only
+    #: accepted proofs reach this store, and a prompt carries several patterns
+    #: at once, so a rejection cannot be charged to one of them. The count
+    #: states observed reuse and claims nothing about a success rate.
+    times_observed: int = 1
 
-    @property
-    def success_rate(self) -> float:
-        return self.times_succeeded / self.times_used if self.times_used > 0 else 0.0
+
+def _skill_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """Map one persisted skill record onto the current field set.
+
+    A record on disk may carry the older success pair, whose denominator
+    never advanced past one; its success count is the observation count.
+    """
+    fields = dict(record)
+    succeeded = fields.pop("times_succeeded", None)
+    fields.pop("times_used", None)
+    if "times_observed" not in fields and succeeded is not None:
+        fields["times_observed"] = max(int(succeeded), 1)
+    return fields
 
 
 @dataclass
@@ -149,7 +163,7 @@ class SkillMemory:
         for path in self.skills_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                skill = Skill(**data)
+                skill = Skill(**_skill_fields(data))
                 self.skills[skill.name] = skill
             except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as e:
                 log.warning("Failed to load skill %s: %s", path, e)
@@ -166,8 +180,7 @@ class SkillMemory:
             "tactics": skill.tactics,
             "applicable_when": skill.applicable_when,
             "example_theorem": skill.example_theorem,
-            "times_used": skill.times_used,
-            "times_succeeded": skill.times_succeeded,
+            "times_observed": skill.times_observed,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -192,13 +205,12 @@ class SkillMemory:
 
         if pattern_name in self.skills:
             existing = self.skills[pattern_name]
-            existing.times_succeeded += 1
+            existing.times_observed += 1
             self._save_skill(existing)
             log.debug(
-                "Skill '%s' reinforced (success %d/%d)",
+                "Skill '%s' observed again (%d accepted proofs)",
                 pattern_name,
-                existing.times_succeeded,
-                existing.times_used,
+                existing.times_observed,
             )
             return existing
 
@@ -208,8 +220,6 @@ class SkillMemory:
             tactics=tactics,
             applicable_when=applicable,
             example_theorem=f"{theorem_name} : {theorem_statement[:100]}",
-            times_used=1,
-            times_succeeded=1,
         )
         self.skills[pattern_name] = skill
         self._save_skill(skill)
@@ -240,9 +250,9 @@ class SkillMemory:
 
         lines = ["## Learned Proof Patterns (from previous sessions)"]
         for s in top:
-            rate = f"{s.success_rate * 100:.0f}%" if s.times_used > 0 else "new"
+            seen = "1 accepted proof" if s.times_observed == 1 else f"{s.times_observed} accepted proofs"
             lines.append(
-                f"- **{s.name}** ({rate} success): {s.description}\n"
+                f"- **{s.name}** (from {seen}): {s.description}\n"
                 f"  Tactics: `{' ; '.join(s.tactics)}`\n"
                 f"  Use when: {s.applicable_when}"
             )
@@ -285,7 +295,12 @@ class SkillMemory:
         )
 
     def _relevance_score(self, skill: Skill, goal_state: str) -> float:
-        """Score how relevant a skill is to the current goal state."""
+        """Score how relevant a skill is to the current goal state.
+
+        Goal wording carries the ranking. Repeated observation breaks ties by
+        a bounded factor, so an old pattern cannot outrank a pattern the goal
+        actually names.
+        """
         score = 0.0
         goal_lower = goal_state.lower()
 
@@ -294,9 +309,7 @@ class SkillMemory:
             if kw in goal_lower:
                 score += 1.0
 
-        score *= 1.0 + skill.success_rate
-
-        if skill.times_succeeded > 3:
+        if skill.times_observed > 3:
             score *= 1.5
 
         return score
