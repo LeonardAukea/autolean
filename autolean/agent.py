@@ -310,6 +310,7 @@ class AutoLeanAgent:
         # File health cache: files known to have structural (non-sorry) errors.
         # Targets in these files are skipped until the file is repaired.
         self._unhealthy_files: dict[Path, str] = {}  # file -> reason
+        self._healthy_files: dict[Path, str] = {}  # file -> content sha256
 
         # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
@@ -383,17 +384,22 @@ class AutoLeanAgent:
 
     # -- File health --------------------------------------------------------
 
-    def _check_file_health(self, lean_file: Path) -> str | None:
+    def _check_file_health(self, lean_file: Path, content: str) -> str | None:
         """Check if a file has non-sorry structural errors.
 
         Returns None if the file is healthy (only sorry warnings),
         or an error description if the file is structurally broken.
 
         This prevents wasting LLM retries on targets in corrupted files
-        (e.g., imports inserted mid-file by gap-filling).
+        (e.g., imports inserted mid-file by gap-filling). The verdict is a
+        function of the file bytes, so each content identity compiles at
+        most once.
         """
         if lean_file in self._unhealthy_files:
             return self._unhealthy_files[lean_file]
+        content_sha256 = sha256_text(content)
+        if self._healthy_files.get(lean_file) == content_sha256:
+            return None
 
         result = self.project.check_file(lean_file, timeout=60, untrusted=True)
         for diag in result.errors:
@@ -402,6 +408,7 @@ class AutoLeanAgent:
                 reason = f"{cat.value}: {diag.message[:120]}"
                 self._unhealthy_files[lean_file] = reason
                 return reason
+        self._healthy_files[lean_file] = content_sha256
         return None
 
     def _should_bail_repeated_error(self, target_id: str) -> bool:
@@ -891,7 +898,7 @@ class AutoLeanAgent:
 
         # -- Pre-flight: structural error bail-out --------------------------
         # A proof body cannot repair a structural error in its source file.
-        file_issue = self._check_file_health(file_path)
+        file_issue = self._check_file_health(file_path, original_content)
         if file_issue:
             self._step(f"SKIP: file has structural error: {file_issue[:80]}", "red")
             # Exhaust retries so the loop moves on
