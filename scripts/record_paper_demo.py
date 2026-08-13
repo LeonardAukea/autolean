@@ -328,17 +328,29 @@ def _run_check(workspace: DemoWorkspace) -> None:
     _assert_demo(workspace.root)
 
 
-def _record(repository: Path, workspace: DemoWorkspace) -> None:
-    """Render the GIF and MP4 from the versioned live VHS tape."""
-    if shutil.which("vhs") is None:
-        raise SystemExit("vhs is unavailable; enter `nix develop`")
+def _recording_environment(workspace: DemoWorkspace) -> dict[str, str]:
+    """Build the environment VHS hands to the recorded shell.
+
+    A color-suppressing variable inherited from the invoking session would
+    strip the CLI theme from the published media.
+    """
     environment = os.environ.copy()
+    for name in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
+        environment.pop(name, None)
     environment.update(
         {
             "AUTOLEAN_DEMO_ROOT": str(workspace.root),
             "AUTOLEAN_DEMO_PDF": str(workspace.pdf),
         }
     )
+    return environment
+
+
+def _record(repository: Path, workspace: DemoWorkspace) -> None:
+    """Render the GIF and MP4 from the versioned live VHS tape."""
+    if shutil.which("vhs") is None:
+        raise SystemExit("vhs is unavailable; enter `nix develop`")
+    environment = _recording_environment(workspace)
     subprocess.run(
         ["vhs", "docs/demos/ionescu-tulcea.tape"],
         cwd=repository,

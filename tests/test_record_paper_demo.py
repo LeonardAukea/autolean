@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.record_paper_demo import _assert_export
+from scripts.record_paper_demo import DemoWorkspace, _assert_export, _recording_environment
 
 
 def _write_export(root: Path) -> Path:
@@ -44,3 +44,21 @@ def test_demo_export_rejects_an_unrelated_lean_source(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match="unexpected Lean source set"):
         _assert_export(tmp_path)
+
+
+def test_recording_environment_keeps_terminal_color(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("CLICOLOR", "0")
+    monkeypatch.setenv("CLICOLOR_FORCE", "0")
+    workspace = DemoWorkspace(root=tmp_path, pdf=tmp_path / "paper.pdf")
+
+    environment = _recording_environment(workspace)
+
+    assert "NO_COLOR" not in environment
+    assert "CLICOLOR" not in environment
+    assert "CLICOLOR_FORCE" not in environment
+    assert environment["AUTOLEAN_DEMO_ROOT"] == str(tmp_path)
+    assert environment["AUTOLEAN_DEMO_PDF"] == str(tmp_path / "paper.pdf")
