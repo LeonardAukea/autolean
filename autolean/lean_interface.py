@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from autolean.provenance import (
+    EnvironmentFingerprint,
     ProofEnvironment,
     ProofEnvironmentError,
     capture_proof_environment,
@@ -73,6 +74,9 @@ class LeanSourceChangedError(OSError):
 
 
 CORE_LOGICAL_AXIOMS = frozenset({"propext", "Quot.sound", "Classical.choice"})
+
+#: Captures allowed before a moving artifact tree is reported as a failure.
+_ENVIRONMENT_CAPTURE_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +453,7 @@ class LeanProject:
         init=False,
         repr=False,
     )
-    _environment_fingerprint: tuple[tuple[str, int, int], ...] | None = field(
+    _environment_fingerprint: EnvironmentFingerprint | None = field(
         default=None,
         init=False,
         repr=False,
@@ -733,6 +737,28 @@ class LeanProject:
             )
         return list(self._module_paths)
 
+    def _capture_environment(self, lean: Path) -> tuple[ProofEnvironment, EnvironmentFingerprint]:
+        """Capture the closure identity and a fingerprint that bounds it.
+
+        Hashing the closure reads every compiled artifact and takes seconds.
+        A write landing inside that window would be hashed on one side and
+        stat-recorded on the other, pairing a digest with a fingerprint that
+        outlives it: every later refresh would then match the fingerprint,
+        skip the re-hash, and keep certifying a closure that no longer
+        exists. Bracketing the hash with the fingerprint makes such a write
+        visible, and a tree that will not hold still fails closed.
+        """
+        for _ in range(_ENVIRONMENT_CAPTURE_ATTEMPTS):
+            before = environment_fingerprint(self.root, lean)
+            environment = capture_proof_environment(self.root, lean)
+            after = environment_fingerprint(self.root, lean)
+            if before == after:
+                return environment, after
+        raise ProofEnvironmentError(
+            "the proof closure changed while its identity was captured; "
+            "stop concurrent builds of this project and retry"
+        )
+
     def proof_environment(self, *, refresh: bool = False) -> ProofEnvironment:
         """Return the content identity of the installed proof closure.
 
@@ -741,14 +767,10 @@ class LeanProject:
         content.
         """
         lean = self._resolved_lean()
-        if self._proof_environment is None:
-            self._proof_environment = capture_proof_environment(self.root, lean)
-            self._environment_fingerprint = environment_fingerprint(self.root, lean)
-        elif refresh:
-            fingerprint = environment_fingerprint(self.root, lean)
-            if fingerprint != self._environment_fingerprint:
-                self._proof_environment = capture_proof_environment(self.root, lean)
-                self._environment_fingerprint = fingerprint
+        if self._proof_environment is None or (
+            refresh and environment_fingerprint(self.root, lean) != self._environment_fingerprint
+        ):
+            self._proof_environment, self._environment_fingerprint = self._capture_environment(lean)
         return self._proof_environment
 
     def _environment_mismatch(self, expected: str) -> BuildResult | None:

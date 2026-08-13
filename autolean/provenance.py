@@ -10,6 +10,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+#: One (path, size, mtime_ns) row per artifact the closure identity hashes.
+EnvironmentFingerprint = tuple[tuple[str, int, int], ...]
+
 _ENVIRONMENT_DOMAIN = b"autolean-proof-environment-v1\0"
 _LEAN_ARTIFACT_SUFFIXES = frozenset({".olean", ".so", ".dylib", ".dll"})
 _PROJECT_CONFIGS = ("lean-toolchain", "lake-manifest.json", "lakefile.lean", "lakefile.toml")
@@ -89,7 +92,7 @@ def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironmen
     )
 
 
-def environment_fingerprint(project_root: Path, lean: Path) -> tuple[tuple[str, int, int], ...]:
+def environment_fingerprint(project_root: Path, lean: Path) -> EnvironmentFingerprint:
     """Return a (path, size, mtime) stat identity for the same artifact set
     hashed by capture_proof_environment.
 

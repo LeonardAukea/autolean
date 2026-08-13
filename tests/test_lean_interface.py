@@ -14,6 +14,7 @@ from autolean.lean_interface import (
     _parse_declaration_audit,
     _parse_diagnostics,
 )
+from autolean.provenance import ProofEnvironment, ProofEnvironmentError
 
 # ---------------------------------------------------------------------------
 # _parse_diagnostics
@@ -529,3 +530,196 @@ class TestProofEnvironmentCaching:
 
         assert captures == 2
         assert changed.sha256 != first.sha256
+
+    def test_a_write_during_the_capture_is_not_absorbed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean import provenance
+        from tests.test_provenance import _environment
+
+        project_dir, lean = _environment(tmp_path)
+        monkeypatch.setattr(provenance, "_read_lean_version", lambda _: "Lean (version 4.33.0)")
+        monkeypatch.setattr(lean_interface, "_resolve_lean", lambda _: lean)
+        artifact = (
+            project_dir
+            / ".lake"
+            / "packages"
+            / "mathlib"
+            / ".lake"
+            / "build"
+            / "lib"
+            / "lean"
+            / "Mathlib.olean"
+        )
+        real_capture = lean_interface.capture_proof_environment
+        writes = 0
+
+        def capture_while_a_build_writes(root: Path, lean_path: Path) -> ProofEnvironment:
+            nonlocal writes
+            environment = real_capture(root, lean_path)
+            if writes == 0:
+                writes += 1
+                artifact.write_bytes(b"olean-rewritten-mid-hash")
+            return environment
+
+        monkeypatch.setattr(
+            lean_interface,
+            "capture_proof_environment",
+            capture_while_a_build_writes,
+        )
+        project = lean_interface.LeanProject(project_dir)
+
+        settled = project.proof_environment()
+
+        assert settled.sha256 == real_capture(project_dir, lean).sha256
+        assert project.proof_environment(refresh=True).sha256 == settled.sha256
+
+    def test_a_tree_that_never_settles_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean import provenance
+        from tests.test_provenance import _environment
+
+        project_dir, lean = _environment(tmp_path)
+        monkeypatch.setattr(provenance, "_read_lean_version", lambda _: "Lean (version 4.33.0)")
+        monkeypatch.setattr(lean_interface, "_resolve_lean", lambda _: lean)
+        artifact = (
+            project_dir
+            / ".lake"
+            / "packages"
+            / "mathlib"
+            / ".lake"
+            / "build"
+            / "lib"
+            / "lean"
+            / "Mathlib.olean"
+        )
+        real_capture = lean_interface.capture_proof_environment
+        rewrites = 0
+
+        def capture_while_a_build_never_stops(root: Path, lean_path: Path) -> ProofEnvironment:
+            nonlocal rewrites
+            environment = real_capture(root, lean_path)
+            rewrites += 1
+            artifact.write_bytes(b"olean-rewritten-" + str(rewrites).encode())
+            return environment
+
+        monkeypatch.setattr(
+            lean_interface,
+            "capture_proof_environment",
+            capture_while_a_build_never_stops,
+        )
+        project = lean_interface.LeanProject(project_dir)
+
+        with pytest.raises(ProofEnvironmentError, match="changed while its identity was captured"):
+            project.proof_environment()
+
+
+class TestEnvironmentIdentityGate:
+    """A closure that moves during validation must not yield an accepted proof."""
+
+    @pytest.fixture()
+    def project(self, tmp_path: Path) -> LeanProject:
+        (tmp_path / "lakefile.lean").write_text("-- lakefile\n", encoding="utf-8")
+        return LeanProject(tmp_path)
+
+    def _accepting(self, project: LeanProject, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            project,
+            "_check_untrusted_declaration",
+            lambda lean_file, content, timeout, declaration, declaration_line: BuildResult(
+                success=True,
+                axioms=(),
+            ),
+        )
+
+    def _environment(self, sha256: str) -> ProofEnvironment:
+        return ProofEnvironment(
+            sha256=sha256,
+            lean_version="Lean (version 4.33.0)",
+            lean_toolchain="leanprover/lean4:v4.33.0",
+            manifest_sha256="b" * 64,
+            artifact_count=1,
+            dependencies=(),
+        )
+
+    def test_a_changed_closure_rejects_an_otherwise_valid_candidate(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "T.lean"
+        source.write_text("original")
+        self._accepting(project, monkeypatch)
+        monkeypatch.setattr(
+            project,
+            "proof_environment",
+            lambda **kwargs: self._environment("b" * 64),
+        )
+
+        result = project.validate_candidate(
+            source,
+            "theorem target : True := by trivial",
+            declaration="T.target",
+            declaration_line=1,
+            expected_environment="a" * 64,
+        )
+
+        assert not result.success
+        assert "proof environment changed during validation" in result.stderr
+
+    def test_an_unchanged_closure_accepts(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "T.lean"
+        source.write_text("original")
+        self._accepting(project, monkeypatch)
+        monkeypatch.setattr(
+            project,
+            "proof_environment",
+            lambda **kwargs: self._environment("a" * 64),
+        )
+
+        result = project.validate_candidate(
+            source,
+            "theorem target : True := by trivial",
+            declaration="T.target",
+            declaration_line=1,
+            expected_environment="a" * 64,
+        )
+
+        assert result.success
+
+    def test_an_unidentifiable_closure_rejects(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "T.lean"
+        source.write_text("original")
+        self._accepting(project, monkeypatch)
+
+        def unidentifiable(**kwargs: object) -> ProofEnvironment:
+            raise ProofEnvironmentError("lake-manifest.json is required")
+
+        monkeypatch.setattr(project, "proof_environment", unidentifiable)
+
+        result = project.validate_candidate(
+            source,
+            "theorem target : True := by trivial",
+            declaration="T.target",
+            declaration_line=1,
+            expected_environment="a" * 64,
+        )
+
+        assert not result.success
+        assert "proof environment identification failed" in result.stderr
