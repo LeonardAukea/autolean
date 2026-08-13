@@ -397,3 +397,34 @@ def test_a_structural_verdict_is_re_examined_after_an_edit(
 
     assert agent._check_file_health(source, repaired) is None
     assert checks == 2
+
+
+def test_a_skipped_attempt_records_no_prompt_it_never_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt that returns before the model must not inherit evidence."""
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    fields = {
+        "file": source,
+        "line": 2,
+        "col": 2,
+        "decl_name": "target",
+        "decl_line": 1,
+        "context_before": "theorem target : True := by",
+        "context_after": "",
+        "rel_path": "AutoLean/Target.lean",
+    }
+
+    reached = agent._try_fill_sorry(1, SorryTarget(**fields, qualified_decl_name="target"), 1)
+    assert reached.prompt_sha256
+    assert reached.llm_input_tokens > 0
+
+    unnamed = agent._try_fill_sorry(2, SorryTarget(**fields, qualified_decl_name=""), 2)
+
+    assert unnamed.outcome is Outcome.SKIPPED
+    assert unnamed.prompt_sha256 == ""
+    assert unnamed.strategy_sha256 == ""
+    assert unnamed.structural_context_sha256 == ""
+    assert unnamed.llm_input_tokens == 0
