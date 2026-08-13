@@ -48,7 +48,9 @@ backend: a reviewed mathematical plan, an isolated formalization compiled
 before proof search, a bounded proof session, and a kernel-checked commit
 exported as a standalone Lean project. It adds one `--guide` fixing the
 geometric statement and the Mathlib lemma that closes it, so the run is
-reproducible; the VHS source holds the exact command. A second recording
+reproducible; the VHS source holds the exact command. Playback runs at
+four times speed — the session behind it takes minutes, most of them
+spent in Lean. A second recording
 [audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
 (arXiv:2506.18616v5) —
 [MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·

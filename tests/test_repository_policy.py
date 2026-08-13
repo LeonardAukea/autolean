@@ -97,3 +97,17 @@ def test_pypi_publication_requires_a_named_immutable_release() -> None:
     assert 'gh release verify "$RELEASE_TAG"' in workflow
     assert 'gh attestation verify "$dist"' in workflow
     assert "--signer-workflow" in workflow
+
+
+def test_the_recorded_demonstration_runs_the_documented_command() -> None:
+    """The front page, the tutorial, and the tape name one command."""
+    quickstart = 'autolean prove "the Pythagorean theorem" --review-plan'
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    tutorial = (ROOT / "docs" / "tutorials" / "first-proof.md").read_text(encoding="utf-8")
+    tape = (ROOT / "docs" / "demos" / "pythagorean.tape").read_text(encoding="utf-8")
+
+    assert quickstart in readme
+    assert quickstart in tutorial
+    recorded = [line for line in tape.splitlines() if "autolean prove" in line]
+    assert len(recorded) == 1
+    assert quickstart in recorded[0]

@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from autolean.paper import fetch_arxiv
+from autolean.scanner import count_sorries
 
 ARXIV_ID = "2506.18616v5"
 PDF_SHA256 = "39db363898dfb4a51c0e344a6154f76dd6c3e8768a414d516853e6cdc12dfe2d"
@@ -237,7 +237,7 @@ def _assert_export(root: Path) -> None:
     text = evidence.read_text(encoding="utf-8")
     if "import Mathlib.Probability.ProductMeasure" not in text:
         raise SystemExit("demo evidence does not use the reviewed import closure")
-    if re.search(r"(?m)^[ \t]*sorry\b", text):
+    if count_sorries(text):
         raise SystemExit("demo evidence contains a proof placeholder")
 
 
@@ -328,7 +328,7 @@ def _run_check(workspace: DemoWorkspace) -> None:
     _assert_demo(workspace.root)
 
 
-def _recording_environment(workspace: DemoWorkspace) -> dict[str, str]:
+def recording_environment(**demo_variables: str) -> dict[str, str]:
     """Build the environment VHS hands to the recorded shell.
 
     A color-suppressing variable inherited from the invoking session would
@@ -337,12 +337,7 @@ def _recording_environment(workspace: DemoWorkspace) -> dict[str, str]:
     environment = os.environ.copy()
     for name in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
         environment.pop(name, None)
-    environment.update(
-        {
-            "AUTOLEAN_DEMO_ROOT": str(workspace.root),
-            "AUTOLEAN_DEMO_PDF": str(workspace.pdf),
-        }
-    )
+    environment.update(demo_variables)
     return environment
 
 
@@ -350,7 +345,10 @@ def _record(repository: Path, workspace: DemoWorkspace) -> None:
     """Render the GIF and MP4 from the versioned live VHS tape."""
     if shutil.which("vhs") is None:
         raise SystemExit("vhs is unavailable; enter `nix develop`")
-    environment = _recording_environment(workspace)
+    environment = recording_environment(
+        AUTOLEAN_DEMO_ROOT=str(workspace.root),
+        AUTOLEAN_DEMO_PDF=str(workspace.pdf),
+    )
     subprocess.run(
         ["vhs", "docs/demos/ionescu-tulcea.tape"],
         cwd=repository,

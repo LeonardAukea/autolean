@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +12,8 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+from autolean.scanner import count_sorries
 
 try:
     from scripts.record_paper_demo import (
@@ -22,6 +23,7 @@ try:
         _file_identity,
         _initialize_repository,
         _sha256,
+        recording_environment,
     )
 except ImportError:
     from record_paper_demo import (  # type: ignore[no-redef]
@@ -31,6 +33,7 @@ except ImportError:
         _file_identity,
         _initialize_repository,
         _sha256,
+        recording_environment,
     )
 
 STATEMENT = "the Pythagorean theorem"
@@ -98,7 +101,7 @@ def _assert_generated(root: Path) -> Path:
     text = sources[0].read_text(encoding="utf-8")
     if "theorem " not in text:
         raise SystemExit("demo evidence contains no theorem declaration")
-    if re.search(r"(?m)^[ \t]*sorry\b", text):
+    if count_sorries(text):
         raise SystemExit("demo evidence contains a proof placeholder")
     return sources[0]
 
@@ -114,7 +117,7 @@ def _assert_export(root: Path) -> None:
     sources = sorted(project.rglob("Generated/*.lean"))
     if len(sources) != 1:
         raise SystemExit(f"demo export contains an unexpected Lean source set: {sources}")
-    if re.search(r"(?m)^[ \t]*sorry\b", sources[0].read_text(encoding="utf-8")):
+    if count_sorries(sources[0].read_text(encoding="utf-8")):
         raise SystemExit("demo export contains a proof placeholder")
 
 
@@ -122,6 +125,21 @@ def _assert_demo(root: Path) -> None:
     _assert_session(root)
     _assert_generated(root)
     _assert_export(root)
+
+
+def _playback_speed(tape: Path) -> float:
+    """Read the factor by which the tape plays its recording back."""
+    for line in tape.read_text(encoding="utf-8").splitlines():
+        if line.startswith("Set PlaybackSpeed"):
+            return float(line.split()[-1])
+    return 1.0
+
+
+def _session_seconds(session: dict[str, object]) -> float:
+    """Return the wall-clock time the recorded proof session took."""
+    started = datetime.fromisoformat(str(session["created_at"]))
+    ended = datetime.fromisoformat(str(session["updated_at"]))
+    return round((ended - started).total_seconds(), 3)
 
 
 def _write_demo_manifest(repository: Path, root: Path) -> Path:
@@ -132,6 +150,7 @@ def _write_demo_manifest(repository: Path, root: Path) -> Path:
         repository / "docs" / "assets" / "autolean-pythagorean.gif",
         repository / "docs" / "assets" / "autolean-pythagorean.mp4",
     ]
+    tape = repository / "docs" / "demos" / "pythagorean.tape"
     record = {
         "backend": session["backend"],
         "export_manifest_sha256": _sha256(root / EXPORT_DIRECTORY / "manifest.json"),
@@ -139,11 +158,13 @@ def _write_demo_manifest(repository: Path, root: Path) -> Path:
         "generated_sha256": _sha256(generated),
         "media": [_file_identity(path) for path in media],
         "model": session["model"],
+        "playback_speed": _playback_speed(tape),
         "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "schema": "autolean.demo.v1",
         "session": session["id"],
+        "session_seconds": _session_seconds(session),
         "statement": STATEMENT,
-        "tape_sha256": _sha256(repository / "docs" / "demos" / "pythagorean.tape"),
+        "tape_sha256": _sha256(tape),
     }
     path = repository / "docs" / "demos" / "pythagorean.json"
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -188,21 +209,6 @@ def _run_prove(root: Path) -> None:
     _assert_demo(root)
 
 
-def _recording_environment(root: Path) -> dict[str, str]:
-    """Build the environment VHS hands to the recorded shell.
-
-    A color-suppressing variable inherited from the invoking session would
-    strip the CLI theme from the published media.
-    """
-    import os
-
-    environment = os.environ.copy()
-    for name in ("NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
-        environment.pop(name, None)
-    environment["AUTOLEAN_DEMO_ROOT"] = str(root)
-    return environment
-
-
 def _record(repository: Path, root: Path) -> None:
     """Render the GIF and MP4 from the versioned live VHS tape."""
     if shutil.which("vhs") is None:
@@ -210,7 +216,7 @@ def _record(repository: Path, root: Path) -> None:
     subprocess.run(
         ["vhs", "docs/demos/pythagorean.tape"],
         cwd=repository,
-        env=_recording_environment(root),
+        env=recording_environment(AUTOLEAN_DEMO_ROOT=str(root)),
         check=True,
         timeout=2400,
     )

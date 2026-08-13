@@ -31,7 +31,7 @@ Show
 
 Type `autolean prove "the Pythagorean theorem" --review-plan --guide "State it geometrically: for points p1 p2 p3 in a Euclidean affine space with angle p1 p2 p3 = pi / 2, dist p1 p3 ^ 2 = dist p1 p2 ^ 2 + dist p2 p3 ^ 2. Close with Mathlib's EuclideanGeometry.dist_sq_eq_dist_sq_add_dist_sq_iff_angle_eq_pi_div_two." --max-attempts 5`
 Enter
-Wait@240s /Use this plan?/
+Wait@600s /Use this plan?/
 Sleep 4s
 Type "y"
 Enter
@@ -64,10 +64,11 @@ Sleep 8s
 Type "clear"
 Enter
 Sleep 1s
-Type `find pythagorean-artifact -maxdepth 3 -type f | sort`
+Type `find pythagorean-artifact -maxdepth 4 -type f | sort`
 Enter
 Sleep 7s
 
-Type `cd workspace && lake env lean AutoLean/Generated/*.lean`
+Type `cd workspace && lake env lean AutoLean/Generated/*.lean && echo "Lean accepted the proof"`
 Enter
-Sleep 10s
+Wait@300s /Lean accepted the proof/
+Sleep 5s
