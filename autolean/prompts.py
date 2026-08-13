@@ -1,5 +1,64 @@
 """System prompts for the LLM — the agent's Lean 4 expertise."""
 
+from __future__ import annotations
+
+#: Tactic names this project recognises. A name outside this set is not a
+#: tactic — it is a branch label, a hypothesis, or a hallucination — and must
+#: never be handed back to the model as one to reuse.
+LEAN_TACTICS = frozenset(
+    {
+        "aesop",
+        "apply",
+        "assumption",
+        "by_cases",
+        "by_contra",
+        "calc",
+        "cases",
+        "constructor",
+        "contradiction",
+        "conv",
+        "decide",
+        "exact",
+        "exists",
+        "ext",
+        "field_simp",
+        "funext",
+        "have",
+        "induction",
+        "intro",
+        "intros",
+        "left",
+        "let",
+        "linarith",
+        "nlinarith",
+        "norm_cast",
+        "norm_num",
+        "obtain",
+        "omega",
+        "positivity",
+        "push_cast",
+        "rcases",
+        "refine",
+        "rfl",
+        "right",
+        "ring",
+        "ring_nf",
+        "rintro",
+        "rw",
+        "rwa",
+        "show",
+        "simp",
+        "simp_all",
+        "simpa",
+        "split",
+        "subst",
+        "tauto",
+        "trivial",
+        "unfold",
+        "use",
+    }
+)
+
 SYSTEM_PROMPT = """\
 You are an expert Lean 4 theorem prover. Your job is to fill in `sorry` \
 placeholders with valid proofs.
