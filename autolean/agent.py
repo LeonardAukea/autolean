@@ -307,10 +307,10 @@ class AutoLeanAgent:
         # Consecutive equal error categories stop an unproductive target.
         self._error_history: dict[str, list[ErrorCategory]] = {}
 
-        # File health cache: files known to have structural (non-sorry) errors.
-        # Targets in these files are skipped until the file is repaired.
-        self._unhealthy_files: dict[Path, str] = {}  # file -> reason
-        self._healthy_files: dict[Path, str] = {}  # file -> content sha256
+        # Structural verdict per file, keyed by the content it was reached
+        # from: (content sha256, reason or None). Targets in a file holding a
+        # reason are skipped until an edit changes that content.
+        self._file_health: dict[Path, tuple[str, str | None]] = {}
 
         # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
@@ -391,24 +391,23 @@ class AutoLeanAgent:
         or an error description if the file is structurally broken.
 
         This prevents wasting LLM retries on targets in corrupted files
-        (e.g., imports inserted mid-file by gap-filling). The verdict is a
-        function of the file bytes, so each content identity compiles at
-        most once.
+        (e.g., imports inserted mid-file by gap-filling). Both verdicts are
+        a function of the file bytes, so each content identity compiles at
+        most once and an edit is examined afresh.
         """
-        if lean_file in self._unhealthy_files:
-            return self._unhealthy_files[lean_file]
         content_sha256 = sha256_text(content)
-        if self._healthy_files.get(lean_file) == content_sha256:
-            return None
+        remembered = self._file_health.get(lean_file)
+        if remembered is not None and remembered[0] == content_sha256:
+            return remembered[1]
 
         result = self.project.check_file(lean_file, timeout=60, untrusted=True)
         for diag in result.errors:
             cat = classify_error(diag.message)
             if cat in STRUCTURAL_ERRORS:
                 reason = f"{cat.value}: {diag.message[:120]}"
-                self._unhealthy_files[lean_file] = reason
+                self._file_health[lean_file] = (content_sha256, reason)
                 return reason
-        self._healthy_files[lean_file] = content_sha256
+        self._file_health[lean_file] = (content_sha256, None)
         return None
 
     def _should_bail_repeated_error(self, target_id: str) -> bool:
@@ -1352,8 +1351,6 @@ class AutoLeanAgent:
             self._failed_proofs.pop(target.id, None)
             self._last_error.pop(target.id, None)
             self._error_history.pop(target.id, None)
-            # Clear unhealthy status for this file (proof success = file is OK)
-            self._unhealthy_files.pop(file_path, None)
 
             self._step("Committing to git + collecting training data", "green")
             self.collector.record_attempt(record, proof)
@@ -1385,8 +1382,11 @@ class AutoLeanAgent:
                     "red",
                 )
                 self._attempts[target.id] = self.config.max_retries_per_sorry
-                # Mark file as unhealthy so other targets in it are skipped too
-                self._unhealthy_files[file_path] = f"{cat.value}: {error_summary[:120]}"
+                # Every other target in this file shares the broken structure.
+                self._file_health[file_path] = (
+                    sha256_text(original_content),
+                    f"{cat.value}: {error_summary[:120]}",
+                )
 
             # Auto-detect missing definitions and try to fill gaps
             # (only for non-structural errors, and with validation)
