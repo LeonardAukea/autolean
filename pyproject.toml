@@ -34,7 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-lean = ["lean-interact>=0.11.5"]
 pdf = [
     "pymupdf>=1.28.2",
     "pymupdf4llm>=1.28.2",
@@ -53,7 +52,6 @@ dev = [
     "types-PyYAML>=6.0.12.20260724",
 ]
 all = [
-    "lean-interact>=0.11.5",
     "pymupdf>=1.28.2",
     "pymupdf4llm>=1.28.2",
     "anthropic>=0.121.0",
