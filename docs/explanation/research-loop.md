@@ -83,6 +83,34 @@ The switch is bounded to one per invocation. It retains the plan, target,
 attempt budget, and recorded evidence. Model size is a resource decision, not
 a substitute for repairing the formalization.
 
+## Success compounds into skills
+
+An accepted proof also changes future questions. The skill memory extracts
+the proof's tactic sequence, names the pattern it instantiates — computation
+by `rfl`, simplification, induction with case analysis, arithmetic closure —
+and persists a small record: the tactics, an applicability condition, the
+theorem that produced it, and success counts.
+
+Before each attempt, stored skills are ranked against the current goal state
+by keyword relevance weighted by historical success rate; the strongest few
+enter the prompt as named patterns. A pattern that keeps closing goals rises.
+A pattern that stops working fades.
+
+```mermaid
+flowchart LR
+    accepted["accepted proof"] --> extract["extract tactic<br/>sequence"]
+    extract --> classify["name the<br/>pattern"]
+    classify --> store[("skill record:<br/>tactics, condition,<br/>success counts")]
+    store --> rank["rank against the<br/>next goal state"]
+    rank --> inject["strongest patterns<br/>enter the prompt"]
+    inject --> validate["candidate validated by<br/>policy, sandbox, Lean"]
+    validate -- "accepted" --> store
+```
+
+Skills are evidence, not authority. An injected pattern can only shape a
+proposal; the candidate it shapes passes the same source policy, sandbox,
+elaboration, and audit as any other ([trust boundary](trust-boundary.md)).
+
 ## Sessions outlive commands
 
 Every mutating workflow writes an atomic session record in the Lean project;

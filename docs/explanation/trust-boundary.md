@@ -1,7 +1,12 @@
 # Trust boundary
 
-AutoLean runs code written by a model. Correctness starts by treating that
-code as hostile.
+AutoLean runs code written by a model. The product of a run is an auditable
+derivation: exact source bytes, a pinned Lean and Mathlib closure, and a
+recorded identity for every accepted proof — the
+[environment reference](../reference/environment.md) states that record. This
+page defines the boundary that keeps the record trustworthy while generated
+code executes: what is trusted, what is data, and which layer owns each
+rejection.
 
 ## Inputs and authority
 
