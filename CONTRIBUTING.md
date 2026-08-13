@@ -89,6 +89,12 @@ Sandbox: Bind candidate source to its audit
 The body explains the problem and the constraint that shapes the change. Keep
 the subject near 50 columns and wrap the body at 72.
 
+One person contributes under one identity. [`.mailmap`](.mailmap) maps every
+address that appears in this repository to its canonical name and address; add
+an entry there when you commit from a new address. Credit model assistance with
+an unqualified `Co-Authored-By: Claude <noreply@anthropic.com>` trailer, whose
+name carries no model or version.
+
 A pull request should state its invariant, user-visible effect, verification,
 and remaining qualification boundary. Keep unrelated changes in separate pull
 requests.
