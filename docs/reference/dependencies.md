@@ -14,7 +14,6 @@ optional provider and document runtimes:
 | `autolean-proof[pdf]` | PyMuPDF4LLM and PyMuPDF Layout PDF extraction |
 | `autolean-proof[anthropic]` | Anthropic API provider |
 | `autolean-proof[openai]` | OpenAI API provider |
-| `autolean-proof[lean]` | `lean-interact` integration |
 | `autolean-proof[all]` | Every optional runtime above |
 
 For a uv checkout, install the locked PDF stack with:
