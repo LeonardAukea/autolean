@@ -332,3 +332,28 @@ def test_structural_context_and_prompt_identity_reach_the_experiment(
     assert record.llm_input_tokens == 42
     assert len(record.prompt_sha256) == 64
     assert len(record.structural_context_sha256) == 64
+
+
+def test_healthy_file_checks_compile_once_per_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    checks = 0
+
+    def counting_check(*args: object, **kwargs: object) -> BuildResult:
+        nonlocal checks
+        checks += 1
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(agent.project, "check_file", counting_check)
+    content = source.read_text(encoding="utf-8")
+
+    assert agent._check_file_health(source, content) is None
+    assert agent._check_file_health(source, content) is None
+    assert checks == 1
+
+    changed = content + "\n-- edited\n"
+    assert agent._check_file_health(source, changed) is None
+    assert checks == 2
