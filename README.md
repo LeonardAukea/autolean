@@ -27,25 +27,30 @@ faithfully expresses an informal claim.
 
 <p align="center">
   <img
-    src="docs/assets/autolean-ionescu-tulcea.gif"
-    alt="AutoLean audits the Ionescu-Tulcea formalization paper"
+    src="docs/assets/autolean-pythagorean.gif"
+    alt="AutoLean proves the Pythagorean theorem from natural language"
     width="960"
   >
 </p>
 
 <p align="center">
-  <a href="docs/assets/autolean-ionescu-tulcea.mp4">MP4</a>
+  <a href="docs/assets/autolean-pythagorean.mp4">MP4</a>
   ·
-  <a href="docs/demos/ionescu-tulcea.tape">VHS source</a>
+  <a href="docs/demos/pythagorean.tape">VHS source</a>
   ·
-  <a href="docs/demos/ionescu-tulcea.json">Run manifest</a>
+  <a href="docs/demos/pythagorean.json">Run manifest</a>
 </p>
 
-The recording audits a real formalization paper (arXiv:2506.18616v5) with the
-configured Claude backend: provider-planned claim extraction, human revision,
-sandboxed elaboration of every mapped declaration, and a standalone Lean and
-LaTeX export. The tape holds the live command; the manifest identifies the
-run.
+The recording runs the front-page command live with the configured Claude
+backend: a reviewed mathematical plan, an isolated formalization compiled
+before proof search, a bounded proof session, and a kernel-checked commit
+exported as a standalone Lean project. A second recording
+[audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
+(arXiv:2506.18616v5) —
+[MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·
+[VHS source](docs/demos/ionescu-tulcea.tape) ·
+[run manifest](docs/demos/ionescu-tulcea.json). Each tape holds the live
+command; each manifest identifies the run.
 
 ## Start here
 
@@ -88,8 +93,10 @@ stays the working path.
   manifest, and companion LaTeX paper.
 
 Every mutating workflow records a resumable session and runs under an explicit
-cycle budget. The [research loop](docs/explanation/research-loop.md) explains
-how plans, experiments, and failure evidence drive each cycle.
+cycle budget. The loop learns from both outcomes: classified failure evidence
+redirects the next attempt, and each accepted proof becomes a ranked skill
+offered to later prompts. The
+[research loop](docs/explanation/research-loop.md) explains the full cycle.
 
 ## How a proof gets accepted
 
