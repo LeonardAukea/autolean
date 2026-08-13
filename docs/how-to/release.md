@@ -51,16 +51,18 @@ CI builds the source distribution and wheel twice with the commit timestamp as
 `SOURCE_DATE_EPOCH`. Their SHA-256 values must match between builds. CI also
 audits the locked dependency graph and emits a CycloneDX SBOM.
 
-Regenerate the README demonstration when its command or output changes:
+Regenerate a recorded demonstration when its command or output changes:
 
 ```bash
-python scripts/record_paper_demo.py
+python scripts/record_prove_demo.py    # README front page
+python scripts/record_paper_demo.py    # paper audit
 ```
 
-The recorder requires the configured live provider. It verifies the exact PDF,
-checks the accepted evidence and export, then drives the versioned VHS tape.
-The recorder and tape contain the command and human review guidance. Provider
-responses enter the generated provenance records at runtime.
+Each recorder requires the configured live provider. It verifies the input
+identity, checks the accepted evidence and export, then drives the versioned
+VHS tape. The recorder and tape contain the command and any human review
+guidance. Provider responses enter the generated provenance records at
+runtime.
 
 ## 3. Merge through the required gate
 
