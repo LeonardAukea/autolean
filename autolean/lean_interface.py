@@ -78,6 +78,19 @@ CORE_LOGICAL_AXIOMS = frozenset({"propext", "Quot.sound", "Classical.choice"})
 #: Captures allowed before a moving artifact tree is reported as a failure.
 _ENVIRONMENT_CAPTURE_ATTEMPTS = 3
 
+#: Elaboration options the sandbox imposes on a candidate.
+#:
+#: Lake applies a project's `leanOptions` and the sandbox invokes the Lean
+#: binary directly, so an option left at its default here would judge a
+#: candidate under rules the project does not use. `autoImplicit` is the one
+#: that changes what a statement means: left on, an identifier the author
+#: never bound becomes a fresh implicit argument, so `(h : n = m)` with `m`
+#: undefined elaborates as a theorem quantified over `m` — accepted here and
+#: rejected by the project build.
+SANDBOX_LEAN_OPTIONS = ("autoImplicit=false",)
+
+_LEAN_OPTION_ARGS = tuple(argument for option in SANDBOX_LEAN_OPTIONS for argument in ("-D", option))
+
 
 # ---------------------------------------------------------------------------
 # Diagnostic parser
@@ -85,8 +98,11 @@ _ENVIRONMENT_CAPTURE_ATTEMPTS = 3
 
 # Lean outputs diagnostics like:
 # ./AutoLean/Sandbox.lean:10:4: error: unsolved goals ...
+# Lean tags some diagnostics with the rule that raised them, as in
+# `error(lean.unknownIdentifier):`. An untagged severity is still the common
+# form, so the tag is optional and is not captured.
 _DIAG_RE = re.compile(
-    r"^(.+?):(\d+):(\d+):\s*(error|warning|info):\s*(.*)",
+    r"^(.+?):(\d+):(\d+):\s*(error|warning|info)(?:\([^)\r\n]*\))?:\s*(.*)",
     re.MULTILINE,
 )
 
@@ -809,6 +825,7 @@ class LeanProject:
             str(lean),
             "-R",
             str(scratch),
+            *_LEAN_OPTION_ARGS,
             "-o",
             str(candidate.with_suffix(".olean")),
             "-i",
