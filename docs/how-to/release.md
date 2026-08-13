@@ -169,7 +169,24 @@ identity recorded in every accepted result.
 Repository visibility is governed by the separate
 [public launch gate](open-the-repository.md).
 
-## 5. Publish the Python distribution
+## 5. Point the Homebrew formula at the release
+
+The formula pins one immutable release by URL and SHA-256, so it names a
+prior release until it is moved:
+
+```bash
+python scripts/update_formula.py <tag>
+brew update-python-resources Formula/autolean.rb   # only when a runtime
+                                                   # dependency changed
+brew style Formula/autolean.rb
+brew install --build-from-source Formula/autolean.rb
+brew test autolean
+```
+
+A policy test fails when a runtime dependency has no matching resource, so
+the formula cannot silently stop installing.
+
+## 6. Publish the Python distribution
 
 Python publication is an explicit maintainer action from an immutable GitHub
 release. The distribution name is `autolean-proof` and the installed command

@@ -10,7 +10,8 @@ optional provider and document runtimes:
 
 | Installation | Capability |
 | --- | --- |
-| `autolean-proof` | CLI, workbench, subscription CLIs, HTML papers, Lean structure |
+| `autolean-proof` | CLI, workbench, subscription CLIs, HTML papers |
+| `autolean-proof[structure]` | Tree-sitter structural context for prompts |
 | `autolean-proof[pdf]` | PyMuPDF4LLM and PyMuPDF Layout PDF extraction |
 | `autolean-proof[anthropic]` | Anthropic API provider |
 | `autolean-proof[openai]` | OpenAI API provider |

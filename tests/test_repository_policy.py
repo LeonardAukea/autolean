@@ -111,3 +111,31 @@ def test_the_recorded_demonstration_runs_the_documented_command() -> None:
     recorded = [line for line in tape.splitlines() if "autolean prove" in line]
     assert len(recorded) == 1
     assert quickstart in recorded[0]
+
+
+def _formula() -> str:
+    return (ROOT / "Formula" / "autolean.rb").read_text(encoding="utf-8")
+
+
+def test_the_formula_installs_this_distribution() -> None:
+    formula = _formula()
+
+    assert 'url "https://github.com/LeonardAukea/autolean/releases/download/' in formula
+    assert re.search(r'(?m)^  sha256 "[0-9a-f]{64}"$', formula)
+    assert "autolean_proof-" in formula
+    assert 'depends_on "elan-init"' in formula
+
+
+def test_the_formula_carries_every_runtime_dependency() -> None:
+    """A dependency added without a resource makes the formula uninstallable."""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    block = re.search(r"(?ms)^dependencies = \[(.*?)^\]", pyproject)
+    assert block is not None
+    required = {
+        re.split(r"[><=!~\[]", name)[0].strip().lower().replace("_", "-")
+        for name in re.findall(r'"([^"]+)"', block.group(1))
+    }
+    resources = {name.lower() for name in re.findall(r'(?m)^  resource "([^"]+)" do$', _formula())}
+
+    assert required, "no runtime dependencies were parsed"
+    assert required <= resources, f"formula has no resource for: {sorted(required - resources)}"
