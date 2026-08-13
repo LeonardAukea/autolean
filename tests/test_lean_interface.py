@@ -69,6 +69,23 @@ class TestParseDiagnostics:
         output = "Build completed successfully.\nNo issues found.\n"
         assert _parse_diagnostics(output) == []
 
+    def test_tagged_severity(self) -> None:
+        """Lean names the rule that raised some diagnostics."""
+        output = "./Foo.lean:3:37: error(lean.unknownIdentifier): Unknown identifier `m`\n"
+        diags = _parse_diagnostics(output)
+        assert len(diags) == 1
+        assert diags[0].severity == "error"
+        assert diags[0].line == 3
+        assert diags[0].message == "Unknown identifier `m`"
+
+    def test_tagged_and_untagged_diagnostics_together(self) -> None:
+        output = (
+            "./A.lean:1:0: error(lean.unknownIdentifier): Unknown identifier `Foo`\n"
+            "./A.lean:5:2: warning: declaration uses 'sorry'\n"
+        )
+        diags = _parse_diagnostics(output)
+        assert [d.severity for d in diags] == ["error", "warning"]
+
     def test_info_severity(self) -> None:
         output = "./X.lean:1:0: info: something informational\n"
         diags = _parse_diagnostics(output)
