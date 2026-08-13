@@ -13,11 +13,13 @@
 </p>
 
 AutoLean turns a mathematical goal into a reviewable research plan, a Lean 4
-declaration, and a kernel-checked proof. It treats the model as an untrusted
-programmer: generated source is accepted only after a source policy, an
-operating-system sandbox, elaboration by a pinned Lean toolchain, and a
-declaration and axiom audit. What survives is committed with its provenance —
-model, prompt, environment, and axiom report.
+declaration, and a kernel-checked proof. Every accepted result is an auditable
+derivation: the exact Lean, Mathlib, and dependency closure, the model, the
+prompt layers, and the transitive axiom report are committed with the source,
+so the theorem can be re-checked in the same pinned environment. Acceptance
+itself is earned — a source policy, an operating-system sandbox, elaboration
+by the pinned toolchain, and a declaration and axiom audit stand between a
+model proposal and a commit.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
