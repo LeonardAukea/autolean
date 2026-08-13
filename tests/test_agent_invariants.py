@@ -357,3 +357,43 @@ def test_healthy_file_checks_compile_once_per_content(
     changed = content + "\n-- edited\n"
     assert agent._check_file_health(source, changed) is None
     assert checks == 2
+
+
+def test_a_structural_verdict_is_re_examined_after_an_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    broken = BuildResult(
+        success=False,
+        diagnostics=[
+            Diagnostic(
+                file=str(source),
+                line=1,
+                col=0,
+                severity="error",
+                message="'target' has already been declared",
+            )
+        ],
+    )
+    checks = 0
+    verdict = broken
+
+    def counting_check(*args: object, **kwargs: object) -> BuildResult:
+        nonlocal checks
+        checks += 1
+        return verdict
+
+    monkeypatch.setattr(agent.project, "check_file", counting_check)
+    content = source.read_text(encoding="utf-8")
+
+    assert agent._check_file_health(source, content) is not None
+    assert agent._check_file_health(source, content) is not None
+    assert checks == 1
+
+    verdict = BuildResult(success=True)
+    repaired = content + "\n-- repaired\n"
+
+    assert agent._check_file_health(source, repaired) is None
+    assert checks == 2
