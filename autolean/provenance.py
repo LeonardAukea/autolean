@@ -75,10 +75,7 @@ def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironmen
         toolchain_root / "lib" / "lean",
     )
 
-    module_roots = sorted(
-        path.resolve() for path in project_root.rglob("lib/lean") if path.is_dir() and ".lake" in path.parts
-    )
-    for root in module_roots:
+    for root in _module_roots(project_root):
         label = f"project/{root.relative_to(project_root)}"
         artifact_count += _hash_tree(digest, label, root)
 
@@ -90,6 +87,33 @@ def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironmen
         artifact_count=artifact_count,
         dependencies=dependencies,
     )
+
+
+def environment_fingerprint(project_root: Path, lean: Path) -> tuple[tuple[str, int, int], ...]:
+    """Return a (path, size, mtime) stat identity for the same artifact set
+    hashed by capture_proof_environment.
+
+    A holder of a captured ProofEnvironment may reuse it while the
+    fingerprint is unchanged: every change an on-disk build or editor can
+    make moves a size or mtime. Content changes that forge both are outside
+    the trust model, which treats the local project and toolchain as trusted
+    inputs; the recorded identity itself stays a pure content hash.
+    """
+    project_root = project_root.resolve()
+    lean = lean.resolve()
+    files: list[Path] = [lean]
+    for name in _PROJECT_CONFIGS:
+        path = project_root / name
+        if path.is_file():
+            files.append(path)
+    files.extend(_tree_files(lean.parent.parent / "lib" / "lean"))
+    for root in _module_roots(project_root):
+        files.extend(_tree_files(root))
+    entries: list[tuple[str, int, int]] = []
+    for path in files:
+        stat = path.stat()
+        entries.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return tuple(entries)
 
 
 def sha256_text(text: str) -> str:
@@ -144,12 +168,23 @@ def _dependency_pins(manifest: bytes) -> tuple[str, ...]:
     return tuple(sorted(pins))
 
 
-def _hash_tree(digest: _Digest, label: str, root: Path) -> int:
+def _module_roots(project_root: Path) -> list[Path]:
+    """Compiled dependency roots importable by the pinned Lean."""
+    return sorted(
+        path.resolve() for path in project_root.rglob("lib/lean") if path.is_dir() and ".lake" in path.parts
+    )
+
+
+def _tree_files(root: Path) -> list[Path]:
     if not root.is_dir():
-        return 0
-    files = sorted(
+        return []
+    return sorted(
         path for path in root.rglob("*") if path.is_file() and path.suffix in _LEAN_ARTIFACT_SUFFIXES
     )
+
+
+def _hash_tree(digest: _Digest, label: str, root: Path) -> int:
+    files = _tree_files(root)
     for path in files:
         _hash_file(digest, f"{label}/{path.relative_to(root)}", path)
     return len(files)

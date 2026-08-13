@@ -19,6 +19,7 @@ from autolean.provenance import (
     ProofEnvironment,
     ProofEnvironmentError,
     capture_proof_environment,
+    environment_fingerprint,
 )
 from autolean.scanner import _mask_lean_noncode, count_sorries
 
@@ -448,6 +449,13 @@ class LeanProject:
         init=False,
         repr=False,
     )
+    _environment_fingerprint: tuple[tuple[str, int, int], ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _lean_binary: Path | None = field(default=None, init=False, repr=False)
+    _module_paths: tuple[Path, ...] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -642,15 +650,11 @@ class LeanProject:
         """Validate generated source without changing the project tree.
 
         A declaration name and source line bind the axiom audit to the exact
-        declaration accepted by Lean. Supplying an environment identity checks
-        the proof closure before and after elaboration.
+        declaration accepted by Lean. Supplying an environment identity
+        compares the proof closure after elaboration with the expected value,
+        so a closure change before or during elaboration fails closed.
         """
         lean_file.resolve().relative_to(self.root)
-        if expected_environment is not None:
-            mismatch = self._environment_mismatch(expected_environment)
-            if mismatch is not None:
-                return mismatch
-
         if (declaration is None) != (declaration_line is None):
             return BuildResult(
                 success=False,
@@ -706,13 +710,45 @@ class LeanProject:
             )
         return result
 
-    def proof_environment(self, *, refresh: bool = False) -> ProofEnvironment:
-        """Return the content identity of the installed proof closure."""
-        if refresh or self._proof_environment is None:
-            self._proof_environment = capture_proof_environment(
-                self.root,
-                _resolve_lean(self.root),
+    def _resolved_lean(self) -> Path:
+        """The selected toolchain's Lean binary, resolved once per project."""
+        if self._lean_binary is None:
+            self._lean_binary = _resolve_lean(self.root)
+        return self._lean_binary
+
+    def _compiled_module_paths(self) -> list[Path]:
+        """Compiled dependency roots, enumerated once per project.
+
+        The set of roots changes only when `lake update` rewrites the
+        manifest; a run never does that, and a changed manifest fails the
+        environment identity check.
+        """
+        if self._module_paths is None:
+            self._module_paths = tuple(
+                sorted(
+                    path.resolve()
+                    for path in self.root.rglob("lib/lean")
+                    if path.is_dir() and ".lake" in path.parts
+                )
             )
+        return list(self._module_paths)
+
+    def proof_environment(self, *, refresh: bool = False) -> ProofEnvironment:
+        """Return the content identity of the installed proof closure.
+
+        A refresh revalidates against the artifact tree: an unchanged stat
+        fingerprint reuses the captured identity, any change re-hashes the
+        content.
+        """
+        lean = self._resolved_lean()
+        if self._proof_environment is None:
+            self._proof_environment = capture_proof_environment(self.root, lean)
+            self._environment_fingerprint = environment_fingerprint(self.root, lean)
+        elif refresh:
+            fingerprint = environment_fingerprint(self.root, lean)
+            if fingerprint != self._environment_fingerprint:
+                self._proof_environment = capture_proof_environment(self.root, lean)
+                self._environment_fingerprint = fingerprint
         return self._proof_environment
 
     def _environment_mismatch(self, expected: str) -> BuildResult | None:
@@ -741,7 +777,7 @@ class LeanProject:
         *,
         relative_path: Path = Path("AutoLeanInternal") / "Candidate.lean",
     ) -> tuple[list[str], dict[str, str]]:
-        lean = _resolve_lean(self.root)
+        lean = self._resolved_lean()
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise LeanSandboxError(f"invalid sandbox source path: {relative_path}")
         candidate = scratch / relative_path
@@ -757,9 +793,7 @@ class LeanProject:
             str(candidate.with_suffix(".ilean")),
             str(candidate),
         ]
-        module_paths = sorted(
-            path.resolve() for path in self.root.rglob("lib/lean") if path.is_dir() and ".lake" in path.parts
-        )
+        module_paths = self._compiled_module_paths()
         library_paths = sorted({path.parent for path in module_paths})
         host = platform.system()
         if host == "Linux":
