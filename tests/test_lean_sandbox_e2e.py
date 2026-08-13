@@ -332,3 +332,27 @@ def test_reviewed_ionescu_tulcea_inventory_reaches_isolated_lean(
     assert len(claims) == 25
     assert sum(len(claim.evidence_names) for claim in claims) == 33
     assert re.search(r"(?m)^[ \t]*sorry\b", evidence) is None
+
+
+def test_the_sandbox_rejects_an_auto_bound_identifier(tmp_path: Path) -> None:
+    """A statement the project would reject must not pass validation.
+
+    Lake applies the project's `autoImplicit := false`; the sandbox invokes
+    Lean directly, so without the same option an unbound identifier becomes a
+    fresh implicit argument and the candidate means something else.
+    """
+    if not os.environ.get("AUTOLEAN_RUN_SANDBOX_E2E"):
+        pytest.skip("set AUTOLEAN_RUN_SANDBOX_E2E=1 to run host containment tests")
+
+    (tmp_path / "lakefile.lean").write_text("-- lakefile\n", encoding="utf-8")
+    project = LeanProject(tmp_path)
+    source = tmp_path / "T.lean"
+    source.write_text("theorem placeholder : True := by\n  sorry\n", encoding="utf-8")
+
+    result = project.validate_candidate(
+        source,
+        "theorem symm_typo (n : Nat) (h : n = m) : m = n := h.symm\n",
+    )
+
+    assert not result.success
+    assert any("Unknown identifier" in d.message for d in result.errors)
