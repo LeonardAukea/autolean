@@ -571,10 +571,13 @@ def _import_generated_proofs(project_output: Path) -> None:
         return
     library_root = project_output / "AutoLean.lean"
     existing = library_root.read_text(encoding="utf-8") if library_root.is_file() else ""
+    # Whole lines, not substrings: `import A.Foo` occurs inside `import A.FooBar`,
+    # which would drop the shorter module and leave its proof unchecked.
+    imported = {line.strip() for line in existing.splitlines()}
     missing = [
         line
         for line in (f"import {_lean_module(path.relative_to(project_output))}" for path in generated)
-        if line not in existing
+        if line not in imported
     ]
     if not missing:
         return
