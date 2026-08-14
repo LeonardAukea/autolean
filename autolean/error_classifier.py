@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 
+from autolean.prompts import LEAN_TACTICS
+
 
 class ErrorCategory(StrEnum):
     """Categories of Lean build errors, one retry strategy each."""
@@ -154,12 +156,10 @@ def retry_hint_for(category: ErrorCategory, error_message: str) -> str:
             m = re.search(r"unknown tactic '(\w+)'", error_message)
             if m:
                 tactic_name = m.group(1)
+                known = ", ".join(sorted(LEAN_TACTICS))
                 return (
                     f"CRITICAL: You used `{tactic_name}` which DOES NOT EXIST in Lean 4. "
-                    f"Only use real Lean 4 tactics: simp, ring, omega, rfl, exact, apply, "
-                    f"intro, cases, induction, rw, constructor, trivial, decide, norm_num, "
-                    f"contradiction, assumption, tauto, aesop, linarith, positivity, ext, funext, "
-                    f"use, obtain, refine, by_contra, by_cases, split, left, right, have, let, calc."
+                    f"Only use real Lean 4 tactics: {known}."
                 )
             return (
                 f"A TACTIC FAILED in your previous attempt:\n{error_message[:300]}\n"

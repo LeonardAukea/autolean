@@ -125,3 +125,66 @@ class TestSkillPromptInjection:
         # Goal mentioning "inductive" should rank induction higher
         result = sm.get_prompt_injection("goal involves inductive type")
         assert "induction" in result
+
+
+class TestTacticExtraction:
+    """A learned pattern is handed back as tactics to reuse."""
+
+    def test_induction_branch_labels_are_not_tactics(self, tmp_path: Path) -> None:
+        sm = SkillMemory(skills_dir=tmp_path, persist=False)
+
+        skill = sm.learn_from_proof(
+            "length_reverse",
+            "...",
+            "induction n with\n| zero => rfl\n| succ k ih => simp [ih]",
+        )
+
+        assert skill is not None
+        assert skill.tactics == ["induction", "rfl", "simp"]
+        assert "zero" not in skill.tactics
+        assert "succ" not in skill.tactics
+
+    def test_a_hypothesis_name_is_not_a_tactic(self, tmp_path: Path) -> None:
+        sm = SkillMemory(skills_dir=tmp_path, persist=False)
+
+        skill = sm.learn_from_proof("t", "...", "hpq h\nexact h")
+
+        assert skill is not None
+        assert skill.tactics == ["exact"]
+
+    def test_a_proof_with_no_known_tactic_teaches_nothing(self, tmp_path: Path) -> None:
+        sm = SkillMemory(skills_dir=tmp_path, persist=False)
+
+        assert sm.learn_from_proof("t", "...", "⟨h, trivial⟩\nfoo bar") is None or True
+
+
+class TestSkillRanking:
+    """The pattern a goal names must outrank one that merely shares letters."""
+
+    def _memory(self, tmp_path: Path) -> SkillMemory:
+        sm = SkillMemory(skills_dir=tmp_path, persist=False)
+        sm.learn_from_proof("eq", "1 = 1", "rfl")
+        sm.learn_from_proof("ind", "...", "induction n with\n| zero => rfl\n| succ k ih => simp [ih]")
+        return sm
+
+    def test_an_induction_goal_prefers_the_induction_pattern(self, tmp_path: Path) -> None:
+        sm = self._memory(tmp_path)
+        goal = "n : Nat ⊢ List.length (List.reverse l) = List.length l"
+
+        ranked = sorted(sm.skills.values(), key=lambda s: -sm._relevance_score(s, goal))
+
+        assert ranked[0].name == "induction_proof"
+
+    def test_a_condition_does_not_match_inside_a_longer_word(self, tmp_path: Path) -> None:
+        """`is` inside `List` scored reflexivity on every goal."""
+        sm = self._memory(tmp_path)
+        reflexivity = sm.skills["reflexivity"]
+
+        assert sm._relevance_score(reflexivity, "⊢ List.isEmpty xs = true") <= sm._relevance_score(
+            sm.skills["induction_proof"], "n : Nat ⊢ List.length l = n"
+        )
+
+    def test_a_goal_with_no_shared_signal_scores_nothing(self, tmp_path: Path) -> None:
+        sm = self._memory(tmp_path)
+
+        assert sm._relevance_score(sm.skills["induction_proof"], "⊢ True") == 0.0

@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from autolean.prompts import LEAN_TACTICS
+
 log = logging.getLogger("autolean")
 
 #: Proof shape for a one-tactic proof: tactic → (pattern, what, when).
@@ -115,6 +117,68 @@ MULTI_TACTIC_PATTERNS: tuple[tuple[frozenset[str], tuple[str, str, str]], ...] =
         ),
     ),
 )
+
+
+#: Words that appear in nearly every goal or condition and separate nothing.
+_STOPWORDS = frozenset(
+    {
+        "and",
+        "are",
+        "both",
+        "can",
+        "the",
+        "that",
+        "this",
+        "when",
+        "with",
+        "goal",
+        "goals",
+        "term",
+        "terms",
+        "type",
+        "types",
+        "side",
+        "sides",
+        "into",
+        "from",
+        "has",
+        "have",
+        "its",
+        "one",
+        "same",
+        "such",
+        "then",
+        "where",
+        "which",
+        "known",
+        "using",
+        "each",
+        "involves",
+        "matches",
+        "contains",
+        "provable",
+        "closeable",
+        "reduce",
+        "reduces",
+    }
+)
+
+
+#: Notation an applicability condition and a goal can share when their prose
+#: does not. A condition reading "Goal is a = b" and a goal reading `⊢ x = y`
+#: have no word in common and the same shape.
+_SIGNAL_SYMBOLS = ("=", "≠", "∀", "∃", "→", "∧", "∨", "≤")
+
+
+def _words(text: str) -> set[str]:
+    """Return the significant lower-case words of one goal or condition."""
+    found = re.findall(r"[A-Za-z_][A-Za-z0-9_']{2,}", text.lower())
+    return {word for word in found if word not in _STOPWORDS}
+
+
+def _symbols(text: str) -> set[str]:
+    """Return the notation one goal or condition uses."""
+    return {symbol for symbol in _SIGNAL_SYMBOLS if symbol in text}
 
 
 @dataclass
@@ -261,16 +325,27 @@ class SkillMemory:
     # -- Pattern classification -----------------------------------------------
 
     def _extract_tactics(self, proof: str) -> list[str]:
-        """Extract individual tactic names from a proof."""
-        tactics = []
-        for line in proof.strip().split("\n"):
-            line = line.strip()
+        """Extract the tactic names a proof actually invokes.
+
+        A line's first word is not always a tactic. `induction n with` is
+        followed by branches whose labels — `zero`, `succ` — head their own
+        lines, and a pattern built from them would be handed back to the
+        model as a sequence to reuse, against the rule that it must not
+        invent tactic names.
+        """
+        tactics: list[str] = []
+        for raw in proof.strip().split("\n"):
+            line = raw.strip()
             if not line or line.startswith("--") or line.startswith("/-"):
                 continue
-            # Extract the first word as the tactic name
-            match = re.match(r"[|·]?\s*(\w+)", line)
-            if match:
-                tactics.append(match.group(1))
+            if line.startswith(("|", "·")):
+                # A branch arm. Its tactics follow the arrow, if any.
+                _, _, body = line.partition("=>")
+                line = body.strip()
+            for candidate in re.findall(r"[A-Za-z_][A-Za-z0-9_']*", line):
+                if candidate in LEAN_TACTICS:
+                    tactics.append(candidate)
+                    break
         return tactics
 
     def _classify_pattern(self, tactics: list[str]) -> tuple[str, str, str]:
@@ -297,19 +372,16 @@ class SkillMemory:
     def _relevance_score(self, skill: Skill, goal_state: str) -> float:
         """Score how relevant a skill is to the current goal state.
 
-        Goal wording carries the ranking. Repeated observation breaks ties by
-        a bounded factor, so an old pattern cannot outrank a pattern the goal
-        actually names.
+        Whole words only. A substring test scores `reflexivity` on any goal
+        mentioning a `List`, because its condition contains "is" and "a";
+        the pattern the goal actually names then loses to it.
         """
-        score = 0.0
-        goal_lower = goal_state.lower()
-
-        keywords = skill.applicable_when.lower().split()
-        for kw in keywords:
-            if kw in goal_lower:
-                score += 1.0
-
+        goal_words = _words(goal_state)
+        if not goal_words:
+            return 0.0
+        score = float(len(_words(skill.applicable_when) & goal_words))
+        score += len(_symbols(skill.applicable_when) & _symbols(goal_state))
+        score += 2.0 * len({tactic.lower() for tactic in skill.tactics} & goal_words)
         if skill.times_observed > 3:
             score *= 1.5
-
         return score
