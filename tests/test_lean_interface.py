@@ -740,3 +740,47 @@ class TestEnvironmentIdentityGate:
 
         assert not result.success
         assert "proof environment identification failed" in result.stderr
+
+
+class TestAxiomPolicy:
+    """An accepted proof must carry a complete axiom report."""
+
+    def _audited(self, axioms: tuple[str, ...] | None) -> BuildResult:
+        return lean_interface._apply_axiom_policy(
+            BuildResult(success=True, axioms=axioms),
+            "Example.target",
+            lean_interface.CORE_LOGICAL_AXIOMS,
+        )
+
+    def test_a_missing_axiom_report_rejects(self) -> None:
+        """Lean returning no report means the audit did not run."""
+        result = self._audited(None)
+
+        assert not result.success
+        assert "no axiom report" in result.errors[0].message
+
+    def test_a_disallowed_axiom_rejects(self) -> None:
+        result = self._audited(("propext", "sorryAx"))
+
+        assert not result.success
+        assert "sorryAx" in result.errors[0].message
+
+    def test_the_foundational_axioms_are_accepted(self) -> None:
+        result = self._audited(("propext", "Quot.sound", "Classical.choice"))
+
+        assert result.success
+        assert not result.errors
+
+    def test_an_empty_report_is_accepted(self) -> None:
+        """No axioms at all is a complete report, not a missing one."""
+        assert self._audited(()).success
+
+    def test_a_failed_build_is_left_alone(self) -> None:
+        failed = lean_interface._apply_axiom_policy(
+            BuildResult(success=False, axioms=None),
+            "Example.target",
+            lean_interface.CORE_LOGICAL_AXIOMS,
+        )
+
+        assert not failed.success
+        assert not failed.diagnostics
