@@ -29,11 +29,15 @@ dependencies = [
     "textual>=8.2.8",
     "click>=8.4.2",
     "pyyaml>=6.0.3",
-    "tree-sitter>=0.26.0",
-    "tree-sitter-language-pack>=1.14.3",
 ]
 
 [project.optional-dependencies]
+# Tree-sitter supplies advisory structural context for prompts. Lean decides
+# correctness, so a run without it loses context and nothing else.
+structure = [
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.3",
+]
 pdf = [
     "pymupdf>=1.28.2",
     "pymupdf4llm>=1.28.2",
@@ -52,6 +56,8 @@ dev = [
     "types-PyYAML>=6.0.12.20260724",
 ]
 all = [
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.3",
     "pymupdf>=1.28.2",
     "pymupdf4llm>=1.28.2",
     "anthropic>=0.121.0",

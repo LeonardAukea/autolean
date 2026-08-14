@@ -123,8 +123,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "textual" },
-    { name = "tree-sitter" },
-    { name = "tree-sitter-language-pack" },
 ]
 
 [package.optional-dependencies]
@@ -133,6 +131,8 @@ all = [
     { name = "openai" },
     { name = "pymupdf" },
     { name = "pymupdf4llm" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
 ]
 anthropic = [
     { name = "anthropic" },
@@ -152,6 +152,10 @@ openai = [
 pdf = [
     { name = "pymupdf" },
     { name = "pymupdf4llm" },
+]
+structure = [
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
 ]
 
 [package.metadata]
@@ -176,11 +180,13 @@ requires-dist = [
     { name = "rich", specifier = ">=15.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.2" },
     { name = "textual", specifier = ">=8.2.8" },
-    { name = "tree-sitter", specifier = ">=0.26.0" },
-    { name = "tree-sitter-language-pack", specifier = ">=1.14.3" },
+    { name = "tree-sitter", marker = "extra == 'all'", specifier = ">=0.26.0" },
+    { name = "tree-sitter", marker = "extra == 'structure'", specifier = ">=0.26.0" },
+    { name = "tree-sitter-language-pack", marker = "extra == 'all'", specifier = ">=1.14.3" },
+    { name = "tree-sitter-language-pack", marker = "extra == 'structure'", specifier = ">=1.14.3" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20260724" },
 ]
-provides-extras = ["pdf", "anthropic", "openai", "dev", "all"]
+provides-extras = ["structure", "pdf", "anthropic", "openai", "dev", "all"]
 
 [[package]]
 name = "beautifulsoup4"
