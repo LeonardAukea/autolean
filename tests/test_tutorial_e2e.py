@@ -274,3 +274,36 @@ def test_tutorial_first_proof_end_to_end(
     assert (artifact / "paper" / "main.tex").is_file()
     assert (artifact / "README.md").is_file()
     assert (artifact / "session.json").is_file()
+
+    # 7. The tutorial's own export command names no session. That form has to
+    #    carry the proof too, and its project must elaborate on its own.
+    whole = tmp_path / "tutorial-artifact-whole"
+    run(
+        "export",
+        str(whole),
+        "--title",
+        "A checked tutorial theorem",
+        "--program",
+        str(program_file),
+    )
+    exported = whole / "project" / "AutoLean" / "Generated" / generated.name
+    assert exported.is_file(), "a whole-project export must carry the accepted proof"
+    assert "sorry" not in exported.read_text(encoding="utf-8")
+    library_root = (whole / "project" / "AutoLean.lean").read_text(encoding="utf-8")
+    assert f"import AutoLean.Generated.{generated.stem}" in library_root, (
+        "the exported library root must build the proof it carries"
+    )
+    assert not (whole / "project" / "workspace").exists()
+
+    # 8. The exported source elaborates under the pinned toolchain, which is
+    #    what continuing outside this tool has to mean.
+    lake = shutil.which("lake")
+    assert lake is not None, "the tutorial walkthrough needs lake on PATH"
+    elaboration = subprocess.run(
+        [lake, "env", "lean", str(Path("AutoLean") / "Generated" / generated.name)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=_STEP_TIMEOUT_SECONDS,
+    )
+    assert elaboration.returncode == 0, elaboration.stdout + elaboration.stderr
