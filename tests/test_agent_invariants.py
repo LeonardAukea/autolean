@@ -459,3 +459,45 @@ def test_resuming_remembers_which_targets_are_already_proved(
     assert attempted not in agent._proved_ids
     assert agent._attempts[attempted] == 5, "the retry budget must survive a resume"
     assert agent.tracker._cycle == 4
+
+
+def test_an_overnight_run_stops_when_every_target_is_unattemptable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An epoch that only skipped would reset into the same skips forever."""
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    unattemptable = SorryTarget(
+        file=source,
+        line=2,
+        col=2,
+        decl_name="target",
+        decl_line=1,
+        context_before="theorem target : True := by",
+        context_after="",
+        rel_path="AutoLean/Target.lean",
+        qualified_decl_name="",  # no name to bind an axiom audit to
+    )
+    monkeypatch.setattr("autolean.agent.scan_project", lambda root: [unattemptable])
+    agent.config.max_cycles = 0  # overnight: no cycle budget to stop the loop
+    agent.config.max_retries_per_sorry = 2
+    logged: list[object] = []
+    ceiling = agent.config.max_retries_per_sorry * 4
+
+    def bounded_log(record: object) -> None:
+        logged.append(record)
+        if len(logged) > ceiling:
+            # Without the gate this loop never ends; stop it so the failure
+            # reads as an assertion rather than a hung job.
+            agent._interrupted = True
+
+    monkeypatch.setattr(agent.tracker, "log", bounded_log)
+
+    agent.run()
+
+    assert backend.proof_calls == 0, "the target never reaches a provider"
+    assert logged, "the loop must actually run"
+    assert len(logged) <= agent.config.max_retries_per_sorry, (
+        f"the run reset into the same skips: {len(logged)} records"
+    )
