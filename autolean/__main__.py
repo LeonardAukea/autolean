@@ -252,12 +252,14 @@ def solve(
     from autolean.session import SessionKind, SessionStore
 
     store = SessionStore(agent.project.root)
+    # `--overnight` resumes, so the session it continues is the one the
+    # earlier night left behind.
     session = (
         store.find_workflow(
             SessionKind.PROJECT,
             target_filter=target or "",
         )
-        if resume
+        if agent.resume
         else None
     )
     if session is None:

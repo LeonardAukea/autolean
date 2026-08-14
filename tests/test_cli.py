@@ -1227,3 +1227,49 @@ class TestResultsCommand:
         assert result.exit_code == 0
         assert "foo" in result.output
         assert "success" in result.output
+
+
+class TestOvernightSession:
+    """Successive nights continue one workflow."""
+
+    def test_overnight_continues_the_session_it_left(
+        self,
+        runner: CliRunner,
+        project_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.session import SessionKind, SessionStore
+
+        workspace = project_dir / "workspace"
+
+        class Agent:
+            config = SimpleNamespace(
+                max_cycles=0,
+                max_retries_per_sorry=5,
+                strategy_hints=[],
+                escalation_policy=EscalationPolicy.ASK,
+                escalation_model=None,
+                escalation_after_failures=2,
+            )
+            model_transitions: tuple[object, ...] = ()
+            project = SimpleNamespace(root=workspace)
+            llm = SimpleNamespace(config=SimpleNamespace(model="fixture", backend="fixture"))
+            resume = False
+
+            def run(self) -> SimpleNamespace:
+                return SimpleNamespace(successful=True, message="")
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr("autolean.__main__._agent_for", lambda *a, **k: Agent())
+
+        for _ in range(2):
+            result = runner.invoke(
+                main,
+                ["solve", "--overnight", "--program", str(project_dir / "program.md")],
+            )
+            assert result.exit_code == 0, result.output
+
+        sessions = [item for item in SessionStore(workspace).list() if item.kind is SessionKind.PROJECT]
+        assert len(sessions) == 1, f"each night started a new session: {len(sessions)}"
