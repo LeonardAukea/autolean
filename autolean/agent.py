@@ -337,6 +337,17 @@ class AutoLeanAgent:
 
     # -- File health --------------------------------------------------------
 
+    def _in_scope(self, target: SorryTarget) -> bool:
+        """Whether this run may touch one target.
+
+        A rescan re-reads a whole file, so the scope a run was started with
+        has to be re-applied to what comes back; otherwise proving one
+        declaration admits every other placeholder in its file.
+        """
+        if not self.target_filter:
+            return True
+        return self.target_filter in (target.decl_name, target.id)
+
     def _check_file_health(self, lean_file: Path, content: str) -> str | None:
         """Check if a file has non-sorry structural errors.
 
@@ -515,7 +526,7 @@ class AutoLeanAgent:
 
         # Apply target filter (from `prove` command or --target flag)
         if self.target_filter:
-            targets = [t for t in targets if self.target_filter == t.decl_name or self.target_filter == t.id]
+            targets = [t for t in targets if self._in_scope(t)]
             console.print(
                 f"\n[cyan]Target filter:[/] '{self.target_filter}' — {len(targets)} matching target(s)."
             )
@@ -678,7 +689,7 @@ class AutoLeanAgent:
                 from autolean.scanner import scan_file
 
                 new_targets = scan_file(f, project_root=self.project.root)
-                targets.extend(new_targets)
+                targets.extend(t for t in new_targets if self._in_scope(t))
             targets = prioritize_targets(targets)
             self._initial_sorry_count = len(targets) + presearch_proved
         else:
@@ -767,7 +778,7 @@ class AutoLeanAgent:
                 from autolean.scanner import scan_file
 
                 new_targets = scan_file(changed_file, project_root=self.project.root)
-                targets.extend(new_targets)
+                targets.extend(t for t in new_targets if self._in_scope(t))
                 targets = prioritize_targets(targets)
                 # Invalidate goal cache for targets in this file (lines shifted)
                 stale_ids = [k for k in self._goal_cache if changed_file.name in k]
@@ -1344,12 +1355,11 @@ class AutoLeanAgent:
                     f"Structural error ({cat.value}) — skipping target",
                     "red",
                 )
+                # The diagnostic came from elaborating this candidate, not the
+                # file on disk, which Lean accepted at the top of this attempt.
+                # Recording it against the file would skip every sibling target
+                # in source that is known good.
                 self._attempts[target.id] = self.config.max_retries_per_sorry
-                # Every other target in this file shares the broken structure.
-                self._file_health[file_path] = (
-                    sha256_text(original_content),
-                    f"{cat.value}: {error_summary[:120]}",
-                )
 
             # Auto-detect missing definitions and try to fill gaps
             # (only for non-structural errors, and with validation)

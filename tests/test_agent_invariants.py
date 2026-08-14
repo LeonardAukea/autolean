@@ -574,3 +574,117 @@ class TestBoundedWork:
             )
 
         assert calls["n"] <= 3, f"repair was unbounded: {calls['n']} model requests"
+
+
+class TestRunScope:
+    """A filtered run must touch only what it was pointed at."""
+
+    def test_a_rescan_does_not_re_admit_excluded_targets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proving one declaration must not admit its file's other holes."""
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent.target_filter = "foo"
+        source = agent.project.root / "AutoLean" / "Target.lean"
+
+        def target(name: str, line: int) -> SorryTarget:
+            return SorryTarget(
+                file=source,
+                line=line,
+                col=2,
+                decl_name=name,
+                decl_line=line - 1,
+                context_before=f"theorem {name} : True := by",
+                context_after="",
+                rel_path="AutoLean/Target.lean",
+                qualified_decl_name=name,
+            )
+
+        assert agent._in_scope(target("foo", 2))
+        assert not agent._in_scope(target("bar", 9))
+
+    def test_an_unfiltered_run_admits_everything(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent.target_filter = None
+        source = agent.project.root / "AutoLean" / "Target.lean"
+        anything = SorryTarget(
+            file=source,
+            line=9,
+            col=2,
+            decl_name="bar",
+            decl_line=8,
+            context_before="theorem bar : True := by",
+            context_after="",
+            rel_path="AutoLean/Target.lean",
+            qualified_decl_name="bar",
+        )
+
+        assert agent._in_scope(anything)
+
+    def test_a_target_id_also_selects(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        source = agent.project.root / "AutoLean" / "Target.lean"
+        one = SorryTarget(
+            file=source,
+            line=2,
+            col=2,
+            decl_name="foo",
+            decl_line=1,
+            context_before="theorem foo : True := by",
+            context_after="",
+            rel_path="AutoLean/Target.lean",
+            qualified_decl_name="foo",
+        )
+        agent.target_filter = one.id
+
+        assert agent._in_scope(one)
+
+
+def test_a_rejected_candidate_does_not_condemn_the_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verdict belongs to the bytes Lean read, not to the ones it refused."""
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    content = source.read_text(encoding="utf-8")
+
+    assert agent._check_file_health(source, content) is None
+
+    agent._file_health[source] = (sha256_text(content), None)
+    monkeypatch.setattr(
+        agent.project,
+        "validate_candidate",
+        lambda *a, **k: BuildResult(
+            success=False,
+            diagnostics=[
+                Diagnostic(
+                    file=str(source),
+                    line=1,
+                    col=0,
+                    severity="error",
+                    message="'target' has already been declared",
+                )
+            ],
+        ),
+    )
+    target = SorryTarget(
+        file=source,
+        line=2,
+        col=2,
+        decl_name="target",
+        decl_line=1,
+        context_before="theorem target : True := by",
+        context_after="",
+        rel_path="AutoLean/Target.lean",
+        qualified_decl_name="target",
+    )
+
+    agent._try_fill_sorry(1, target, 1)
+
+    assert source.read_text(encoding="utf-8") == content, "the file was not modified"
+    assert agent._check_file_health(source, content) is None, (
+        "a candidate's failure was recorded as the file's verdict"
+    )
