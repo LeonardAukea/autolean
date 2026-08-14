@@ -70,6 +70,9 @@ TEMP_MAX = 1.0
 
 # Skip a target after this many consecutive failures in one error category.
 MAX_REPEATED_ERRORS = 3
+#: Rejected candidates carried into the next epoch. The prompt shows the
+#: most recent few; the rest bound what one overnight run accumulates.
+EPOCH_CANDIDATE_MEMORY = 10
 MAX_REDUNDANT_TAIL_REPAIRS = 3
 
 
@@ -758,11 +761,17 @@ class AutoLeanAgent:
                         f"Resetting {len(targets)} targets for another pass..."
                     )
                     for t in targets:
+                        # A new epoch renews the budget: the retry count and
+                        # the repeated-error bail-out that spends it. The
+                        # rejected candidates and the last diagnostic stay —
+                        # dropping them sends the first epoch's prompt again,
+                        # and Lean rejects the same proof again.
                         self._attempts[t.id] = 0
-                        self._failed_proofs.pop(t.id, None)
-                        self._last_error.pop(t.id, None)
-                        self._goal_cache.pop(t.id, None)
                         self._error_history.pop(t.id, None)
+                        self._goal_cache.pop(t.id, None)
+                        rejected = self._failed_proofs.get(t.id)
+                        if rejected:
+                            del rejected[:-EPOCH_CANDIDATE_MEMORY]
                     continue
                 console.print("\n[green]All targets either proved or exhausted retries. Done![/]")
                 break

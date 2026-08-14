@@ -716,3 +716,42 @@ class TestTimeoutOutcome:
         assert failures, "the run recorded no failure"
         assert {record.outcome for record in failures} == {Outcome.FAIL_TIMEOUT}
         assert {record.error_category for record in failures} == {ErrorCategory.TIMEOUT.value}
+
+
+class TestEpochMemory:
+    """A new epoch renews the budget, not the agent's memory of failure."""
+
+    def test_a_second_epoch_still_knows_the_rejected_candidates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, backend = _prepare_agent(tmp_path, monkeypatch)
+        backend.text = "exact rejected_by_lean"
+        agent.config.max_cycles = 0
+        agent.config.max_retries_per_sorry = 2
+        monkeypatch.setattr(
+            agent.project,
+            "validate_candidate",
+            lambda *a, **k: BuildResult(
+                success=False,
+                diagnostics=[Diagnostic("Target.lean", 2, 2, "error", "unknown identifier")],
+            ),
+        )
+        proof_prompts: list[str] = []
+        original = agent.llm.generate
+
+        def record(system: str, user: str, **kwargs: object) -> object:
+            if "mathematical research planner" not in system:
+                proof_prompts.append(user)
+                if len(proof_prompts) >= 3:
+                    agent._interrupted = True
+            return original(system, user, **kwargs)
+
+        monkeypatch.setattr(agent.llm, "generate", record)
+
+        agent.run()
+
+        # Two attempts exhaust the budget; the third opens the next epoch.
+        assert len(proof_prompts) == 3, f"the run never opened a second epoch: {len(proof_prompts)}"
+        assert "rejected_by_lean" in proof_prompts[2], (
+            "the epoch reset dropped the candidates Lean had already rejected"
+        )
