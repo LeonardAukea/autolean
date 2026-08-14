@@ -42,7 +42,7 @@ from autolean.llm import (
     create_llm_client,
 )
 from autolean.program import parse_program
-from autolean.prompts import SORRY_FILL_USER, SYSTEM_PROMPT
+from autolean.prompts import LEAN_TACTICS, SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.proof_loop import (
     EscalationDecision,
     EscalationRouter,
@@ -92,78 +92,15 @@ class AgentRunResult:
 # ---------------------------------------------------------------------------
 
 
-# Common Lean tactic keywords for detecting tactic-like lines
-_TACTIC_KEYWORDS = {
-    "simp",
-    "simpa",
-    "ring",
-    "omega",
-    "decide",
-    "norm_num",
-    "trivial",
-    "rfl",
-    "exact",
-    "apply",
-    "intro",
-    "intros",
-    "constructor",
-    "cases",
-    "rcases",
-    "induction",
-    "have",
-    "let",
-    "show",
-    "calc",
-    "conv",
-    "rw",
-    "rewrite",
-    "unfold",
-    "dsimp",
-    "field_simp",
-    "push_neg",
-    "contradiction",
-    "exfalso",
-    "assumption",
-    "tauto",
-    "aesop",
-    "linarith",
-    "positivity",
-    "ext",
-    "funext",
-    "use",
-    "exists",
-    "obtain",
-    "refine",
-    "by_contra",
-    "by_cases",
-    "split",
-    "left",
-    "right",
-    "next",
-    "case",
-    "first",
-    "try",
-    "repeat",
-    "all_goals",
-    "any_goals",
-    "focus",
-    "by",
-    "do",
-    "return",
-    "match",
-    "if",
-    "then",
-    "else",
-    "where",
-    "|",
-    "·",
-    ".",
-    "<;>",
-}
 _WRAPPED_PROOF = re.compile(
     r"^\s*(?:theorem|lemma|example)\b.*?:=\s*by\b(?P<body>.*)$",
     re.DOTALL,
 )
+
+
+#: Lean keywords that open a line without being tactics. `_is_tactic_line`
+#: separates Lean from English, so it recognises these as well as tactics.
+_LEAN_LINE_OPENERS = frozenset({"by", "do", "else", "fun", "if", "match", "return", "then", "where", "with"})
 
 
 def _is_tactic_line(line: str) -> bool:
@@ -173,7 +110,7 @@ def _is_tactic_line(line: str) -> bool:
         return True  # blank lines are fine in tactic blocks
     # Check if the first token is a known tactic keyword
     first_token = stripped.split()[0].rstrip("(").rstrip("{") if stripped.split() else ""
-    if first_token in _TACTIC_KEYWORDS:
+    if first_token in LEAN_TACTICS or first_token in _LEAN_LINE_OPENERS:
         return True
     # Indented lines in a tactic block are likely continuations
     if line.startswith("  ") or line.startswith("\t"):
@@ -218,7 +155,10 @@ def _trim_explanatory_prose(lines: list[str]) -> list[str]:
     tactics = lines[tactic_start:]
     while tactics and not _is_tactic_line(tactics[-1]):
         tactics.pop()
-    return tactics
+    # Recognising no tactic is not evidence that the completion held none.
+    # Discarding it would elaborate a proof the model did not write, or an
+    # empty one, and record either as the model's attempt.
+    return tactics or lines
 
 
 def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:

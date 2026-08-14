@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from autolean.agent import clean_llm_proof
 
 
@@ -113,3 +115,42 @@ class TestCleanLlmProof:
     def test_fenced_complete_theorem_wrapper_is_stripped(self) -> None:
         raw = "```lean\nlemma smoke : True := by\n  exact True.intro\n```"
         assert clean_llm_proof(raw) == "  exact True.intro"
+
+
+class TestTacticVocabulary:
+    """A tactic the system prompt recommends must survive the cleaner."""
+
+    @pytest.mark.parametrize(
+        "proof",
+        [
+            "nlinarith [sq_nonneg (a - b)]",
+            "norm_cast",
+            "push_cast\nring",
+            "simp_all",
+            "rintro x hx\nexact hx",
+            "subst h\nrfl",
+            "rwa [Nat.add_comm]",
+            "ring_nf",
+        ],
+    )
+    def test_a_real_proof_passes_through_unchanged(self, proof: str) -> None:
+        assert clean_llm_proof(proof, tactic_mode=True) == proof
+
+    def test_the_cleaner_never_returns_less_than_nothing(self) -> None:
+        """Trimming to empty would elaborate a proof the model never wrote."""
+        assert clean_llm_proof("gcongr", tactic_mode=True) == "gcongr"
+        assert clean_llm_proof("interval_cases n", tactic_mode=True) != ""
+
+    def test_prose_before_a_tactic_is_still_trimmed(self) -> None:
+        raw = "Here is the proof.\nIt proceeds by induction.\nsimp [Nat.add_comm]"
+
+        assert clean_llm_proof(raw, tactic_mode=True) == "simp [Nat.add_comm]"
+
+    def test_the_cleaner_and_the_prompt_share_one_vocabulary(self) -> None:
+        """Two lists would let the prompt recommend what the cleaner deletes."""
+        from autolean import agent
+        from autolean.prompts import LEAN_TACTICS
+
+        assert not hasattr(agent, "_TACTIC_KEYWORDS")
+        for recommended in ("norm_cast", "push_cast", "simp_all", "nlinarith"):
+            assert recommended in LEAN_TACTICS
