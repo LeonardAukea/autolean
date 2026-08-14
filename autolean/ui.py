@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 
 from rich.console import Console
 from rich.theme import Theme
@@ -25,6 +27,18 @@ console = Console(theme=THEME, emoji=False, highlight=False)
 GLYPH_OK = "✓"
 GLYPH_FAIL = "✗"
 GLYPH_SKIP = "→"
+
+
+def command() -> str:
+    """Return the command a reader types to run this program again.
+
+    Printed guidance has to match how the reader started the program: an
+    installed console script, or the module.
+    """
+    name = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
+    if name in {"__main__.py", "-c", ""}:
+        return "python -m autolean"
+    return name
 
 
 def status(message: str, *, spinner: str = "dots") -> AbstractContextManager[object]:

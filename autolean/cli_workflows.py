@@ -129,7 +129,7 @@ def export_training(project: Path) -> None:
     td = project / "training_data"
     if not td.exists() or not any(td.glob("*.jsonl")):
         console.print("[yellow]No training data found. Run the agent first:[/]")
-        console.print("  uv run autolean solve --max-cycles 20")
+        console.print(f"  {ui.command()} solve --max-cycles 20")
         return
 
     # Show existing files
@@ -281,11 +281,11 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
 
     # Summary
     console.print("\n[bold]Fine-tuning loop:[/]")
-    console.print("  1. Run agent:      uv run autolean solve --overnight")
-    console.print("  2. Export data:     uv run autolean export-training")
+    console.print(f"  1. Run agent:      {ui.command()} solve --overnight")
+    console.print(f"  2. Export data:     {ui.command()} export-training")
     console.print(f"  3. Fine-tune:      {framework} train ...")
     console.print("  4. Import model:   ollama create autolean-v1 -f Modelfile")
-    console.print("  5. Run again:      uv run autolean solve --model autolean-v1")
+    console.print(f"  5. Run again:      {ui.command()} solve --model autolean-v1")
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ def build_library(
         agent.config.max_cycles = n_sorrys * 3
         _run_agent(agent)
     elif n_sorrys > 0:
-        console.print(f"\n  Next: [cyan]uv run autolean solve[/] to attempt {n_sorrys} proofs")
+        console.print(f"\n  Next: [cyan]{ui.command()} solve[/] to attempt {n_sorrys} proofs")
 
 
 # ---------------------------------------------------------------------------
