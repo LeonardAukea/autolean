@@ -653,3 +653,32 @@ def test_verification_source_records_extractor_input_identity() -> None:
 
     assert "Extractor input: https://arxiv.org/html/2604.07408v1" in source
     assert f"Extractor input SHA-256: {'a' * 64}" in source
+
+
+def test_html_claims_are_read_from_the_revision_the_pdf_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fetch_arxiv` hashes the latest revision, so claims come from it."""
+    from autolean.paper import extract_claims_from_html
+
+    requested: list[str] = []
+
+    class Response:
+        status_code = 404
+        text = ""
+        content = b""
+        url = ""
+
+    def get(url: str, **kwargs: object) -> Response:
+        del kwargs
+        requested.append(url)
+        return Response()
+
+    monkeypatch.setattr("autolean.paper.httpx.get", get)
+    monkeypatch.setattr("autolean.paper._fetch_arxiv_html_with_lightpanda", lambda *a, **k: "")
+
+    assert extract_claims_from_html("2501.12345") == []
+    assert requested[0] == "https://arxiv.org/html/2501.12345", (
+        f"claims were read from a revision the PDF does not pin: {requested}"
+    )
+    assert "https://arxiv.org/html/2501.12345v1" in requested, "no fallback for an unrendered revision"
