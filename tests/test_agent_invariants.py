@@ -19,7 +19,7 @@ from autolean.llm import (
 from autolean.provenance import ProofEnvironment, sha256_text
 from autolean.routing import EscalationPolicy
 from autolean.scanner import SorryTarget
-from autolean.tracker import TSV_FIELDS, Outcome
+from autolean.tracker import FAILURE_OUTCOMES, TSV_FIELDS, Outcome
 
 
 class FakeBackend(BaseBackend):
@@ -688,3 +688,31 @@ def test_a_rejected_candidate_does_not_condemn_the_file(
     assert agent._check_file_health(source, content) is None, (
         "a candidate's failure was recorded as the file's verdict"
     )
+
+
+class TestTimeoutOutcome:
+    """A spent budget is not a verdict about the proof."""
+
+    def test_a_timed_out_check_is_not_recorded_as_a_surviving_sorry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            agent.project,
+            "validate_candidate",
+            lambda *args, **kwargs: BuildResult(
+                success=False,
+                stderr="Build timed out after 120s",
+                duration_seconds=120.0,
+                timed_out=True,
+            ),
+        )
+
+        agent.run()
+
+        failures = [record for record in agent.tracker.records if record.outcome in FAILURE_OUTCOMES]
+        assert failures, "the run recorded no failure"
+        assert {record.outcome for record in failures} == {Outcome.FAIL_TIMEOUT}
+        assert {record.error_category for record in failures} == {ErrorCategory.TIMEOUT.value}

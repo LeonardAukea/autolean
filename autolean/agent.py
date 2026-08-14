@@ -79,6 +79,18 @@ def _has_redundant_tail(build: BuildResult) -> bool:
     return len(errors) == 1 and "No goals to be solved" in errors[0].message
 
 
+def _failure_outcome(build: BuildResult) -> Outcome:
+    """Name the failure Lean actually reported.
+
+    A run that exhausted its budget produced no diagnostics, so treating a
+    silent result as a surviving `sorry` would record a verdict the kernel
+    never gave.
+    """
+    if build.timed_out:
+        return Outcome.FAIL_TIMEOUT
+    return Outcome.FAIL_BUILD if build.errors else Outcome.FAIL_SORRY_REMAINS
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Terminal status for one agent invocation."""
@@ -1464,6 +1476,10 @@ class AutoLeanAgent:
                                 log.info("Auto-defined %s in %s", gap.name, file_path.name)
                                 self._failed_proofs.setdefault(target.id, []).append(proof)
                                 return gap_record
+        elif build.timed_out:
+            error_summary = build.stderr[:500] or "Build timed out"
+            error_category = ErrorCategory.TIMEOUT.value
+            self._record_error_category(target.id, ErrorCategory.TIMEOUT)
         elif not build.success:
             error_summary = build.stderr[:500] if build.stderr else "Build failed (unknown)"
             error_category = ErrorCategory.OTHER.value
@@ -1482,7 +1498,7 @@ class AutoLeanAgent:
             decl_name=target.decl_name,
             file=str(file_path.relative_to(self.project.root)),
             line=target.line,
-            outcome=Outcome.FAIL_BUILD if build.errors else Outcome.FAIL_SORRY_REMAINS,
+            outcome=_failure_outcome(build),
             attempt=attempt,
             duration_seconds=duration,
             llm_tokens=response.output_tokens,
