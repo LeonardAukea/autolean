@@ -31,6 +31,9 @@ log = logging.getLogger("autolean")
 class ProofExample:
     """A single (goal_state, proof) training example."""
 
+    #: The placeholder these attempts address. Goal state and context are
+    #: recorded against it, so preference pairs are formed against it too.
+    target_id: str
     theorem_name: str
     file: str
     goal_state: str  # Lean goal state (from hole-punch)
@@ -91,6 +94,7 @@ class TrainingDataCollector:
     ) -> None:
         """Record a proof attempt (successful or not)."""
         example = ProofExample(
+            target_id=record.target_id,
             theorem_name=record.decl_name,
             file=record.file,
             goal_state=self._goal_states.get(record.target_id, ""),
@@ -238,12 +242,15 @@ class TrainingDataCollector:
         Format:
         {"prompt": "...", "chosen": "...", "rejected": "..."}
         """
-        by_theorem: dict[str, list[ProofExample]] = {}
+        # One declaration can hold several `sorry`s, and a short declaration
+        # name repeats across files, so grouping by name offers the proof of
+        # one goal as the better answer to a different one.
+        by_target: dict[str, list[ProofExample]] = {}
         for ex in self.examples:
-            by_theorem.setdefault(ex.theorem_name, []).append(ex)
+            by_target.setdefault(ex.target_id, []).append(ex)
 
         pairs: list[DPOPair] = []
-        for name, attempts in by_theorem.items():
+        for attempts in by_target.values():
             positives = [a for a in attempts if a.success]
             negatives = [a for a in attempts if not a.success and a.proof]
             if not positives or not negatives:
@@ -257,7 +264,7 @@ class TrainingDataCollector:
                 seen_proofs.add(neg.proof)
                 pairs.append(
                     DPOPair(
-                        theorem_name=name,
+                        theorem_name=chosen.theorem_name,
                         goal_state=chosen.goal_state,
                         context=chosen.context,
                         chosen=chosen.proof,
