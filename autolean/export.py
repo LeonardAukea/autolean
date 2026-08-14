@@ -14,6 +14,9 @@ from typing import Any
 
 EXPORT_SCHEMA = "autolean.project-export.v1"
 _PROJECT_FILES = {"lake-manifest.json", "lakefile.lean", "lakefile.toml", "lean-toolchain"}
+#: Directories a run writes under the project that carry no exported source.
+#: `workspace` is a nested copy a run leaves behind, which the repository
+#: boundary check also refuses to track.
 _EXCLUDED_PARTS = {
     ".autolean",
     ".git",
@@ -21,7 +24,9 @@ _EXCLUDED_PARTS = {
     "build",
     "lake-packages",
     "logs",
+    "skills",
     "training_data",
+    "workspace",
 }
 _RUNTIME_SOURCE = Path("AutoLean/UserTheorems.lean")
 _RUNTIME_SOURCE_DIR = Path("AutoLean/Generated")
@@ -71,7 +76,12 @@ def _sha256(path: Path) -> str:
 
 
 def _is_runtime_source(relative: Path) -> bool:
-    return relative == _RUNTIME_SOURCE or relative.is_relative_to(_RUNTIME_SOURCE_DIR)
+    """Scratch source that belongs to a run rather than to its result.
+
+    Generated proofs are the result and are exported; `UserTheorems.lean`
+    is the scratch pad a run writes statements into.
+    """
+    return relative == _RUNTIME_SOURCE
 
 
 def _source_files(root: Path) -> list[Path]:
@@ -540,11 +550,36 @@ def _copy_project(
         shutil.copyfile(source, target)
     if source_roots:
         _write_session_root(project_output, root, source_roots)
+    else:
+        _import_generated_proofs(project_output)
     return sorted(
         path.relative_to(project_output).as_posix()
         for path in project_output.rglob("*.lean")
         if path.name not in _PROJECT_FILES
     )
+
+
+def _import_generated_proofs(project_output: Path) -> None:
+    """Make the library root build every exported generated proof.
+
+    A whole-project export copies the proofs a run accepted, and the
+    project's own root does not import them, so `lake build` would check
+    everything except the results the artifact exists to carry.
+    """
+    generated = sorted((project_output / _RUNTIME_SOURCE_DIR).glob("*.lean"))
+    if not generated:
+        return
+    library_root = project_output / "AutoLean.lean"
+    existing = library_root.read_text(encoding="utf-8") if library_root.is_file() else ""
+    missing = [
+        line
+        for line in (f"import {_lean_module(path.relative_to(project_output))}" for path in generated)
+        if line not in existing
+    ]
+    if not missing:
+        return
+    separator = "" if existing.endswith("\n") or not existing else "\n"
+    library_root.write_text(existing + separator + "\n".join(missing) + "\n", encoding="utf-8")
 
 
 def _copy_paper_sources(staging: Path, bundle: PaperBundle) -> None:
