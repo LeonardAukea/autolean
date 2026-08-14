@@ -19,7 +19,7 @@ from autolean.llm import (
 from autolean.provenance import ProofEnvironment, sha256_text
 from autolean.routing import EscalationPolicy
 from autolean.scanner import SorryTarget
-from autolean.tracker import FAILURE_OUTCOMES, TSV_FIELDS, Outcome
+from autolean.tracker import FAILURE_OUTCOMES, TSV_FIELDS, ExperimentRecord, Outcome
 
 
 class FakeBackend(BaseBackend):
@@ -783,3 +783,45 @@ class TestAuditBinding:
             assert call["declaration"] == "target"
             assert call["declaration_line"] == 2
             assert call["expected_environment"] == "a" * 64
+
+
+class TestResumedCycleNumbering:
+    """One results file numbers each experiment once."""
+
+    def test_pre_search_continues_the_earlier_numbering(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent.dry_run = False
+        agent.resume = True
+        agent.tracker.persist = True
+        earlier = ExperimentRecord(
+            cycle=7,
+            timestamp="2026-01-01T00:00:00Z",
+            target_id="AutoLean/Other.lean:2:other",
+            decl_name="other",
+            file="AutoLean/Other.lean",
+            line=2,
+            outcome=Outcome.FAIL_BUILD,
+            attempt=1,
+            duration_seconds=1.0,
+            llm_tokens=1,
+            llm_tok_per_sec=1.0,
+        )
+        agent.tracker.log(earlier)
+        monkeypatch.setattr(agent.project, "try_tactics_fast", lambda *a, **k: "trivial")
+        monkeypatch.setattr(agent.project, "write_file", lambda *a, **k: None)
+        monkeypatch.setattr(agent.tracker, "commit_success", lambda record: None)
+        # A run outside a repository with an author identity never reaches
+        # the pre-search, and this test is about what the pre-search records.
+        monkeypatch.setattr(agent.tracker, "setup_branch", lambda *a, **k: "test")
+
+        agent.run()
+
+        proofs = [record for record in agent.tracker.records if record.outcome == Outcome.SUCCESS]
+        assert proofs, "the pre-search proved nothing"
+        assert all(record.cycle > 7 for record in proofs), (
+            f"a resumed run reused earlier cycle numbers: {[r.cycle for r in proofs]}"
+        )

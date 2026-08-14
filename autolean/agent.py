@@ -549,6 +549,17 @@ class AutoLeanAgent:
             targets = [target for target in targets if target.file.resolve() == self.target_file]
             console.print(f"\n[cyan]Target file:[/] {self.target_file.name} — {len(targets)} target(s).")
 
+        # Ahead of any recorded work: the pre-search below writes result rows,
+        # and they continue an earlier run's numbering rather than restart it.
+        if self.resume:
+            self._load_resume_state()
+            proved_ids = {tid for tid, attempts in self._attempts.items() if tid in self._proved_ids}
+            targets = [t for t in targets if t.id not in proved_ids]
+            console.print(
+                f"[cyan]Resumed:[/] {len(proved_ids)} already proved, "
+                f"{len(targets)} remaining, cycle {self.tracker.cycle}"
+            )
+
         self._initial_sorry_count = len(targets)
         console.print(f"\n[bold]Found {len(targets)} sorry target(s).[/]")
 
@@ -716,15 +727,6 @@ class AutoLeanAgent:
             return AgentRunResult(True)
 
         # Restore target state from a persisted session.
-        if self.resume:
-            self._load_resume_state()
-            proved_ids = {tid for tid, attempts in self._attempts.items() if tid in self._proved_ids}
-            targets = [t for t in targets if t.id not in proved_ids]
-            console.print(
-                f"[cyan]Resumed:[/] {len(proved_ids)} already proved, "
-                f"{len(targets)} remaining, cycle {self.tracker.cycle}"
-            )
-
         # -- Main loop ------------------------------------------------------
         ui.phase("Autonomous loop")
         session_start = time.monotonic()
