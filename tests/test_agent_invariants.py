@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from autolean.agent import AutoLeanAgent
+from autolean.agent import MAX_REPEATED_ERRORS, AutoLeanAgent
+from autolean.error_classifier import ErrorCategory
 from autolean.lean_interface import BuildResult, Diagnostic
 from autolean.llm import (
     BaseBackend,
@@ -501,3 +502,75 @@ def test_an_overnight_run_stops_when_every_target_is_unattemptable(
     assert len(logged) <= agent.config.max_retries_per_sorry, (
         f"the run reset into the same skips: {len(logged)} records"
     )
+
+
+class TestBoundedWork:
+    """Every loop the agent runs has to be provably finite."""
+
+    def test_the_same_error_three_times_ends_the_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeating one diagnostic teaches nothing; the budget must not fund it."""
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        target_id = "AutoLean/Target.lean:2:target"
+
+        for seen in range(1, MAX_REPEATED_ERRORS + 1):
+            assert agent._should_bail_repeated_error(target_id) is (seen > MAX_REPEATED_ERRORS)
+            agent._record_error_category(target_id, ErrorCategory.TYPE_MISMATCH)
+
+        assert agent._should_bail_repeated_error(target_id)
+
+    def test_a_changing_error_keeps_the_budget(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A different diagnostic is new evidence, so the target continues."""
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        target_id = "AutoLean/Target.lean:2:target"
+
+        for category in (
+            ErrorCategory.TYPE_MISMATCH,
+            ErrorCategory.UNKNOWN_IDENTIFIER,
+            ErrorCategory.TYPE_MISMATCH,
+        ):
+            agent._record_error_category(target_id, category)
+
+        assert not agent._should_bail_repeated_error(target_id)
+
+    def test_a_statement_that_never_compiles_stops_repairing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Formalization repair is bounded even when nothing ever compiles."""
+        from autolean.theorem import FormalizationError, formalize_theorem
+
+        del tmp_path, monkeypatch
+        calls = {"n": 0}
+
+        def never_compiles(system: str, user: str, **kwargs: object) -> LLMResponse:
+            calls["n"] += 1
+            return LLMResponse(
+                text="theorem broken : Nonsense := by sorry",
+                model="test",
+                input_tokens=1,
+                output_tokens=1,
+            )
+
+        class _StubPlan:
+            sha256 = "a" * 64
+
+            def render(self) -> str:
+                return "objective: prove a claim"
+
+        class AlwaysRejects:
+            root = Path("/nonexistent")
+
+            def validate_candidate(self, *args: object, **kwargs: object) -> BuildResult:
+                return BuildResult(success=False, stderr="unknown identifier 'Nonsense'")
+
+        with pytest.raises(FormalizationError):
+            formalize_theorem(
+                "a claim",
+                _StubPlan(),  # type: ignore[arg-type]
+                never_compiles,
+                AlwaysRejects(),  # type: ignore[arg-type]
+                max_repairs=2,
+            )
+
+        assert calls["n"] <= 3, f"repair was unbounded: {calls['n']} model requests"
