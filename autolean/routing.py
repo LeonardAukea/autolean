@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 DEFAULT_ESCALATION_AFTER = 2
 RESEARCH_DIFFICULTY = 8
 
-_ELIGIBLE_OUTCOMES = frozenset({"fail_build", "fail_sorry_remains"})
+#: A timeout counts: the budget was spent elaborating the proof this model
+#: chose, and a stronger one can choose a cheaper route to the same goal.
+_ELIGIBLE_OUTCOMES = frozenset({"fail_build", "fail_sorry_remains", "fail_timeout"})
 _INELIGIBLE_CATEGORIES = frozenset(
     {
         "duplicate_declaration",

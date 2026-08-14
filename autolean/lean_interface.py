@@ -55,6 +55,9 @@ class BuildResult:
     stderr: str = ""
     duration_seconds: float = 0.0
     axioms: tuple[str, ...] | None = None
+    #: Lean was still running when its budget ran out, so the result carries
+    #: no verdict about the proof — only that elaborating it cost too much.
+    timed_out: bool = False
 
     @property
     def errors(self) -> list[Diagnostic]:
@@ -387,6 +390,7 @@ def _run_lean_check(
             success=False,
             stderr=f"Build timed out after {timeout}s",
             duration_seconds=timeout,
+            timed_out=True,
         )
     except OSError as e:
         return BuildResult(
@@ -506,6 +510,7 @@ class LeanProject:
                 stdout="",
                 stderr=f"Build timed out after {timeout}s",
                 duration_seconds=timeout,
+                timed_out=True,
             )
         except OSError as e:
             return BuildResult(
