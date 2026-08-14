@@ -142,6 +142,14 @@ class TrainingDataCollector:
 
         return paths
 
+    def _trainable(self) -> list[ProofExample]:
+        """Accepted proofs that carry the goal they closed.
+
+        Without a goal the exported turn is a proof of an unstated question,
+        which teaches an answer with no problem attached.
+        """
+        return [example for example in self.examples if example.success and example.goal_state]
+
     def export_instruction_jsonl(self, path: Path) -> Path | None:
         """Export as instruction-tuning JSONL (OpenAI messages format).
 
@@ -154,7 +162,7 @@ class TrainingDataCollector:
             {"role": "assistant", "content": "<proof>"}
         ]}
         """
-        positives = [e for e in self.examples if e.success]
+        positives = self._trainable()
         if not positives:
             return None
 
@@ -195,7 +203,7 @@ class TrainingDataCollector:
             {"from": "gpt", "value": "..."}
         ]}
         """
-        positives = [e for e in self.examples if e.success]
+        positives = self._trainable()
         if not positives:
             return None
 
@@ -251,7 +259,7 @@ class TrainingDataCollector:
 
         pairs: list[DPOPair] = []
         for attempts in by_target.values():
-            positives = [a for a in attempts if a.success]
+            positives = [a for a in attempts if a.success and a.goal_state]
             negatives = [a for a in attempts if not a.success and a.proof]
             if not positives or not negatives:
                 continue
