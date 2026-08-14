@@ -755,3 +755,31 @@ class TestEpochMemory:
         assert "rejected_by_lean" in proof_prompts[2], (
             "the epoch reset dropped the candidates Lean had already rejected"
         )
+
+
+class TestAuditBinding:
+    """The audit is only sound if it is aimed at the target."""
+
+    def test_the_agent_binds_every_audit_to_its_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        audited: list[dict[str, object]] = []
+
+        def recording_validate(*args: object, **kwargs: object) -> BuildResult:
+            del args
+            audited.append(kwargs)
+            return BuildResult(success=True, axioms=(), duration_seconds=0.1)
+
+        monkeypatch.setattr(agent.project, "validate_candidate", recording_validate)
+
+        agent.run()
+
+        assert audited, "the run validated no candidate"
+        for call in audited:
+            # Without a name and line the audit is skipped altogether, and a
+            # candidate reaching `native_decide` would be accepted with
+            # `Lean.ofReduceBool` in its closure.
+            assert call["declaration"] == "target"
+            assert call["declaration_line"] == 2
+            assert call["expected_environment"] == "a" * 64
