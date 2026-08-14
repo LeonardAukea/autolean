@@ -16,11 +16,12 @@ def _make_record(
     tokens: int = 100,
     error_cat: str = "",
     error_msg: str = "",
+    target_id: str = "",
 ) -> ExperimentRecord:
     return ExperimentRecord(
         cycle=1,
         timestamp="2026-01-01T00:00:00Z",
-        target_id=f"File.lean:10:{decl}",
+        target_id=target_id or f"File.lean:10:{decl}",
         decl_name=decl,
         file="File.lean",
         line=10,
@@ -123,3 +124,32 @@ class TestTrainingDataCollector:
         paths = c.export_all()
         assert "sft" in paths
         assert "dpo" in paths
+
+
+class TestPreferencePairIdentity:
+    """A preference pair compares two answers to one goal."""
+
+    def test_pairs_are_not_formed_across_placeholders(self, tmp_path: Path) -> None:
+        """Two `sorry`s in one declaration carry the same name and two goals."""
+        collector = TrainingDataCollector(tmp_path)
+        first, second = "File.lean:10:comm", "File.lean:20:comm"
+        collector.set_context(first, "\u22a2 a + b = b + a", "ctx")
+        collector.set_context(second, "\u22a2 a * b = b * a", "ctx")
+        collector.record_attempt(_make_record(decl="comm", target_id=first, outcome=Outcome.SUCCESS), "ring")
+        collector.record_attempt(
+            _make_record(decl="comm", target_id=second, outcome=Outcome.FAIL_BUILD), "rfl"
+        )
+
+        assert collector.export_dpo_jsonl(tmp_path / "dpo.jsonl") is None
+
+    def test_a_pair_is_formed_within_one_placeholder(self, tmp_path: Path) -> None:
+        collector = TrainingDataCollector(tmp_path)
+        collector.set_context("File.lean:10:comm", "\u22a2 a + b = b + a", "ctx")
+        collector.record_attempt(_make_record(decl="comm", outcome=Outcome.SUCCESS), "ring")
+        collector.record_attempt(_make_record(decl="comm", outcome=Outcome.FAIL_BUILD), "rfl")
+
+        path = collector.export_dpo_jsonl(tmp_path / "dpo.jsonl")
+
+        assert path is not None
+        pairs = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        assert [(pair["chosen"], pair["rejected"]) for pair in pairs] == [("ring", "rfl")]
