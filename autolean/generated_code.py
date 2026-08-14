@@ -35,6 +35,12 @@ _COMMAND_ESCAPE = re.compile(
     r"set_option|notation|infix|infixl|infixr|prefix|postfix"
     r")\b)"
 )
+#: The sandbox fixes elaboration options on the command line, and a
+#: file-level `set_option` outranks them: `set_option autoImplicit true`
+#: restores the auto-binding the sandbox switches off. Generated source
+#: states theorems; choosing how Lean elaborates them is not its part.
+_OPTION_COMMAND = re.compile(r"(?m)^\s*set_option\b")
+
 _DECLARATION = re.compile(
     r"(?m)^\s*(?:noncomputable\s+)?"
     r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b"
@@ -67,6 +73,8 @@ def validate_generated_declarations(code: str) -> str:
         raise GeneratedCodeError("declarations contain a command invocation")
     if re.search(r"(?m)^\s*import\b", code):
         raise GeneratedCodeError("generated declarations cannot select imports")
+    if _OPTION_COMMAND.search(code):
+        raise GeneratedCodeError("generated declarations cannot set elaboration options")
     if not _DECLARATION.search(code):
         raise GeneratedCodeError("output contains no Lean declaration")
     return code

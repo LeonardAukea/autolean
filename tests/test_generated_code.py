@@ -125,3 +125,25 @@ class TestDeclarationPrefixEscape:
     )
     def test_an_ordinary_proof_still_passes(self, proof: str) -> None:
         assert validate_generated_proof(proof) == proof.strip()
+
+
+class TestElaborationOptions:
+    """The sandbox chooses how Lean elaborates a candidate, not the model."""
+
+    def test_a_file_level_option_is_rejected(self) -> None:
+        with pytest.raises(GeneratedCodeError, match="elaboration options"):
+            validate_generated_declarations("set_option autoImplicit true\ntheorem t : True := trivial")
+
+    def test_an_option_reaching_the_kernel_is_rejected(self) -> None:
+        with pytest.raises(GeneratedCodeError, match="elaboration options"):
+            validate_generated_declarations("set_option debug.skipKernelTC true\ntheorem t : True := trivial")
+
+    def test_binders_and_namespaces_a_statement_needs_still_pass(self) -> None:
+        """A real formalization opens namespaces and binds variables."""
+        accepted = validate_generated_declarations(
+            "variable {V : Type*} [NormedAddCommGroup V]\n\n"
+            "open EuclideanGeometry\n\n"
+            "theorem t (x : V) : x = x := rfl"
+        )
+
+        assert "theorem t" in accepted
