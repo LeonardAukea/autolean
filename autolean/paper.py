@@ -309,8 +309,11 @@ def extract_claims_from_html(arxiv_id: str, *, timeout: float = 60.0) -> list[Cl
     Returns list of Claims with label, statement, kind, and proof_sketch.
     Returns empty list if HTML is unavailable or has no theorem environments.
     """
+    # An unversioned identifier resolves to the latest revision, which is the
+    # one `fetch_arxiv` hashes. Claims are read from that same revision, and
+    # fall back to v1 only where arXiv renders no HTML for the current one.
     versioned = re.search(r"v\d+$", arxiv_id) is not None
-    identifiers = [arxiv_id] if versioned else [f"{arxiv_id}v1", arxiv_id]
+    identifiers = [arxiv_id] if versioned else [arxiv_id, f"{arxiv_id}v1"]
     for identifier in identifiers:
         url = f"https://arxiv.org/html/{identifier}"
         console.print(f"  Fetching: [cyan]{url}[/]...")
