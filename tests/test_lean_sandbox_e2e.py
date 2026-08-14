@@ -223,6 +223,46 @@ theorem preceding : True := by
     assert exact.axioms == ()
 
 
+def test_audit_refuses_a_candidate_that_weakens_the_statement(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    """The name and line are satisfied by a theorem proving something else."""
+    project, source = project_and_source
+    honest = """\
+import Lean
+
+theorem bounded (a b : Nat) (h : b <= a) :
+    a + b <= 2 * a := by
+  omega
+"""
+    weakened = honest.replace("    a + b <= 2 * a := by\n  omega", "    True := by\n  trivial")
+
+    baseline = project.validate_candidate(source, honest, declaration="bounded", declaration_line=3)
+    assert baseline.success
+    assert baseline.statement_sha256
+
+    unpinned = project.validate_candidate(source, weakened, declaration="bounded", declaration_line=3)
+    pinned = project.validate_candidate(
+        source,
+        weakened,
+        declaration="bounded",
+        declaration_line=3,
+        expected_statement=baseline.statement_sha256,
+    )
+    rewritten_proof = project.validate_candidate(
+        source,
+        honest.replace("  omega", "  have hb := h\n  omega"),
+        declaration="bounded",
+        declaration_line=3,
+        expected_statement=baseline.statement_sha256,
+    )
+
+    assert unpinned.success, "the name and line alone accept a weaker theorem"
+    assert not pinned.success
+    assert "no longer states what it was asked to prove" in pinned.errors[0].message
+    assert rewritten_proof.success, "a different proof of the same statement must still pass"
+
+
 def test_pythagorean_formalization_and_proof_reach_isolated_lean(
     project_and_source: tuple[LeanProject, Path],
 ) -> None:

@@ -508,6 +508,22 @@ def improve(
         raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
     proof_indent = " " * min(proof_indents)
 
+    # `improve` rewrites a slice of source, and where a signature spans lines
+    # that slice can reach into the statement. Pin what the theorem says now,
+    # so a candidate that proves something weaker is refused.
+    with ui.status("Auditing the current statement..."):
+        baseline = project.validate_candidate(
+            file_path,
+            content,
+            timeout=120,
+            declaration=qualified_name,
+            declaration_line=theorem_line + 1,
+            expected_environment=proof_environment.sha256,
+        )
+    if not baseline.success or not baseline.statement_sha256:
+        detail = baseline.stderr or (str(baseline.errors[0]) if baseline.errors else "unknown error")
+        raise click.ClickException(f"'{theorem_name}' does not currently compile: {detail[:300]}")
+
     goal_prompts = {
         "shorter": "Make this proof as SHORT as possible. Minimize the number of tactics and lines.",
         "elegant": "Make this proof more ELEGANT and mathematically beautiful. Use clean, idiomatic Lean 4.",
@@ -573,6 +589,7 @@ def improve(
                     declaration=qualified_name,
                     declaration_line=theorem_line + 1,
                     expected_environment=proof_environment.sha256,
+                    expected_statement=baseline.statement_sha256,
                 )
 
             if build.success:
