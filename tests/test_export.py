@@ -326,3 +326,26 @@ def test_a_nested_workspace_is_not_exported(tmp_path: Path) -> None:
     result = export_project(root, tmp_path / "artifact", title="Artifact")
 
     assert not (result.path / "project" / "workspace").exists()
+
+
+def test_a_generated_module_is_not_hidden_by_a_longer_sibling(tmp_path: Path) -> None:
+    """`import A.Foo` occurs inside `import A.FooBar`; both must be imported."""
+    root = _project(tmp_path)
+    generated = root / "AutoLean" / "Generated"
+    generated.mkdir(parents=True)
+    for name in ("Pythagorean", "PythagoreanExtended"):
+        (generated / f"{name}.lean").write_text(
+            f"theorem {name.lower()} : True := by\n  trivial\n", encoding="utf-8"
+        )
+    # The longer module is already imported, so a substring test would report
+    # the shorter one as present and never add it.
+    (root / "AutoLean.lean").write_text(
+        "import AutoLean.Proof\nimport AutoLean.Generated.PythagoreanExtended\n", encoding="utf-8"
+    )
+
+    result = export_project(root, tmp_path / "artifact", title="Artifact")
+
+    library_root = (result.path / "project" / "AutoLean.lean").read_text(encoding="utf-8")
+    imported = {line.strip() for line in library_root.splitlines()}
+    assert "import AutoLean.Generated.Pythagorean" in imported
+    assert "import AutoLean.Generated.PythagoreanExtended" in imported
