@@ -73,6 +73,15 @@ def classify_error(message: str) -> ErrorCategory:
         return ErrorCategory.UNKNOWN_IDENTIFIER
     if "unsolved goals" in msg:
         return ErrorCategory.UNSOLVED_GOALS
+    # Lean reports a timeout as the failure of the tactic that hit it —
+    # "tactic 'simp' failed, nested error: (deterministic) timeout at `whnf`" —
+    # so the cost has to be recognised before the generic tactic failure below,
+    # which would otherwise advise decomposing the goal rather than avoiding
+    # the expensive tactic.
+    if "timeout" in msg or "(kernel) deep recursion" in msg:
+        return ErrorCategory.TIMEOUT
+    if "maximum recursion depth" in msg or "heartbeats" in msg:
+        return ErrorCategory.TIMEOUT
     if "tactic" in msg and ("failed" in msg or "error" in msg):
         return ErrorCategory.TACTIC_FAILED
     if "omega" in msg and "failed" in msg:
@@ -87,13 +96,7 @@ def classify_error(message: str) -> ErrorCategory:
         return ErrorCategory.SORRY_REMAINS
     if "expected" in msg and "got" in msg:
         return ErrorCategory.SYNTAX_ERROR
-    if "timeout" in msg or "deterministic timeout" in msg or "(kernel) deep recursion" in msg:
-        return ErrorCategory.TIMEOUT
-    if "maximum recursion depth" in msg or "max heartbeats" in msg:
-        return ErrorCategory.TIMEOUT
     if "elaboration" in msg or "failed to synthesize" in msg:
-        return ErrorCategory.ELABORATION_ERROR
-    if "failed to synthesize instance" in msg:
         return ErrorCategory.ELABORATION_ERROR
     if "unexpected token" in msg or "expected token" in msg:
         return ErrorCategory.SYNTAX_ERROR
@@ -102,8 +105,6 @@ def classify_error(message: str) -> ErrorCategory:
     # Function application errors
     if "function expected" in msg:
         return ErrorCategory.APPLICATION_ERROR
-    if "application type mismatch" in msg:
-        return ErrorCategory.TYPE_MISMATCH
     if "incorrect number of arguments" in msg:
         return ErrorCategory.APPLICATION_ERROR
     if "too many arguments" in msg:
