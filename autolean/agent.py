@@ -249,6 +249,7 @@ class AutoLeanAgent:
         self.target_filter = target_filter  # Only process targets matching this decl_name
         self.target_file = target_file.resolve() if target_file is not None else None
         self._interrupted = False
+        self._accepting = False
         self._terminal_failure: str | None = None
         self._consecutive_llm_errors = 0
         self._environment_sha256 = ""
@@ -454,7 +455,15 @@ class AutoLeanAgent:
     # -- Signal handling ----------------------------------------------------
 
     def _handle_interrupt(self, signum: int, frame: object) -> None:
+        del signum, frame
         if self._interrupted:
+            if self._accepting:
+                # Between installing a proof and recording it. Quitting here
+                # leaves a kernel-checked proof in the file with nothing
+                # saying where it came from, and the next scan finds no
+                # `sorry` to revisit it by.
+                console.print("\n[yellow]Recording the accepted proof, then stopping...[/]")
+                return
             console.print("\n[red]Force quit.[/]")
             raise SystemExit(1)
         self._interrupted = True
@@ -466,7 +475,8 @@ class AutoLeanAgent:
         """Main entry point — the autonomous loop."""
         from autolean.tracker import setup_logging
 
-        signal.signal(signal.SIGINT, self._handle_interrupt)
+        for received in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(received, self._handle_interrupt)
 
         try:
             self.config.validate()
@@ -668,6 +678,7 @@ class AutoLeanAgent:
                     model="deterministic-tactic-search",
                     backend="lean",
                 )
+                self._accepting = True
                 try:
                     self.project.write_file(
                         t.file,
@@ -676,6 +687,7 @@ class AutoLeanAgent:
                     )
                     self.tracker.commit_success(record)
                 except (GitError, OSError) as e:
+                    self._accepting = False
                     try:
                         self.project.write_file(
                             t.file,
@@ -691,6 +703,7 @@ class AutoLeanAgent:
                     return AgentRunResult(False, message)
                 presearch_proved += 1
                 self.tracker.log(record)
+                self._accepting = False
                 console.print(
                     f"  [bold green]PROVED (tactic search):[/bold green] "
                     f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
@@ -791,6 +804,7 @@ class AutoLeanAgent:
             if record.outcome is not Outcome.SKIPPED:
                 self._epoch_reached_lean = True
             self.tracker.log(record)
+            self._accepting = False
 
             # Accepted proof and gap edits can shift every later source line.
             if record.outcome in (Outcome.SUCCESS, Outcome.GAP_FILLED):
@@ -1268,6 +1282,7 @@ class AutoLeanAgent:
                 model=response.model,
             )
         if sorry_gone:
+            self._accepting = True
             try:
                 self.project.write_file(
                     file_path,
@@ -1275,6 +1290,7 @@ class AutoLeanAgent:
                     expected_content=original_content,
                 )
             except OSError as e:
+                self._accepting = False
                 return self._make_record(
                     cycle,
                     target,
@@ -1455,6 +1471,7 @@ class AutoLeanAgent:
                                     model=response.model,
                                 )
                                 gap_record.decl_name = gap.name
+                                self._accepting = True
                                 try:
                                     self.project.write_file(
                                         file_path,

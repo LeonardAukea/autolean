@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -825,3 +826,35 @@ class TestResumedCycleNumbering:
         assert all(record.cycle > 7 for record in proofs), (
             f"a resumed run reused earlier cycle numbers: {[r.cycle for r in proofs]}"
         )
+
+
+class TestSignalDurability:
+    """A signal stops a run between experiments, not inside one."""
+
+    def test_a_termination_signal_is_handled_like_an_interrupt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        installed: dict[int, object] = {}
+        monkeypatch.setattr(
+            "autolean.agent.signal.signal",
+            lambda number, handler: installed.setdefault(number, handler),
+        )
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+
+        agent.run()
+
+        assert signal.SIGTERM in installed, "kill(1), systemd and timeout(1) send SIGTERM"
+        assert installed[signal.SIGTERM] == installed[signal.SIGINT]
+
+    def test_a_force_quit_waits_for_an_accepted_proof_to_be_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent._interrupted = True
+        agent._accepting = True
+
+        agent._handle_interrupt(signal.SIGTERM, None)  # must not raise
+
+        agent._accepting = False
+        with pytest.raises(SystemExit):
+            agent._handle_interrupt(signal.SIGTERM, None)
