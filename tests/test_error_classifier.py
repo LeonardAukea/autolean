@@ -137,3 +137,43 @@ class TestRetryHintFor:
         hint = retry_hint_for(ErrorCategory.TYPE_MISMATCH, long_msg)
         # The hint should include the message but capped at 500 chars
         assert len(hint) < 1000 + 200  # some overhead for the template text
+
+
+class TestTimeoutBehindATacticFailure:
+    """Lean reports a timeout as the failure of the tactic that hit it."""
+
+    NESTED = (
+        "tactic 'simp' failed, nested error: (deterministic) timeout at `whnf`, "
+        "maximum number of heartbeats (200000) has been reached"
+    )
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            NESTED,
+            "tactic 'decide' failed, maximum recursion depth has been reached",
+            "(deterministic) timeout at `whnf`, maximum number of heartbeats has been reached",
+            "(kernel) deep recursion detected",
+        ],
+    )
+    def test_a_cost_failure_is_a_timeout(self, message: str) -> None:
+        assert classify_error(message) is ErrorCategory.TIMEOUT
+
+    def test_the_model_is_told_to_stop_spending(self) -> None:
+        """The generic tactic hint would send it to another expensive tactic."""
+        hint = retry_hint_for(classify_error(self.NESTED), self.NESTED)
+
+        assert "TIMEOUT" in hint
+        assert "simp" in hint
+        assert "decompose" not in hint
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "tactic 'rfl' failed, the left-hand side is not definitionally equal",
+            "simp made no progress",
+            "unknown tactic 'zorp'",
+        ],
+    )
+    def test_an_ordinary_tactic_failure_is_unaffected(self, message: str) -> None:
+        assert classify_error(message) is ErrorCategory.TACTIC_FAILED
