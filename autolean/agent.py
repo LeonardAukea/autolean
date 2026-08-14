@@ -331,6 +331,8 @@ class AutoLeanAgent:
         # Each target's source identity stays stable until its file is edited.
         self._goal_cache: dict[str, str | None] = {}
         self._evidence = AttemptEvidence()
+        # An epoch of nothing but skips would reset into the same skips.
+        self._epoch_reached_lean = False
         self.structure = LeanStructureProvider()
         self.proof_context = ProofContextBuilder(self.project.root, self._step)
 
@@ -780,6 +782,13 @@ class AutoLeanAgent:
                 if self.config.max_cycles == 0 and targets:
                     # Overnight mode resets bounded target histories for a new
                     # experiment epoch. Backend sampling policy stays stable.
+                    if not self._epoch_reached_lean:
+                        console.print(
+                            "\n[yellow]Every target in the last epoch was skipped before "
+                            "reaching Lean. Another pass would repeat it.[/]"
+                        )
+                        break
+                    self._epoch_reached_lean = False
                     epoch = max(self._attempts.values()) // self.config.max_retries_per_sorry + 1
                     console.print(
                         f"\n[cyan]Epoch {epoch}:[/] All retries exhausted. "
@@ -805,6 +814,8 @@ class AutoLeanAgent:
             )
 
             record = self._try_fill_sorry(cycle, target, attempt_num)
+            if record.outcome is not Outcome.SKIPPED:
+                self._epoch_reached_lean = True
             self.tracker.log(record)
 
             # Accepted proof and gap edits can shift every later source line.
