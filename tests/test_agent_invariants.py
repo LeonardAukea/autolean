@@ -858,3 +858,34 @@ class TestSignalDurability:
         agent._accepting = False
         with pytest.raises(SystemExit):
             agent._handle_interrupt(signal.SIGTERM, None)
+
+
+class TestPreSearchTrainingData:
+    """A tactic-search success is only an example if its goal is known."""
+
+    def test_a_pre_search_proof_carries_the_goal_it_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent.dry_run = False
+        monkeypatch.setattr(agent.project, "try_tactics_fast", lambda *a, **k: "trivial")
+        monkeypatch.setattr(
+            agent.project,
+            "get_goal_via_hole_punch",
+            lambda *a, **k: "⊢ True",
+        )
+        monkeypatch.setattr(agent.project, "write_file", lambda *a, **k: None)
+        monkeypatch.setattr(agent.tracker, "commit_success", lambda record: None)
+        # A run outside a repository with an author identity never reaches
+        # the pre-search, and this test is about what the pre-search records.
+        monkeypatch.setattr(agent.tracker, "setup_branch", lambda *a, **k: "test")
+
+        agent.run()
+
+        examples = [example for example in agent.collector.examples if example.success]
+        assert examples, "the pre-search recorded no training example"
+        assert all(example.goal_state for example in examples), (
+            "a proof was collected without the goal it closed"
+        )

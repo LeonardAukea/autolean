@@ -657,6 +657,15 @@ class AutoLeanAgent:
                     )
                     self._step(f"Tactic proof rejected: {detail[:160]}", "red")
                     continue
+                # Read the goal while the placeholder is still in the file: a
+                # training example carrying a proof and no goal teaches an
+                # answer to an unstated question.
+                goal_state = self._goal_cache.get(t.id) or self.project.get_goal_via_hole_punch(
+                    t.file,
+                    t.line,
+                    t.col,
+                    timeout=self.config.cycle_timeout_seconds,
+                )
                 # Record as success
                 cycle = self.tracker.next_cycle()
                 record = ExperimentRecord(
@@ -709,7 +718,9 @@ class AutoLeanAgent:
                     f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
                 )
 
-                self.collector.record_attempt(record, tactic)
+                if goal_state:
+                    self.collector.set_context(t.id, goal_state, t.context_before)
+                    self.collector.record_attempt(record, tactic)
                 self.skill_memory.learn_from_proof(
                     theorem_name=t.decl_name,
                     theorem_statement=t.context_before[:200],
