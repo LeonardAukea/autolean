@@ -1,0 +1,50 @@
+name: Paper profile
+description: Propose a provenance-bound paper inventory and Lean mapping.
+title: ""
+labels: [paper]
+body:
+  - type: textarea
+    id: source
+    attributes:
+      label: Primary source
+      description: Give the canonical URL, revision, authors, title, and date.
+    validations:
+      required: true
+  - type: textarea
+    id: identity
+    attributes:
+      label: Artifact identity
+      description: Give the PDF and source-archive SHA-256 values.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: inventory
+    attributes:
+      label: Numbered inventory
+      description: List the exact definitions, lemmas, and theorems in scope.
+    validations:
+      required: true
+  - type: textarea
+    id: mapping
+    attributes:
+      label: Reviewed Lean mapping
+      description: Map each item to exact declarations in the pinned closure.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+      description: Name the elaboration, provenance, export, and review checks.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Evidence boundary
+      description: >-
+        State the exact semantic strength established by the mapping and Lean
+        result.
+    validations:
+      required: true

@@ -1,0 +1,24 @@
+{
+  "backend": "claude_cli",
+  "export_manifest_sha256": "59b4a91f213425f13f0ed4c4694e3a1de4213ccd169efb7fc090711590db0fbf",
+  "generated_module": "DistSqEqDistSqAddDistSqOfAngleEqPiDivTwo.lean",
+  "generated_sha256": "8bc05c9b4f86702a26e931ae27cab90dfc13122fa755f33f0f4ccc0f52e6cc92",
+  "media": [
+    {
+      "name": "autolean-pythagorean.gif",
+      "sha256": "9b287ab9a331b662f9db0131d135ac04d41d4cb44d78215b04bdaaa65ce4dfe2",
+      "size": 6105202
+    },
+    {
+      "name": "autolean-pythagorean.mp4",
+      "sha256": "ebdd697f7bac9164dcbef354478c710200bf09bcdb5bf862e5221b2b550d89fa",
+      "size": 4498300
+    }
+  ],
+  "model": "fable",
+  "recorded_at": "2026-08-13T07:51:27.726857Z",
+  "schema": "autolean.demo.v1",
+  "session": "20260813-074326-the-pythagorean-theorem-40332e7e",
+  "statement": "the Pythagorean theorem",
+  "tape_sha256": "ba44165af708950a1796d7735af90550ac1f26cbf8baaeadb0144200c5d91b42"
+}

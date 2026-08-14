@@ -1,0 +1,136 @@
+[project]
+name = "autolean-proof"
+version = "0.5.0"
+description = "Autonomous Lean 4 proof agent with sandboxed, content-addressed verification."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "AutoLean Contributors" }]
+maintainers = [{ name = "Leonard Aukea" }]
+keywords = ["lean4", "theorem-proving", "ai", "autonomous-agent", "formal-verification"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
+    "rich>=15.0.0",
+    "textual>=8.2.8",
+    "click>=8.4.2",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+# Tree-sitter supplies advisory structural context for prompts. Lean decides
+# correctness, so a run without it loses context and nothing else.
+structure = [
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.3",
+]
+pdf = [
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
+]
+# Hosted API providers use their official Python SDKs. Subscription providers
+# invoke the installed Claude Code and Codex CLIs.
+anthropic = ["anthropic>=0.121.0"]
+openai = ["openai>=2.54.0"]
+dev = [
+    "hatchling==1.31.0",
+    "pip-audit>=2.10.1",
+    "ruff>=0.16.2",
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+    "mypy>=2.3.0",
+    "types-PyYAML>=6.0.12.20260724",
+]
+all = [
+    "tree-sitter>=0.26.0",
+    "tree-sitter-language-pack>=1.14.3",
+    "pymupdf>=1.28.2",
+    "pymupdf4llm>=1.28.2",
+    "anthropic>=0.121.0",
+    "openai>=2.54.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/LeonardAukea/autolean"
+Documentation = "https://github.com/LeonardAukea/autolean/tree/main/docs"
+Repository = "https://github.com/LeonardAukea/autolean.git"
+Issues = "https://github.com/LeonardAukea/autolean/issues"
+Releases = "https://github.com/LeonardAukea/autolean/releases"
+
+[project.scripts]
+autolean = "autolean.__main__:main"
+
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autolean"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.beads",
+    "/.claude",
+    "/.codedb",
+    "/.reviews",
+    "/.sentrux",
+    "/codedb.snapshot",
+    "/docs/assets",
+    "/workspace/.autolean",
+    "/workspace/.codedb",
+    "/workspace/.lake",
+    "/workspace/AutoLean/Generated",
+    "/workspace/AutoLean/Papers",
+    "/workspace/AutoLean/Paper_*.lean",
+    "/workspace/AutoLean/UserTheorems.lean",
+    "/workspace/logs",
+    "/workspace/program.md",
+    "/workspace/skills",
+    "/workspace/training_data",
+    "/workspace/workspace",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+# workspace/ holds the vendored Lean project, including mathlib's own scripts.
+extend-exclude = ["workspace"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+# Lean and mathematical notation (ℝ, γ, ∨, ∣, →) is the subject matter here,
+# so the ambiguous-unicode rules fire on correct code.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that run lake build (deselect with '-m \"not slow\"')",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["autolean"]
+exclude = ["^workspace/"]
+
+# PyMuPDF Layout imports NumPy at runtime. NumPy's current stubs use Python
+# 3.12 type-alias syntax, while AutoLean continues to support Python 3.11.
+[[tool.mypy.overrides]]
+module = ["pymupdf", "pymupdf.*", "pymupdf4llm", "pymupdf4llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
