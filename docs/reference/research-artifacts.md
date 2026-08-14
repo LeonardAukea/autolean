@@ -50,11 +50,26 @@ Schema: `autolean.project-export.v1`
 
 Location: `EXPORT/manifest.json`
 
-An export selects one target or session and its project-local Lean import
-closure. The manifest hashes every included file and links the proof
-environment, session, paper records, standalone Lake project, and companion
-LaTeX source. Export verification rejects missing records, altered files, and
-paper records whose accepted response no longer yields the stored plan.
+Accepted proofs are written to `AutoLean/Generated/` inside the Lean project
+and committed there. That directory is the working copy; an export is the
+portable one.
+
+```bash
+autolean export ARTIFACT --title "..."            # every accepted proof
+autolean export ARTIFACT --session ID --title ... # one session's closure
+```
+
+Either form produces a directory holding `project/` — a standalone Lake
+project that builds on its own with `cd project && lake build` — `paper/` for
+the companion LaTeX source, and `manifest.json`. The whole-project form
+imports each generated proof from the library root, so building the export
+checks the results. The session form narrows to one target and its
+project-local import closure.
+
+The manifest hashes every included file and links the proof environment,
+session, paper records, standalone Lake project, and companion LaTeX source.
+Export verification rejects missing records, altered files, and paper records
+whose accepted response no longer yields the stored plan.
 
 ## Release manifest
 
