@@ -325,8 +325,23 @@ def _contains_point(node: Node, line: int, col: int) -> bool:
     return start <= point <= end
 
 
-def _syntax_path(root: Node, line: int, col: int) -> tuple[str, ...]:
-    point = (max(0, line - 1), max(0, col))
+def _byte_column(source: bytes, line: int, col: int) -> int:
+    """Convert a character column to the byte column tree-sitter counts in.
+
+    Lean source is full of multi-byte characters, so on a line containing
+    `⊢`, `α` or `→` the two disagree and a character column addresses the
+    wrong node.
+    """
+    lines = source.split(b"\n")
+    index = max(0, line - 1)
+    if index >= len(lines):
+        return max(0, col)
+    text = lines[index].decode("utf-8", errors="replace")
+    return len(text[: max(0, col)].encode("utf-8"))
+
+
+def _syntax_path(root: Node, line: int, column: int) -> tuple[str, ...]:
+    point = (max(0, line - 1), column)
     token_end = (point[0], point[1] + len("sorry"))
     leaf = root.named_descendant_for_point_range(point, token_end)
     path: list[str] = []
@@ -461,6 +476,10 @@ class LeanStructureProvider:
             )
 
         root = parsed.tree.root_node
+        # tree-sitter addresses source by byte; a caller reports the column in
+        # characters. On a line carrying `⊢`, `α` or `→` the two disagree, so
+        # convert once here and address the tree in bytes below.
+        column = _byte_column(parsed.source, line, col)
         candidates = [
             item for item in parsed.declarations if item[0].span.start_line <= line <= item[0].span.end_line
         ]
@@ -480,7 +499,7 @@ class LeanStructureProvider:
         quality = ParseQuality.COMPLETE
         if parsed.error_nodes:
             quality = ParseQuality.RECOVERED
-            if any(_contains_point(error, line, col) for error in parsed.error_nodes):
+            if any(_contains_point(error, line, column) for error in parsed.error_nodes):
                 quality = ParseQuality.TARGET_RECOVERED
 
         error_spans = tuple(
@@ -510,7 +529,7 @@ class LeanStructureProvider:
             imports=parsed.imports,
             namespace=namespace,
             target=target,
-            syntax_path=_syntax_path(root, line, col),
+            syntax_path=_syntax_path(root, line, column),
             referenced_declarations=references,
             preceding_declarations=before,
             following_declarations=after,

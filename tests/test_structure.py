@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import tree_sitter_language_pack
 
-from autolean.structure import LeanStructureProvider, ParseQuality
+from autolean.structure import LeanStructureProvider, ParseQuality, _byte_column
 
 
 @pytest.fixture
@@ -148,3 +148,35 @@ def test_language_pack_identity_hashes_the_cached_grammar(
     )
 
     assert "grammar-sha256/" in context.parser
+
+
+class TestByteColumns:
+    """Tree-sitter addresses source by byte; callers report characters."""
+
+    #: `α` and `→` before the placeholder push its byte column past its
+    #: character column, so the two address different nodes.
+    UNICODE_SOURCE = (
+        "import Mathlib\n"
+        "\n"
+        "theorem tri (\u03b1 : Type) (f : \u03b1 \u2192 \u03b1) (x : \u03b1) : f x = f x := by\n"
+        "  have h : \u2200 y : \u03b1, f y = f y := by sorry\n"
+        "  exact h x\n"
+    )
+
+    def test_a_placeholder_after_unicode_is_located(self) -> None:
+        line = 4
+        col = self.UNICODE_SOURCE.splitlines()[line - 1].index("sorry")
+        assert _byte_column(self.UNICODE_SOURCE.encode(), line, col) != col
+
+        context = LeanStructureProvider().inspect(Path("Tri.lean"), self.UNICODE_SOURCE, line=line, col=col)
+
+        if context.quality is ParseQuality.UNAVAILABLE:
+            pytest.skip("Lean grammar unavailable")
+        assert context.syntax_path[-1] == "sorry"
+
+    def test_an_ascii_column_is_unchanged(self) -> None:
+        assert _byte_column(b"theorem t : True := by\n  sorry\n", 2, 2) == 2
+
+    def test_a_column_past_the_line_is_clamped(self) -> None:
+        assert _byte_column(b"short\n", 1, 999) == len("short")
+        assert _byte_column(b"short\n", 99, 3) == 3
