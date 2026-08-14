@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import re
@@ -58,6 +59,9 @@ class BuildResult:
     #: Lean was still running when its budget ran out, so the result carries
     #: no verdict about the proof — only that elaborating it cost too much.
     timed_out: bool = False
+    #: Digest of the audited declaration's elaborated statement. The axiom
+    #: report says what a proof rests on; this says what it proves.
+    statement_sha256: str = ""
 
     @property
     def errors(self) -> list[Diagnostic]:
@@ -232,6 +236,10 @@ def _declaration_audit_source(
               targetLine <= ranges.range.endPos.line do
             throwError m!"line {{targetLine}} is outside {{declarationName}}"
           logInfo "AUTOLEAN_AUDIT_{nonce}_DECLARATION_OK"
+          let statement ← liftTermElabM do
+            let info ← getConstInfo declarationName
+            return toString (← Lean.Meta.ppExpr info.type)
+          logInfo m!"AUTOLEAN_AUDIT_{nonce}_STATEMENT:{{statement.replace "\n" " "}}"
           let axioms ← collectAxioms declarationName
           for axiomName in axioms do
             logInfo m!"AUTOLEAN_AUDIT_{nonce}_AXIOM:{{axiomName}}"
@@ -240,15 +248,60 @@ def _declaration_audit_source(
     )
 
 
-def _parse_declaration_audit(output: str, nonce: str) -> tuple[str, ...] | None:
-    """Parse the nonce-bound machine report emitted by the trusted audit."""
+def _parse_declaration_audit(output: str, nonce: str) -> tuple[tuple[str, ...], str] | None:
+    """Parse the nonce-bound machine report emitted by the trusted audit.
+
+    Returns the axioms the declaration rests on and the digest of the
+    statement they were collected for.
+    """
     prefix = f"AUTOLEAN_AUDIT_{nonce}_"
     if output.count(f"{prefix}DECLARATION_OK") != 1:
         return None
     if output.count(f"{prefix}COMPLETE") != 1:
         return None
-    pattern = re.compile(rf"{re.escape(prefix)}AXIOM:([^\r\n]+)")
-    return tuple(sorted({match.group(1).strip() for match in pattern.finditer(output)}))
+    statements = re.findall(rf"{re.escape(prefix)}STATEMENT:([^\r\n]*)", output)
+    if len(statements) != 1:
+        return None
+    axioms = re.compile(rf"{re.escape(prefix)}AXIOM:([^\r\n]+)")
+    return (
+        tuple(sorted({match.group(1).strip() for match in axioms.finditer(output)})),
+        statement_digest(statements[0]),
+    )
+
+
+def statement_digest(statement: str) -> str:
+    """Identify one elaborated statement independently of its layout.
+
+    The pretty-printer chooses where to break lines, so the digest is taken
+    over the text with its spacing collapsed.
+    """
+    return hashlib.sha256(" ".join(statement.split()).encode()).hexdigest()
+
+
+def _apply_statement_policy(
+    result: BuildResult,
+    declaration: str,
+    expected_statement: str | None,
+) -> BuildResult:
+    """Require an audited candidate to prove the statement it was given."""
+    if not result.success or expected_statement is None:
+        return result
+    if result.statement_sha256 != expected_statement:
+        result.success = False
+        result.diagnostics.append(
+            Diagnostic(
+                file="<audit>",
+                line=0,
+                col=0,
+                severity="error",
+                message=(
+                    f"{declaration} no longer states what it was asked to prove "
+                    f"(statement {result.statement_sha256[:12] or 'unreported'}, "
+                    f"expected {expected_statement[:12]})"
+                ),
+            )
+        )
+    return result
 
 
 def _apply_axiom_policy(
@@ -655,10 +708,12 @@ class LeanProject:
             audit.stderr = f"{candidate.stderr}\n{audit.stderr}"
             if not audit.success:
                 return audit
-            audit.axioms = _parse_declaration_audit(
+            report = _parse_declaration_audit(
                 f"{audit.stdout}\n{audit.stderr}",
                 nonce,
             )
+            if report is not None:
+                audit.axioms, audit.statement_sha256 = report
             return audit
 
     def validate_candidate(
@@ -670,6 +725,7 @@ class LeanProject:
         declaration: str | None = None,
         declaration_line: int | None = None,
         expected_environment: str | None = None,
+        expected_statement: str | None = None,
         allowed_axioms: frozenset[str] = CORE_LOGICAL_AXIOMS,
     ) -> BuildResult:
         """Validate generated source without changing the project tree.
@@ -678,6 +734,11 @@ class LeanProject:
         declaration accepted by Lean. Supplying an environment identity
         compares the proof closure after elaboration with the expected value,
         so a closure change before or during elaboration fails closed.
+
+        A caller that rewrites source around a proof supplies the statement
+        digest it started from; a candidate proving anything else is
+        rejected, since the name and line alone are satisfied by a theorem
+        whose conclusion has been replaced.
         """
         lean_file.resolve().relative_to(self.root)
         if (declaration is None) != (declaration_line is None):
@@ -698,6 +759,7 @@ class LeanProject:
             )
         if declaration is not None:
             result = _apply_axiom_policy(result, declaration, allowed_axioms)
+            result = _apply_statement_policy(result, declaration, expected_statement)
 
         if expected_environment is not None:
             mismatch = self._environment_mismatch(expected_environment)

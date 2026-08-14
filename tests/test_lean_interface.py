@@ -10,9 +10,11 @@ from autolean import lean_interface
 from autolean.lean_interface import (
     BuildResult,
     LeanProject,
+    _apply_statement_policy,
     _declaration_audit_source,
     _parse_declaration_audit,
     _parse_diagnostics,
+    statement_digest,
 )
 from autolean.provenance import ProofEnvironment, ProofEnvironmentError
 
@@ -105,15 +107,26 @@ class TestAxiomAudit:
     def test_parses_nonce_bound_machine_report(self) -> None:
         output = (
             "AUTOLEAN_AUDIT_token_DECLARATION_OK\n"
+            "AUTOLEAN_AUDIT_token_STATEMENT:\u2200 (a b : Nat), b \u2264 a \u2192 a + b \u2264 2 * a\n"
             "AUTOLEAN_AUDIT_token_AXIOM:Classical.choice\n"
             "AUTOLEAN_AUDIT_token_AXIOM:propext\n"
             "AUTOLEAN_AUDIT_token_COMPLETE\n"
         )
 
         assert _parse_declaration_audit(output, "token") == (
-            "Classical.choice",
-            "propext",
+            ("Classical.choice", "propext"),
+            statement_digest("\u2200 (a b : Nat), b \u2264 a \u2192 a + b \u2264 2 * a"),
         )
+
+    def test_a_report_without_a_statement_is_incomplete(self) -> None:
+        """The axioms mean nothing without the statement they were collected for."""
+        output = (
+            "AUTOLEAN_AUDIT_token_DECLARATION_OK\n"
+            "AUTOLEAN_AUDIT_token_AXIOM:propext\n"
+            "AUTOLEAN_AUDIT_token_COMPLETE\n"
+        )
+
+        assert _parse_declaration_audit(output, "token") is None
 
     def test_machine_report_requires_matching_nonce_and_completion(self) -> None:
         forged = "AUTOLEAN_AUDIT_other_DECLARATION_OK\nAUTOLEAN_AUDIT_other_COMPLETE\n"
@@ -784,3 +797,36 @@ class TestAxiomPolicy:
 
         assert not failed.success
         assert not failed.diagnostics
+
+
+class TestStatementPolicy:
+    """An audited candidate proves the statement it was asked about."""
+
+    def test_layout_does_not_change_a_statement_identity(self) -> None:
+        assert statement_digest("∀ (a b : Nat),\n  a + b ≤ 2 * a") == statement_digest(
+            "∀ (a b : Nat), a + b ≤ 2 * a"
+        )
+
+    def test_a_different_statement_is_rejected(self) -> None:
+        result = BuildResult(success=True, statement_sha256="a" * 64)
+
+        checked = _apply_statement_policy(result, "target", "b" * 64)
+
+        assert not checked.success
+        assert "no longer states what it was asked to prove" in checked.errors[0].message
+
+    def test_the_same_statement_passes(self) -> None:
+        result = BuildResult(success=True, statement_sha256="a" * 64)
+
+        assert _apply_statement_policy(result, "target", "a" * 64).success
+
+    def test_an_unreported_statement_is_rejected(self) -> None:
+        """A candidate whose audit reported nothing cannot be shown to match."""
+        result = BuildResult(success=True)
+
+        assert not _apply_statement_policy(result, "target", "a" * 64).success
+
+    def test_a_caller_that_pins_nothing_is_unaffected(self) -> None:
+        result = BuildResult(success=True, statement_sha256="a" * 64)
+
+        assert _apply_statement_policy(result, "target", None).success
