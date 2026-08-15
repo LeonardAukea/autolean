@@ -717,13 +717,7 @@ def _prepare_research_brief(lean_root: Path, problem: OpenProblem) -> tuple[Path
     multiple=True,
     help="Add a mathematical constraint or preferred method.",
 )
-@click.option(
-    "--program",
-    "-p",
-    type=click.Path(exists=True, path_type=Path),
-    default="program.md",
-    help="Path to program.md.",
-)
+@program_option
 def challenge(
     problem_id: str | None,
     field: str | None,
