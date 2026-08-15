@@ -513,13 +513,6 @@ def _parse_arxiv_html_theorems(html: str) -> list[Claim]:
     return claims
 
 
-def _strip_html(text: str) -> str:
-    """Remove HTML tags and normalize whitespace, preserving math notation."""
-    from bs4 import BeautifulSoup
-
-    return _html_fragment_text(BeautifulSoup(text, "html.parser"))
-
-
 def _html_fragment_text(fragment: Any, *, remove_tags: bool = False) -> str:
     """Extract normalized text while preserving LaTeX carried by MathML."""
     from bs4 import BeautifulSoup, Tag
