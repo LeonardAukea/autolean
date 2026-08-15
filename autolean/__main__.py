@@ -35,7 +35,10 @@ _run_agent = cli_runtime.run_agent
 _run_session_agent = cli_runtime.run_session_agent
 backend_option = cli_runtime.backend_option
 escalation_options = cli_runtime.escalation_options
+extract_only_option = cli_runtime.extract_only_option
 model_option = cli_runtime.model_option
+pages_option = cli_runtime.pages_option
+paper_output_option = cli_runtime.paper_output_option
 paddleocr_url_option = cli_runtime.paddleocr_url_option
 pdf_engine_option = cli_runtime.pdf_engine_option
 program_option = cli_runtime.program_option
@@ -1093,22 +1096,16 @@ def _prepare_paper(
 
 @main.command()
 @click.argument("source")
-@click.option("--pages", type=str, default=None, help="Page range (e.g., '1-5').")
+@pages_option
 @pdf_engine_option
 @paddleocr_url_option
-@click.option("--extract-only", is_flag=True, help="Extract claims without formalizing them.")
+@extract_only_option
 @click.option(
     "--formalize-only",
     is_flag=True,
     help="Write the Lean project without running proof search.",
 )
-@click.option(
-    "--output",
-    "-o",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Output Lean file inside the configured project.",
-)
+@paper_output_option
 @click.option(
     "--max-cycles",
     type=click.IntRange(min=0),
@@ -1234,17 +1231,11 @@ def verify(
 
 @main.command("verify-paper", hidden=True)
 @click.argument("source")
-@click.option("--pages", type=str, default=None, help="Page range (e.g., '1-5').")
+@pages_option
 @pdf_engine_option
 @paddleocr_url_option
-@click.option("--extract-only", is_flag=True, help="Extract claims only.")
-@click.option(
-    "--output",
-    "-o",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Output Lean file.",
-)
+@extract_only_option
+@paper_output_option
 @model_option
 @backend_option
 @program_option

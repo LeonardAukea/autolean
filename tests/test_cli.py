@@ -1273,3 +1273,15 @@ class TestOvernightSession:
 
         sessions = [item for item in SessionStore(workspace).list() if item.kind is SessionKind.PROJECT]
         assert len(sessions) == 1, f"each night started a new session: {len(sessions)}"
+
+
+def test_the_paper_commands_describe_shared_flags_identically() -> None:
+    """One flag, one description — `verify-paper` accepts a subset of `verify`."""
+    canonical = {param.name: param for param in main.commands["verify"].params}
+    legacy = {param.name: param for param in main.commands["verify-paper"].params}
+
+    shared = sorted(set(canonical) & set(legacy) - {None})
+    assert shared, "the two paper commands share no flags"
+    for name in shared:
+        assert canonical[name].opts == legacy[name].opts, name
+        assert getattr(canonical[name], "help", None) == getattr(legacy[name], "help", None), name
