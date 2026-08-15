@@ -202,6 +202,12 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
 # Local profiles — Lean-specialised open weights
 # ---------------------------------------------------------------------------
 
+#: Pinned Muse Glimmer revisions. The setup command downloads the revision
+#: the profile records, so the artifact a user fetches is the one whose
+#: digest is pinned beside it.
+_GLIMMER_GGUF_REVISION = "93769bc7ab5ad1e9cd22d857e3138cf5d977ae81"
+_GLIMMER_BF16_REVISION = "f84ecc3a0ea984a4c04542a84269e3d065350a6e"
+
 _LOCAL: tuple[ModelProfile, ...] = (
     ModelProfile(
         name="muse-glimmer",
@@ -211,12 +217,12 @@ _LOCAL: tuple[ModelProfile, ...] = (
         temperature=0.0,
         effort="low",
         seed=0,
-        revision="93769bc7ab5ad1e9cd22d857e3138cf5d977ae81",
+        revision=_GLIMMER_GGUF_REVISION,
         artifact_sha256="7e9b74b7c8875e9e265695df9613bf6290f2392e479ce740495a129019c488d8",
         description="Meta Muse Glimmer 30B — revision-pinned 17 GB GGUF via llama.cpp",
         setup_command=(
             "hf download meta-models/Muse-Glimmer-30B-GGUF "
-            "--revision 93769bc7ab5ad1e9cd22d857e3138cf5d977ae81 "
+            f"--revision {_GLIMMER_GGUF_REVISION} "
             "--include muse-glimmer-30B-kquant-17gb.gguf --local-dir muse-glimmer"
         ),
         aliases=("muse", "glimmer", "muse-glimmer-30b"),
@@ -230,11 +236,11 @@ _LOCAL: tuple[ModelProfile, ...] = (
         temperature=0.0,
         effort="low",
         seed=0,
-        revision="f84ecc3a0ea984a4c04542a84269e3d065350a6e",
+        revision=_GLIMMER_BF16_REVISION,
         description="Meta Muse Glimmer 30B BF16 — full weights via vLLM",
         setup_command=(
             "vllm serve meta-models/Muse-Glimmer-30B "
-            "--revision f84ecc3a0ea984a4c04542a84269e3d065350a6e "
+            f"--revision {_GLIMMER_BF16_REVISION} "
             "--served-model-name muse-glimmer --reasoning-parser muse-glimmer "
             "--generation-config auto"
         ),
