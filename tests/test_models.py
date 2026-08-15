@@ -294,3 +294,16 @@ class TestAutomaticProfileDetection:
     def test_local_backend_requires_an_explicit_model(self) -> None:
         with pytest.raises(ModelSelectionError, match="explicit model"):
             maximum_profile_for_backend("ollama")
+
+
+def test_a_pinned_profile_downloads_the_revision_it_records() -> None:
+    """The digest beside a revision only describes what the command fetches."""
+    pinned = [profile for profile in PROFILES.values() if profile.revision]
+
+    assert pinned, "no profile pins a revision"
+    for profile in pinned:
+        if "--revision" not in profile.setup_command:
+            continue
+        assert profile.revision in profile.setup_command, (
+            f"{profile.name} fetches a revision other than the one it records"
+        )
