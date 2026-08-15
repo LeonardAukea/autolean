@@ -718,9 +718,8 @@ class AutoLeanAgent:
                     f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
                 )
 
-                if goal_state:
-                    self.collector.set_context(t.id, goal_state, t.context_before)
-                    self.collector.record_attempt(record, tactic)
+                self.collector.set_context(t.id, goal_state or "", t.context_before)
+                self.collector.record_attempt(record, tactic)
                 self.skill_memory.learn_from_proof(
                     theorem_name=t.decl_name,
                     theorem_statement=t.context_before[:200],
