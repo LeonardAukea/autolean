@@ -179,7 +179,36 @@ def committable_generated(project_root: Path) -> Iterator[None]:
         marker.unlink(missing_ok=True)
 
 
-@pytest.mark.usefixtures("committable_generated")
+@pytest.fixture()
+def restored_branch(project_root: Path) -> Iterator[None]:
+    """Leave the repository on the branch the walkthrough started from.
+
+    The agent commits an accepted proof to the repository enclosing the
+    Lean project, which here is the AutoLean checkout itself. CI throws
+    its checkout away; a developer would be left on a dated proof branch
+    holding a commit the walkthrough only made to prove it can.
+    """
+
+    def branch() -> str:
+        return subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+    original = branch()
+    try:
+        yield
+    finally:
+        working = branch()
+        if original and working and working != original:
+            for command in (["checkout", original], ["branch", "-D", working]):
+                subprocess.run(["git", *command], cwd=project_root, capture_output=True, check=False)
+
+
+@pytest.mark.usefixtures("committable_generated", "restored_branch")
 def test_tutorial_first_proof_end_to_end(
     tmp_path: Path,
     project_root: Path,
