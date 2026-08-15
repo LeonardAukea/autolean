@@ -173,20 +173,3 @@ The proof of `{decl_name}` starting at line {line}.
 Rewrite this proof to be shorter and more elegant while remaining correct.
 Output ONLY the replacement tactic block.
 """
-
-AUTOFORMALIZE_USER = """\
-## Informal Statement
-
-{informal_statement}
-
-## Available Imports
-
-```lean
-{imports}
-```
-
-## Task
-
-Formalize the statement above as a Lean 4 theorem and provide its proof.
-Output a complete `theorem` declaration with proof. No markdown fences.
-"""
