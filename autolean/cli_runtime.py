@@ -41,6 +41,24 @@ program_option = click.option(
     default="program.md",
     help="Path to program.md.",
 )
+pages_option = click.option(
+    "--pages",
+    type=str,
+    default=None,
+    help="Page range (e.g., '1-5').",
+)
+extract_only_option = click.option(
+    "--extract-only",
+    is_flag=True,
+    help="Extract claims without formalizing them.",
+)
+paper_output_option = click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output Lean file inside the configured project.",
+)
 pdf_engine_option = click.option(
     "--pdf-engine",
     type=click.Choice(["hybrid", "paddleocr-vl"]),
