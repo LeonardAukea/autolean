@@ -257,6 +257,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  darwin:
+    name: Dev shell (macOS)
+    # A nixpkgs revision can build on Linux and still leave `nix develop`
+    # producing no shell on aarch64-darwin, where this project is developed
+    # and released from. Every other job here runs Linux, so nothing else
+    # would notice until a maintainer could no longer open a shell.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Build the development shell
+        run: nix develop --command autolean --version
+
   package:
     name: Reproducible package
     needs: python
@@ -344,12 +362,13 @@ jobs:
   required:
     name: Required
     if: ${{ !cancelled() }}
-    needs: [grammar, python, security, dependency-review, nix, package]
+    needs: [grammar, python, security, dependency-review, nix, package, darwin]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every qualification job
         env:
+          DARWIN_RESULT: ${{ needs.darwin.result }}
           NIX_RESULT: ${{ needs.nix.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
@@ -363,6 +382,7 @@ jobs:
           test "$PYTHON_RESULT" = success
           test "$SECURITY_RESULT" = success
           test "$NIX_RESULT" = success
+          test "$DARWIN_RESULT" = success
           test "$PACKAGE_RESULT" = success
           if test "$EVENT_NAME" = pull_request \
             && test "$REPOSITORY_VISIBILITY" = public; then
