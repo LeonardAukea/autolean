@@ -31,6 +31,7 @@ from autolean.lean_interface import (
     FAST_TACTICS,
     STANDARD_TACTICS,
     BuildResult,
+    Diagnostic,
     LeanProject,
 )
 from autolean.llm import (
@@ -80,6 +81,26 @@ def _has_redundant_tail(build: BuildResult) -> bool:
     """Return whether Lean rejected only a tactic after all goals closed."""
     errors = build.errors
     return len(errors) == 1 and "No goals to be solved" in errors[0].message
+
+
+def _locate_in_candidate(errors: list[Diagnostic], proof: str, first_line: int) -> str:
+    """Describe rejections by their position inside the candidate.
+
+    Lean reports a line in the file; the model only ever saw the block it
+    wrote. Naming and quoting the line it wrote is what lets the next
+    attempt change that line instead of rewriting everything around it.
+    """
+    lines = proof.split("\n")
+    described: list[str] = []
+    for diagnostic in errors[:3]:
+        index = diagnostic.line - first_line
+        if 0 <= index < len(lines) and lines[index].strip():
+            described.append(
+                f"line {index + 1} of your proof — `{lines[index].strip()}`:\n{diagnostic.message}"
+            )
+        else:
+            described.append(diagnostic.message)
+    return "\n\n".join(described)[:800]
 
 
 def _failure_outcome(build: BuildResult) -> Outcome:
@@ -1392,9 +1413,11 @@ class AutoLeanAgent:
         error_category = ""
         cat = ErrorCategory.OTHER
         if build.errors:
-            error_summary = build.errors[0].message[:500]
-            cat = classify_error(error_summary)
+            # Classify the diagnostic Lean wrote; locating it adds the
+            # candidate's own text, which must not steer the category.
+            cat = classify_error(build.errors[0].message[:500])
             error_category = cat.value
+            error_summary = _locate_in_candidate(build.errors, proof, target.line)
             self._last_error[target.id] = (cat, error_summary)
             self._record_error_category(target.id, cat)
 
