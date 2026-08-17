@@ -1,0 +1,16 @@
+changelog:
+  categories:
+    - title: Security
+      labels: [security]
+    - title: Proof engine
+      labels: [proof-engine]
+    - title: Providers
+      labels: [providers]
+    - title: Paper evidence
+      labels: [paper]
+    - title: Documentation
+      labels: [documentation]
+    - title: Dependencies
+      labels: [dependencies]
+    - title: Other changes
+      labels: ["*"]

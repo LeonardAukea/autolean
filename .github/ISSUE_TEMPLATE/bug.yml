@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible defect in AutoLean.
+title: ""
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems belong in a private security advisory.
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Observed behaviour
+      description: State what happened and include the complete error.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: State the contract you expected AutoLean to uphold.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Give the smallest commands and inputs that reproduce it.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the output of `autolean environment --json`.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Diagnostic artifacts
+      description: Attach relevant logs, generated files, or screenshots.
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Qualification boundary
+      description: Note anything the reproduction does not establish.

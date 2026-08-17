@@ -1,0 +1,440 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_LOCKED: "1"
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  grammar:
+    name: Lean grammar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Materialize pinned Lean grammar
+        shell: bash
+        run: |
+          set -euo pipefail
+          grammar_dir="${{ runner.temp }}/lean-grammar"
+          grammar_result="${{ runner.temp }}/lean-grammar-result"
+          mkdir -p "$grammar_dir"
+          nix build .#lean-grammar --out-link "$grammar_result"
+          install -m 0644 "$grammar_result/libtree_sitter_lean.so" \
+            "$grammar_dir/libtree_sitter_lean.so"
+          sha256sum "$grammar_dir/libtree_sitter_lean.so"
+      - name: Upload Lean grammar
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lean-tree-sitter-grammar
+          path: ${{ runner.temp }}/lean-grammar/libtree_sitter_lean.so
+          if-no-files-found: error
+          retention-days: 1
+
+  python:
+    name: Python ${{ matrix.python }}
+    needs: grammar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      AUTOLEAN_TREE_SITTER_LEAN_LIBRARY: ${{ github.workspace }}/.ci/lean-grammar/libtree_sitter_lean.so
+      EXPECTED_PYTHON: ${{ matrix.python }}
+      UV_PYTHON: ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Download Lean grammar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lean-tree-sitter-grammar
+          path: ${{ github.workspace }}/.ci/lean-grammar
+      - name: Install locked environment
+        run: uv sync --all-extras --all-groups
+      - name: Verify interpreter
+        run: >-
+          uv run python -c
+          'import os, sys;
+          expected = tuple(map(int, os.environ["EXPECTED_PYTHON"].split(".")));
+          assert sys.version_info[:2] == expected, sys.version'
+      - name: Check style
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Check types
+        run: uv run mypy autolean
+      - name: Run Python tests
+        run: uv run pytest -q
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install locked environment
+        run: uv sync --all-extras --all-groups
+      - name: Export locked requirements
+        run: >-
+          uv export --quiet --all-extras --all-groups --no-emit-project
+          --output-file requirements.lock
+      - name: Audit dependencies and write SBOM
+        run: >-
+          uv run pip-audit --strict --require-hashes --disable-pip
+          --progress-spinner off
+          --format cyclonedx-json --output autolean.cdx.json
+          --requirement requirements.lock
+      - name: Upload SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-sbom
+          path: autolean.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  dependency-review:
+    name: Dependency review
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+          github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
+  nix:
+    name: Lean and Nix closure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reserve disk for proof artifacts
+        run: |
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Check workflows and local documentation links
+        run: |
+          nix develop .#ci --command actionlint .github/workflows/*.yml
+          nix develop .#ci --command cffconvert --validate -i CITATION.cff
+          nix develop .#ci --command lychee --offline --include-fragments \
+            README.md CONTRIBUTING.md SECURITY.md SUPPORT.md GOVERNANCE.md \
+            CODE_OF_CONDUCT.md CHANGELOG.md docs
+      - name: Check repository boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracked_runtime="$(git ls-files -- \
+            workspace/.overnight.pid \
+            'workspace/AutoLean/Generated/**' \
+            'workspace/AutoLean/Papers/**' \
+            'workspace/AutoLean/Paper_*.lean' \
+            workspace/AutoLean/UserTheorems.lean \
+            workspace/program.md \
+            'workspace/skills/*.json' \
+            'workspace/training_data/**' \
+            'workspace/workspace/**')"
+          if test -n "$tracked_runtime"; then
+            printf 'mutable runtime state is tracked:\n%s\n' "$tracked_runtime"
+            exit 1
+          fi
+      - name: Install host sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          /usr/bin/bwrap --unshare-user --unshare-net \
+            --ro-bind / / -- /bin/true
+      - name: Restore Lake artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            workspace/.lake/build
+            workspace/.lake/packages/cslib/.lake/build
+          key: >-
+            lake-${{ runner.os }}-${{ runner.arch }}-
+            ${{ hashFiles('workspace/lean-toolchain', 'workspace/lake-manifest.json') }}
+      - name: Evaluate every flake system
+        run: nix flake check . --no-build --all-systems
+      - name: Run Nix checks
+        run: nix flake check . --print-build-logs
+      - name: Restore pinned Mathlib artifacts
+        run: |
+          df -h /
+          nix develop . --command bash -euo pipefail -c \
+            'cd workspace && lake exe cache get'
+          df -h /
+      - name: Build CSLib and the Lean workspace
+        run: >-
+          nix develop . --command bash -euo pipefail -c
+          'cd workspace && lake build Cslib && lake build'
+      - name: Run generated-code containment attacks
+        run: >-
+          nix develop . --command env
+          AUTOLEAN_BWRAP=/usr/bin/bwrap
+          AUTOLEAN_RUN_SANDBOX_E2E=1
+          python -m pytest -q -p no:cacheprovider
+          tests/test_lean_sandbox_e2e.py
+      - name: Run the tutorial end to end against a scripted model
+        run: >-
+          nix develop . --command env
+          AUTOLEAN_BWRAP=/usr/bin/bwrap
+          AUTOLEAN_RUN_TUTORIAL_E2E=1
+          GIT_AUTHOR_NAME=autolean-ci
+          GIT_AUTHOR_EMAIL=ci@autolean.invalid
+          GIT_COMMITTER_NAME=autolean-ci
+          GIT_COMMITTER_EMAIL=ci@autolean.invalid
+          python -m pytest -q -p no:cacheprovider
+          tests/test_tutorial_e2e.py
+      - name: Record the proof environment
+        run: >-
+          nix run .#default -- environment --project workspace --json
+          > proof-environment.json
+      - name: Upload proof environment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proof-environment
+          path: proof-environment.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Reproducible package
+    needs: python
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      - name: Check out source and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.1"
+          enable-cache: true
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install locked build environment
+        run: uv sync --all-extras --all-groups
+      - name: Build reproducibly
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          build_root="$(mktemp -d "$RUNNER_TEMP/autolean-build.XXXXXX")"
+          export SOURCE_DATE_EPOCH="$release_epoch"
+          uv build --python .venv/bin/python --no-build-isolation \
+            --out-dir "$build_root/first"
+          uv build --python .venv/bin/python --no-build-isolation \
+            --out-dir "$build_root/second"
+          diff -u \
+            <(cd "$build_root/first" && sha256sum ./* | sort) \
+            <(cd "$build_root/second" && sha256sum ./* | sort)
+          mv "$build_root/first" dist
+      - name: Audit source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdist="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          while IFS= read -r member; do
+            case "$member" in
+              */.beads/* | \
+              */.claude/* | \
+              */.codedb/* | \
+              */.reviews/* | \
+              */.sentrux/* | \
+              */codedb.snapshot | \
+              */docs/assets/* | \
+              */workspace/.autolean/* | \
+              */workspace/.lake/* | \
+              */workspace/AutoLean/Generated/* | \
+              */workspace/AutoLean/Papers/* | \
+              */workspace/AutoLean/Paper_*.lean | \
+              */workspace/AutoLean/UserTheorems.lean | \
+              */workspace/logs/* | \
+              */workspace/skills/* | \
+              */workspace/training_data/* | \
+              */workspace/workspace/*)
+                echo "source distribution contains $member"
+                exit 1
+                ;;
+            esac
+          done < <(tar -tzf "$sdist")
+      - name: Test the built wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python 3.14 /tmp/autolean-wheel
+          uv pip install --python /tmp/autolean-wheel/bin/python dist/*.whl
+          /tmp/autolean-wheel/bin/autolean --version
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  required:
+    name: Required
+    if: ${{ !cancelled() }}
+    needs: [grammar, python, security, dependency-review, nix, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every qualification job
+        env:
+          NIX_RESULT: ${{ needs.nix.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          GRAMMAR_RESULT: ${{ needs.grammar.result }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          test "$GRAMMAR_RESULT" = success
+          test "$PYTHON_RESULT" = success
+          test "$SECURITY_RESULT" = success
+          test "$NIX_RESULT" = success
+          test "$PACKAGE_RESULT" = success
+          if test "$EVENT_NAME" = pull_request \
+            && test "$REPOSITORY_VISIBILITY" = public; then
+            test "$DEPENDENCY_REVIEW_RESULT" = success
+          else
+            test "$DEPENDENCY_REVIEW_RESULT" = skipped
+          fi
+
+  release:
+    name: GitHub release
+    if: >-
+      ${{ !cancelled() && needs.required.result == 'success' &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out source and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: release
+      - name: Download proof environment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: proof-environment
+          path: release
+      - name: Download dependency SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dependency-sbom
+          path: release
+      - name: Create release manifest
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          hashver="$(python3 -m autolean.release --revision "$GITHUB_SHA" id)"
+          python3 -m autolean.release --revision "$GITHUB_SHA" manifest \
+            --output release/release-manifest.json release/*
+          echo "hashver=$hashver" >> "$GITHUB_OUTPUT"
+          echo "tag=v$hashver" >> "$GITHUB_OUTPUT"
+      - name: Attest build provenance
+        if: ${{ github.event.repository.visibility == 'public' }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if existing="$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish 2>/dev/null)"; then
+            test "$existing" = "$GITHUB_SHA"
+            echo "Release $RELEASE_TAG already identifies $GITHUB_SHA"
+          else
+            gh release create "$RELEASE_TAG" release/* \
+              --target "$GITHUB_SHA" \
+              --title "${{ steps.identity.outputs.hashver }}" \
+              --generate-notes \
+              --latest
+          fi
+          immutable="$(gh release view "$RELEASE_TAG" --json isImmutable --jq .isImmutable)"
+          test "$immutable" = true

@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use AutoLean in research, cite this software."
+title: AutoLean
+type: software
+version: 0.5.0
+authors:
+  - family-names: Aukea
+    given-names: Leonard
+repository-code: "https://github.com/LeonardAukea/autolean"
+url: "https://github.com/LeonardAukea/autolean"
+license: MIT
+keywords:
+  - Lean 4
+  - theorem proving
+  - formal verification
+  - proof assistant
+  - artificial intelligence

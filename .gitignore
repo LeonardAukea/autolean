@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# uv
+.uv/
+
+# Nix
+result
+result-*
+.direnv/
+
+# AutoLean runtime
+.autolean/
+results.tsv
+progress.md
+*.log
+workspace/logs/
+.overnight.pid
+workspace/.codedb/
+workspace/training_data/
+workspace/skills/*.json
+workspace/AutoLean/Generated/
+workspace/AutoLean/Papers/
+workspace/AutoLean/Paper_*.lean
+workspace/AutoLean/UserTheorems.lean
+workspace/AutoLean/Challenge_*.lean
+workspace/program.md
+workspace/workspace/
+
+# Lean build artifacts (in workspace)
+workspace/**/build/
+workspace/**/.lake/
+workspace/**/lake-packages/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Beads task state
+.beads/
+.dolt/
+.beads-credential-key
+
+# Local review and structural-analysis reports
+.reviews/
+.sentrux/
+
+# Local agent and code-intelligence state
+.claude/settings.local.json
+.codedb/
+codedb.snapshot
