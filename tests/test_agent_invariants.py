@@ -889,3 +889,42 @@ class TestPreSearchTrainingData:
         assert all(example.goal_state for example in examples), (
             "a proof was collected without the goal it closed"
         )
+
+
+class TestErrorLocation:
+    """A retry needs to know which line of its own proof Lean refused."""
+
+    def test_the_next_prompt_names_and_quotes_the_failing_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, backend = _prepare_agent(tmp_path, monkeypatch)
+        agent.config.max_retries_per_sorry = 2
+        agent.config.max_cycles = 2
+        backend.text = "intro h\nsimp\nlinarith [h]"
+        # The block replaces `sorry` on line 2, so its third line is file line 4.
+        monkeypatch.setattr(
+            agent.project,
+            "validate_candidate",
+            lambda *a, **k: BuildResult(
+                success=False,
+                diagnostics=[
+                    Diagnostic("Target.lean", 4, 2, "error", "linarith failed to find a contradiction")
+                ],
+            ),
+        )
+        prompts: list[str] = []
+        original = agent.llm.generate
+
+        def record(system: str, user: str, **kwargs: object) -> object:
+            if "mathematical research planner" not in system:
+                prompts.append(user)
+            return original(system, user, **kwargs)
+
+        monkeypatch.setattr(agent.llm, "generate", record)
+
+        agent.run()
+
+        assert len(prompts) >= 2, "the run never retried"
+        retry = prompts[1]
+        assert "line 3 of your proof" in retry, "the retry does not say which line failed"
+        assert "linarith [h]" in retry, "the retry does not quote the line that failed"
