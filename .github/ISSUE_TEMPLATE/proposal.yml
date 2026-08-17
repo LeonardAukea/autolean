@@ -1,0 +1,38 @@
+name: Design proposal
+description: Propose a change to a command, contract, or research workflow.
+title: ""
+labels: [proposal]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the task that is difficult or unsafe today.
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Required invariant
+      description: State the rule that the design must preserve.
+    validations:
+      required: true
+  - type: textarea
+    id: interface
+    attributes:
+      label: Proposed interface
+      description: Show the smallest command, type, or data-flow change.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+      description: Name the tests and end-to-end evidence that decide success.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Out of scope
+      description: Name adjacent work that this proposal leaves unchanged.

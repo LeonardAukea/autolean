@@ -1,0 +1,36 @@
+{
+  "arxiv_id": "2506.18616v5",
+  "coverage_sha256": "e42bf075c95b469f04ea270a54e26967b697c6d4df0c4db5672dc4085dea976d",
+  "evidence": {
+    "declaration_count": 33,
+    "duration_seconds": 13.8425482501043,
+    "error_count": 0,
+    "module": "AutoLean/Paper_arxiv_2506_18616v5.lean",
+    "source_sha256": "1f6e6f1eb647bddce0a947449b53e9eecef76a0eb1e897a402c0d3bd9e84d4f9",
+    "success": true,
+    "warning_count": 0
+  },
+  "export_manifest_sha256": "c5ad8798f75b58fade0f260ae069a6a1fe6fb1de31f86746bdaaef547ba44316",
+  "media": [
+    {
+      "name": "autolean-ionescu-tulcea.gif",
+      "sha256": "38bbab6aa7c5d40a533f389da6cef6d5ae23830355269a07353cd29900e2ee66",
+      "size": 5970855
+    },
+    {
+      "name": "autolean-ionescu-tulcea.mp4",
+      "sha256": "6d9558c515ae0d6d042de0936716a8f7a18ae7583866f0c294fac1a056a0ea4b",
+      "size": 5480809
+    }
+  ],
+  "model": "claude-fable-5",
+  "pdf_sha256": "39db363898dfb4a51c0e344a6154f76dd6c3e8768a414d516853e6cdc12dfe2d",
+  "plan_artifact_sha256": "32dcdbaa8a4e30252ea73636a50db1ae0d54cd1b91ac2957ac35709b6ca267a5",
+  "plan_sha256": "640e9ff8eeff4cb192e5bb5afb014527a620e7a9928cf05e23e586724165fe27",
+  "plan_trace_sha256": "dddeedbcd7373a3f47729cdf7c12172fdb4d05330edd48c151a6ca15eaec22d1",
+  "recorded_at": "2026-08-13T05:38:55.500822Z",
+  "response_sha256": "305381399b381828db251ded9759a7d4f7286009aefca4218d5c3651562271fa",
+  "schema": "autolean.demo.v1",
+  "session": "20260813-053432-tmp-nix-shell-svr6e2-autolean-paper--ef1450c1",
+  "tape_sha256": "3d4cba61d5c90062bc80aac9becf3a1e3133264faa3b7536eca14df01ddf615e"
+}
