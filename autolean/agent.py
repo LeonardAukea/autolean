@@ -832,7 +832,12 @@ class AutoLeanAgent:
             )
 
             record = self._try_fill_sorry(cycle, target, attempt_num)
-            if record.outcome is not Outcome.SKIPPED:
+            if record.outcome is Outcome.FAIL_PROVIDER:
+                # The request never reached Lean, so this target's budget was
+                # not spent on a proof. Consecutive provider failures still
+                # end the run, so refunding cannot spin.
+                self._attempts[target.id] = attempt_num - 1
+            elif record.outcome is not Outcome.SKIPPED:
                 self._epoch_reached_lean = True
             self.tracker.log(record)
             self._accepting = False

@@ -16,6 +16,7 @@ from autolean.llm import (
     LLMConfig,
     LLMRateLimitError,
     LLMResponse,
+    LLMTransientError,
 )
 from autolean.provenance import ProofEnvironment, sha256_text
 from autolean.routing import EscalationPolicy
@@ -928,3 +929,38 @@ class TestErrorLocation:
         retry = prompts[1]
         assert "line 3 of your proof" in retry, "the retry does not say which line failed"
         assert "linarith [h]" in retry, "the retry does not quote the line that failed"
+
+
+class TestProviderBudget:
+    """A provider outage is not an attempt at the proof."""
+
+    def test_a_provider_failure_does_not_spend_the_targets_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        agent.config.max_retries_per_sorry = 2
+        agent.config.max_cycles = 3
+        # The provider fails once, then answers.
+        calls = {"n": 0}
+        original = agent.llm.generate
+
+        def flaky(system: str, user: str, **kwargs: object) -> object:
+            if "mathematical research planner" not in system:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise LLMTransientError("provider unavailable")
+            return original(system, user, **kwargs)
+
+        monkeypatch.setattr(agent.llm, "generate", flaky)
+
+        agent.run()
+
+        outcomes = [record.outcome for record in agent.tracker.records]
+        assert Outcome.FAIL_PROVIDER in outcomes, "the outage was not recorded"
+        # The outage must leave the full retry budget for the proof itself.
+        proof_attempts = [
+            record.attempt for record in agent.tracker.records if record.outcome is not Outcome.FAIL_PROVIDER
+        ]
+        assert proof_attempts and min(proof_attempts) == 1, (
+            f"the outage consumed the first attempt: {proof_attempts}"
+        )
