@@ -102,12 +102,13 @@ def trigger_local_finetune(
     base_model: str = "google/gemma-4-E2B",
     output_name: str = "autolean-v1",
 ) -> bool:
-    """Trigger local fine-tuning if data threshold is met.
+    """Prepare accepted proofs for training and report how to run it.
 
-    Uses gemma-tuner-multimodal format (CSV with prompt/response).
-    Falls back to generating an Axolotl config if gemma-tuner not available.
+    Writes the gemma-tuner CSV and its config, then names the commands that
+    train from them. Training itself is a separate, explicit step: nothing
+    here starts a process.
 
-    Returns True if training was started/configured.
+    Returns whether the data was prepared.
     """
     status = check_finetune_readiness(training_data_dir)
 
@@ -127,34 +128,26 @@ def trigger_local_finetune(
     n = convert_to_gemma_tuner_format(status.training_file, csv_path)
     console.print(f"[green]Converted {n} examples to {csv_path}[/]")
 
-    # Check if gemma-tuner is available
-    gemma_tuner = Path("gemma-tuner-multimodal")
-    if gemma_tuner.exists():
-        console.print("[bold]Starting local fine-tuning with gemma-tuner...[/]")
-        # Generate config
-        config = {
-            "model_name": base_model,
-            "data_path": str(csv_path),
-            "output_dir": str(training_data_dir / "output"),
-            "epochs": 3,
-            "learning_rate": 1e-5,
-            "batch_size": 1,
-        }
-        config_path = training_data_dir / "gemma_tuner_config.json"
-        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    # The config is written either way: which commands are worth showing must
+    # not depend on the directory the agent happened to run from.
+    config = {
+        "model_name": base_model,
+        "data_path": str(csv_path),
+        "output_dir": str(training_data_dir / "output"),
+        "epochs": 3,
+        "learning_rate": 1e-5,
+        "batch_size": 1,
+    }
+    config_path = training_data_dir / "gemma_tuner_config.json"
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
-        console.print(f"  Config: {config_path}")
-        console.print(f"  Data: {csv_path} ({n} examples)")
-        console.print(f"  Output: {training_data_dir / 'output'}")
-        console.print(f"\n  Run: cd gemma-tuner-multimodal && python finetune.py --config {config_path}")
-        return True
-
-    # Fallback: generate Axolotl config
-    console.print(f"[bold]Fine-tuning data ready ({n} examples).[/]")
+    console.print(f"[bold]Fine-tuning data ready ({n} examples).[/] Training is a separate step.")
     console.print(f"  Data CSV: {csv_path}")
+    console.print(f"  Config:   {config_path}")
+    console.print(f"  Output:   {training_data_dir / 'output'}")
     console.print("\n  Option 1 (gemma-tuner):")
     console.print("    git clone https://github.com/mattmireles/gemma-tuner-multimodal")
-    console.print(f"    cd gemma-tuner-multimodal && python finetune.py --data {csv_path}")
+    console.print(f"    cd gemma-tuner-multimodal && python finetune.py --config {config_path}")
     console.print("\n  Option 2 (Axolotl):")
     console.print(f"    {ui.command()} finetune-config --framework axolotl")
     console.print("    accelerate launch -m axolotl.cli.train ...")
