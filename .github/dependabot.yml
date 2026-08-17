@@ -11,6 +11,11 @@ updates:
     groups:
       python:
         patterns: ["*"]
+    # The build backend's version is chosen by nixpkgs, which supplies it to
+    # the Nix build. A bump here compiles nowhere until nixpkgs carries the
+    # same version, so the pin follows nixpkgs rather than the registry.
+    ignore:
+      - dependency-name: hatchling
     open-pull-requests-limit: 2
     commit-message:
       prefix: Python
