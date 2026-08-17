@@ -1818,7 +1818,10 @@ class AutoLeanAgent:
             ft_status = check_finetune_readiness(self.project.root / "training_data")
             if ft_status.ready:
                 data_lines.append("")
-                data_lines.append("[bold magenta]Fine-tuning auto-triggered![/bold magenta]")
+                data_lines.append(
+                    f"[bold magenta]Fine-tuning data ready:[/bold magenta] "
+                    f"{ft_status.positive_examples} accepted proofs exported"
+                )
                 trigger_local_finetune(self.project.root / "training_data")
             elif stats["positive"] > 0:
                 until_finetune = FINETUNE_THRESHOLD - ft_status.positive_examples
