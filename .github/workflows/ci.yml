@@ -184,7 +184,9 @@ jobs:
             workspace/.overnight.pid \
             'workspace/AutoLean/Generated/**' \
             'workspace/AutoLean/Papers/**' \
-            'workspace/AutoLean/Paper_*.lean' \
+            'workspace/AutoLean/Paper*.lean' \
+            'workspace/AutoLean/Lib*.lean' \
+            'workspace/AutoLean/Challenge_*.lean' \
             workspace/AutoLean/UserTheorems.lean \
             workspace/program.md \
             'workspace/skills/*.json' \
@@ -223,7 +225,7 @@ jobs:
           nix develop . --command bash -euo pipefail -c \
             'cd workspace && lake exe cache get'
           df -h /
-      - name: Build CSLib and the Lean workspace
+      - name: Build CSLib and every shipped Lean module
         run: >-
           nix develop . --command bash -euo pipefail -c
           'cd workspace && lake build Cslib && lake build'
@@ -333,7 +335,9 @@ jobs:
               */workspace/.lake/* | \
               */workspace/AutoLean/Generated/* | \
               */workspace/AutoLean/Papers/* | \
-              */workspace/AutoLean/Paper_*.lean | \
+              */workspace/AutoLean/Paper*.lean | \
+              */workspace/AutoLean/Lib*.lean | \
+              */workspace/AutoLean/Challenge_*.lean | \
               */workspace/AutoLean/UserTheorems.lean | \
               */workspace/logs/* | \
               */workspace/skills/* | \

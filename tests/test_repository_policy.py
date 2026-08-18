@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from autolean.scanner import count_sorries
 
 ROOT = Path(__file__).parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+
+
+def _tracked_paths(*pathspecs: str) -> list[Path]:
+    if not (ROOT / ".git").exists():
+        pytest.skip("repository policy requires a Git checkout")
+    result = subprocess.run(
+        ["git", "-c", "core.fsmonitor=false", "ls-files", "--", *pathspecs],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [ROOT / line for line in result.stdout.splitlines() if (ROOT / line).is_file()]
 
 
 def test_external_actions_use_full_commit_ids() -> None:
@@ -55,6 +73,66 @@ def test_documentation_checks_use_the_ci_tools_shell() -> None:
     assert workflow.count("nix develop .#ci --command") == 3
     assert 'name = "autolean-ci";' in flake
     assert 'name = "autolean";' in flake
+
+
+def test_default_lean_target_imports_every_shipped_module() -> None:
+    root_source = ROOT / "workspace" / "AutoLean.lean"
+    imports = set(
+        re.findall(
+            r"(?m)^import (AutoLean(?:\.[A-Za-z0-9_']+)*)$",
+            root_source.read_text(encoding="utf-8"),
+        )
+    )
+    modules = {
+        ".".join(path.relative_to(ROOT / "workspace").with_suffix("").parts)
+        for path in _tracked_paths("workspace")
+        if path.suffix == ".lean"
+        and path.parent != ROOT / "workspace"
+        and path.is_relative_to(ROOT / "workspace" / "AutoLean")
+    }
+
+    assert imports == modules
+
+
+def test_shipped_lean_modules_are_closed() -> None:
+    sources = [
+        path
+        for path in _tracked_paths("workspace")
+        if path.suffix == ".lean" and path.is_relative_to(ROOT / "workspace" / "AutoLean")
+    ]
+
+    assert sources
+    for source in sources:
+        assert count_sorries(source.read_text(encoding="utf-8")) == 0, source
+
+
+def test_mutable_workspace_outputs_are_untracked() -> None:
+    tracked = _tracked_paths(
+        "workspace/AutoLean/Generated/**",
+        "workspace/AutoLean/Papers/**",
+        "workspace/AutoLean/Paper*.lean",
+        "workspace/AutoLean/Lib*.lean",
+        "workspace/AutoLean/Challenge_*.lean",
+        "workspace/AutoLean/UserTheorems.lean",
+    )
+
+    assert tracked == []
+
+
+def test_source_distribution_excludes_mutable_lean_outputs() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+
+    for project_pattern, archive_pattern in (
+        ("/workspace/AutoLean/Generated", "*/workspace/AutoLean/Generated/*"),
+        ("/workspace/AutoLean/Papers", "*/workspace/AutoLean/Papers/*"),
+        ("/workspace/AutoLean/Paper*.lean", "*/workspace/AutoLean/Paper*.lean"),
+        ("/workspace/AutoLean/Challenge_*.lean", "*/workspace/AutoLean/Challenge_*.lean"),
+        ("/workspace/AutoLean/Lib*.lean", "*/workspace/AutoLean/Lib*.lean"),
+        ("/workspace/AutoLean/UserTheorems.lean", "*/workspace/AutoLean/UserTheorems.lean"),
+    ):
+        assert f'    "{project_pattern}",' in pyproject
+        assert archive_pattern in ci
 
 
 def test_contribution_interfaces_require_reproducible_evidence() -> None:

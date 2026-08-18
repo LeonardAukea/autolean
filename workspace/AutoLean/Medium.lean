@@ -1,11 +1,13 @@
-/-!
-# Medium targets
+import Mathlib
 
-These need multi-step proofs: induction, case splits with nontrivial
-branches, rewriting chains, or structured arguments. Expect ~40% success rate.
+/-!
+# Structured proof examples
+
+These kernel-checked declarations exercise induction, case splits, rewriting,
+and reusable library theorems.
 -/
 
--- M1: Addition is commutative (by induction)
+-- M1: Library-backed commutativity
 theorem medium_add_comm (n m : Nat) : n + m = m + n := by
   rw [Nat.add_comm]
 
@@ -25,11 +27,7 @@ theorem medium_map_length (α β : Type) (f : α → β) (l : List α) :
 
 -- M4: Zero is identity for addition (both sides)
 theorem medium_add_zero (n : Nat) : n + 0 = n ∧ 0 + n = n := by
-  constructor
-  · rfl
-  · induction n with
-  | zero => rfl
-  | succ n ih => simp [ih]
+  simp
 
 -- M5: Transitivity of ≤
 theorem medium_le_trans (a b c : Nat) : a ≤ b → b ≤ c → a ≤ c := by
@@ -50,4 +48,7 @@ theorem medium_mul_add (a b c : Nat) : a * (b + c) = a * b + a * c := by
 -- M8: Sum of first n naturals
 theorem medium_sum_formula (n : Nat) :
     2 * (List.range n).sum = n * (n - 1) := by
-  sorry
+  have h := Finset.sum_range_id_mul_two n
+  rw [← List.toFinset_range n] at h
+  rw [List.sum_toFinset (fun i : Nat => i) List.nodup_range] at h
+  simpa [Nat.mul_comm] using h

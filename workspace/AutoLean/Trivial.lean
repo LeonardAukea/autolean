@@ -1,8 +1,8 @@
 /-!
-# Trivial targets
+# Single-step proof examples
 
-These should be solvable by single tactics: `rfl`, `trivial`, `decide`, `omega`.
-Good warmup for the agent — expect 100% success rate.
+These kernel-checked declarations exercise `rfl`, constructors, and direct
+hypothesis application.
 -/
 
 -- T1: Reflexivity

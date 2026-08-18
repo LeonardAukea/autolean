@@ -27,7 +27,8 @@ workspace/training_data/
 workspace/skills/*.json
 workspace/AutoLean/Generated/
 workspace/AutoLean/Papers/
-workspace/AutoLean/Paper_*.lean
+workspace/AutoLean/Paper*.lean
+workspace/AutoLean/Lib*.lean
 workspace/AutoLean/UserTheorems.lean
 workspace/AutoLean/Challenge_*.lean
 workspace/program.md
