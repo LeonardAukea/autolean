@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from autolean.agent import MAX_REPEATED_ERRORS, AutoLeanAgent
+from autolean.agent import MAX_REPEATED_ERRORS, AutoLeanAgent, _insert_gap_declaration
 from autolean.error_classifier import ErrorCategory
 from autolean.lean_interface import BuildResult, Diagnostic
 from autolean.llm import (
@@ -335,6 +335,116 @@ def test_structural_context_and_prompt_identity_reach_the_experiment(
     assert record.llm_input_tokens == 42
     assert len(record.prompt_sha256) == 64
     assert len(record.structural_context_sha256) == 64
+
+
+def test_gap_record_is_bound_to_the_definition_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    agent.dry_run = False
+    agent._environment_sha256 = "a" * 64
+    source = agent.project.root / "AutoLean" / "Target.lean"
+    target = SorryTarget(
+        file=source,
+        line=2,
+        col=2,
+        decl_name="target",
+        decl_line=1,
+        context_before="theorem target : True := by",
+        context_after="",
+        rel_path="AutoLean/Target.lean",
+        qualified_decl_name="target",
+    )
+    gap_request: dict[str, str] = {}
+
+    def generate(system: str, user: str, **kwargs: object) -> LLMResponse:
+        del kwargs
+        if "mathematical research planner" in system:
+            return LLMResponse(
+                text=json.dumps(_strategy_payload()),
+                model="planner-model",
+                input_tokens=60,
+                output_tokens=120,
+            )
+        if "minimal, correct definitions" in system:
+            gap_request.update(system=system, user=user)
+            return LLMResponse(
+                text="def Missing : True := True.intro",
+                model="gap-model",
+                input_tokens=77,
+                output_tokens=9,
+                duration_seconds=3.0,
+            )
+        return LLMResponse(
+            text="exact Missing",
+            model="proof-model",
+            input_tokens=11,
+            output_tokens=2,
+            duration_seconds=1.0,
+        )
+
+    validations = 0
+
+    def validate_candidate(*args: object, **kwargs: object) -> BuildResult:
+        nonlocal validations
+        del args, kwargs
+        validations += 1
+        if validations == 1:
+            return BuildResult(
+                success=False,
+                diagnostics=[
+                    Diagnostic(
+                        file="AutoLean/Target.lean",
+                        line=2,
+                        col=8,
+                        severity="error",
+                        message="unknown identifier 'Missing'",
+                    )
+                ],
+            )
+        return BuildResult(success=True, duration_seconds=0.2, axioms=())
+
+    committed: list[ExperimentRecord] = []
+    monkeypatch.setattr(agent.llm, "generate", generate)
+    monkeypatch.setattr(agent.project, "validate_candidate", validate_candidate)
+    monkeypatch.setattr(agent.project, "write_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent.tracker, "commit_success", committed.append)
+
+    record = agent._try_fill_sorry(1, target, 1)
+
+    assert record.outcome == Outcome.GAP_FILLED
+    assert record.decl_name == "Missing"
+    assert record.target_id == "AutoLean/Target.lean:3:Missing"
+    assert record.line == 3
+    assert record.model == "gap-model"
+    assert record.llm_input_tokens == 77
+    assert record.llm_tokens == 9
+    assert record.llm_tok_per_sec == 3.0
+    assert record.proof_length == 1
+    assert record.prompt_sha256 == sha256_text(f"{gap_request['system']}\0{gap_request['user']}")
+    assert record.proof_sha256 == sha256_text("def Missing : True := True.intro")
+    assert committed == [record]
+
+
+def test_gap_declaration_is_inserted_at_the_module_root() -> None:
+    source = """\
+import Mathlib
+
+theorem before : True := by trivial
+
+open Nat
+
+theorem target : True := by sorry
+"""
+
+    updated, declaration_line = _insert_gap_declaration(
+        source,
+        "def Missing : True := True.intro",
+    )
+
+    assert updated.index("def Missing") < updated.index("theorem before")
+    assert updated.splitlines()[declaration_line - 1].startswith("def Missing")
 
 
 def test_healthy_file_checks_compile_once_per_content(

@@ -271,24 +271,33 @@ def test_pythagorean_formalization_and_proof_reach_isolated_lean(
         pytest.skip("the sandbox fixture has no Mathlib closure")
 
     from autolean.llm import LLMResponse
-    from autolean.strategy import ProofPlan
+    from autolean.strategy import ProofPlan, parse_proof_plan
     from autolean.theorem import formalize_theorem
 
     scaffold = """\
-open RealInnerProductSpace
+open EuclideanGeometry
 
 theorem pythagorean_theorem
-    {V : Type*} [NormedAddCommGroup V] [InnerProductSpace ℝ V]
-    (x y : V) (h : ⟪x, y⟫ = 0) :
-    ‖x + y‖ ^ 2 = ‖x‖ ^ 2 + ‖y‖ ^ 2 := by
+    {V P : Type*} [NormedAddCommGroup V] [InnerProductSpace ℝ V]
+    [MetricSpace P] [NormedAddTorsor V P]
+    (p1 p2 p3 : P) (h : ∠ p1 p2 p3 = Real.pi / 2) :
+    dist p1 p3 ^ 2 = dist p1 p2 ^ 2 + dist p2 p3 ^ 2 := by
   sorry
 """
-    plan = ProofPlan(
-        objective="Prove norm additivity for orthogonal vectors.",
-        formalization=("Use the real inner product and explicit scalar notation.",),
-        methods=("Apply Mathlib's inner-product Pythagorean identity.",),
-        checkpoints=("Compile the exact theorem scaffold.",),
+    detailed_method = (
+        "Apply Mathlib's EuclideanGeometry distance-square equivalence, select "
+        "the forward result from the right-angle hypothesis, normalize powers "
+        "with pow_two, and normalize the final side with distance symmetry. "
+    ) * 2
+    plan = parse_proof_plan(
+        ProofPlan(
+            objective="Prove the distance form for a right-angled triangle.",
+            formalization=("Use points in a real inner-product affine torsor and an angle at p2.",),
+            methods=(detailed_method,),
+            checkpoints=("Compile the exact geometric theorem scaffold.",),
+        ).to_json()
     )
+    assert len(plan.methods[0]) > 240
 
     theorem = formalize_theorem(
         "the pythagorean theorem",
@@ -301,7 +310,12 @@ theorem pythagorean_theorem
 
     proof_source = theorem.source.replace(
         "  sorry\n",
-        ("  simpa [pow_two] using\n    norm_add_sq_eq_norm_sq_add_norm_sq_of_inner_eq_zero x y h\n"),
+        (
+            "  simpa [pow_two, dist_comm] using\n"
+            "    (EuclideanGeometry."
+            "dist_sq_eq_dist_sq_add_dist_sq_iff_angle_eq_pi_div_two "
+            "p1 p2 p3).2 h\n"
+        ),
     )
     result = project.validate_candidate(
         source,

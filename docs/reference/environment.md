@@ -16,6 +16,19 @@ The Nix flake fetches the official Lean release archives by SHA-256 on Apple
 Silicon, AArch64 Linux, and x86-64 Linux. `lean-toolchain` and
 `lake-manifest.json` describe the same workspace closure.
 
+## Repository workspace
+
+`workspace/` is the release-qualified example project used by `doctor`, the
+sandbox tests, and the recorded demonstrations. Its default `AutoLean` target
+imports every curated module shipped in the repository, so `lake build`
+checks the complete public Lean source set.
+
+Within the repository checkout, generated proofs and research sources use
+ignored paths such as `AutoLean/Generated/`, `AutoLean/Papers/`,
+`AutoLean/Challenge_*.lean`, and `AutoLean/Lib*.lean`. This keeps local runs
+outside the release source set. In a project created by `autolean init lean`,
+accepted generated Lean files are project source and receive proof commits.
+
 ## Environment identity
 
 ```bash

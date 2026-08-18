@@ -1,8 +1,8 @@
 /-!
-# Easy targets
+# Short proof examples
 
-These need small tactic chains: `intro` + `exact`, `cases`, `simp`,
-`constructor`, `omega` on small arithmetic. Expect ~80% success rate.
+These kernel-checked declarations exercise short tactic chains over logic,
+natural numbers, lists, and function composition.
 -/
 
 -- E1: Modus ponens

@@ -23,7 +23,7 @@ Type `cd "$AUTOLEAN_DEMO_ROOT"`
 Enter
 Type `export PS1='autolean ❯ ' GIT_PAGER=cat`
 Enter
-Type `autolean() { command autolean "$@"; status=$?; if test "$status" -eq 0 && test "${1:-}" = prove; then printf '\nDEMO_PROVE_COMPLETE'; read -r _; printf '\033[1A\r\033[2K'; fi; return "$status"; }`
+Type `autolean() { command autolean "$@"; status=$?; if test "${1:-}" = prove; then printf '\nDEMO_PROVE_FINISHED'; read -r _; if test "$status" -ne 0; then exit "$status"; fi; printf '\033[1A\r\033[2K'; fi; return "$status"; }`
 Enter
 Type "clear"
 Enter
@@ -35,7 +35,7 @@ Wait@600s /Use this plan?/
 Sleep 4s
 Type "y"
 Enter
-Wait@900s /DEMO_PROVE_COMPLETE/
+Wait@900s /DEMO_PROVE_FINISHED/
 Enter
 Sleep 6s
 
@@ -68,7 +68,8 @@ Type `find pythagorean-artifact -maxdepth 4 -type f | sort`
 Enter
 Sleep 7s
 
-Type `cd workspace && lake env lean AutoLean/Generated/*.lean && echo "Lean accepted the proof"`
+Type `cd workspace && generated="$(find AutoLean/Generated -maxdepth 1 -type f -name '*.lean' -print -quit)" && lake env lean "$generated" && printf '\nLean accepted the proof' && read -r _`
 Enter
 Wait@300s /Lean accepted the proof/
+Enter
 Sleep 5s

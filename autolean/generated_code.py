@@ -25,14 +25,15 @@ _PLACEHOLDER = re.compile(r"\b(?:sorry|admit|sorryAx)\b")
 #: command is still a command behind them, so the keyword match has to look
 #: past `@[simp]`, `private`, `scoped`, and their combinations.
 _DECLARATION_PREFIX = (
-    r"(?:@\[[^\]\r\n]*\]\s*|"
-    r"(?:private|protected|noncomputable|scoped|local|nonrec|mutual)\s+)*"
+    r"(?:@\[[^\]\r\n]*\][ \t]*|"
+    r"(?:private|protected|noncomputable|scoped|local|nonrec)[ \t]+)*"
 )
 _COMMAND_ESCAPE = re.compile(
-    r"(?m)^\s*(?:#|" + _DECLARATION_PREFIX + r"(?:"
+    r"(?m)^[ \t]*(?:#|" + _DECLARATION_PREFIX + r"(?:"
     r"import|namespace|section|end|open|theorem|lemma|def|abbrev|instance|"
     r"structure|class|inductive|axiom|opaque|constant|example|attribute|"
-    r"set_option|notation|infix|infixl|infixr|prefix|postfix"
+    r"set_option|notation|infix|infixl|infixr|prefix|postfix|variable|"
+    r"universe|export|include|omit|mutual"
     r")\b)"
 )
 #: The sandbox fixes elaboration options on the command line, and a
@@ -44,6 +45,11 @@ _OPTION_COMMAND = re.compile(r"(?m)^\s*set_option\b")
 _DECLARATION = re.compile(
     r"(?m)^\s*(?:noncomputable\s+)?"
     r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive)\b"
+)
+_NAMED_DECLARATION = re.compile(
+    r"(?m)^[ \t]*(?:noncomputable[ \t]+)?"
+    r"(?:theorem|lemma|def|abbrev|structure|class|inductive)[ \t]+"
+    r"(?P<name>[^\s:({\[<]+)"
 )
 
 
@@ -85,6 +91,25 @@ def validate_generated_closed_declarations(code: str) -> str:
     code = validate_generated_declarations(code)
     if _PLACEHOLDER.search(code):
         raise GeneratedCodeError("declarations contain a proof placeholder")
+    return code
+
+
+def validate_generated_named_declaration(code: str, expected_name: str) -> str:
+    """Return one closed public declaration with the requested Lean name.
+
+    Reactive gap repair inserts source into an existing module. Its source
+    boundary is exactly one declaration, so surrounding commands cannot
+    change the namespace, local context, notation, or elaboration state of
+    declarations that follow it.
+    """
+    code = validate_generated_closed_declarations(code)
+    commands = list(_COMMAND_ESCAPE.finditer(code))
+    declarations = list(_NAMED_DECLARATION.finditer(code))
+    if len(commands) != 1 or len(declarations) != 1:
+        raise GeneratedCodeError("gap output must contain exactly one public named declaration")
+    actual_name = declarations[0].group("name")
+    if actual_name != expected_name:
+        raise GeneratedCodeError(f"gap output declares {actual_name!r}; expected {expected_name!r}")
     return code
 
 

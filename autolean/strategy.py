@@ -26,7 +26,6 @@ _PLAN_FIELDS = (
     "revision_triggers",
 )
 _MAX_ITEMS = 4
-_MAX_ITEM_CHARS = 240
 _MAX_PLAN_CHARS = 12_000
 _MAX_RESPONSE_CHARS = 64_000
 
@@ -63,10 +62,9 @@ Return exactly these JSON fields:
 - checkpoints: finite milestones that can be validated before proceeding
 - revision_triggers: observations that require changing the plan
 
-Every field after objective is an array of at most {max_items} strings. Each
-string is at most {max_item_chars} characters. Preserve the named fields even
-when an array is empty. Keep the complete response concise enough to review in
-one terminal screen.
+Every field after objective is an array of at most {max_items} strings.
+Preserve the named fields even when an array is empty. Keep the normalized
+JSON below {max_plan_chars} characters and each entry focused on one fact.
 """
 
 _REPAIR_PROMPT = """\
@@ -75,8 +73,8 @@ Your previous proof strategy violated this response contract:
 {error}
 
 Return one corrected JSON object with the exact requested fields. Every array
-contains at most {max_items} strings, and every string contains at most
-{max_item_chars} characters. Do not omit mathematical risks or completion
+contains at most {max_items} strings, and the normalized JSON contains at most
+{max_plan_chars} characters. Preserve mathematical risks and completion
 criteria; combine related items.
 
 Previous response:
@@ -207,7 +205,7 @@ def generate_proof_plan(
                 guidance=guidance_text,
                 context=context_text,
                 max_items=_MAX_ITEMS,
-                max_item_chars=_MAX_ITEM_CHARS,
+                max_plan_chars=_MAX_PLAN_CHARS,
             ),
         )
         for repair in range(max_repairs + 1):
@@ -233,7 +231,7 @@ def generate_proof_plan(
                         error=error,
                         response=response.text[:_MAX_PLAN_CHARS],
                         max_items=_MAX_ITEMS,
-                        max_item_chars=_MAX_ITEM_CHARS,
+                        max_plan_chars=_MAX_PLAN_CHARS,
                     ),
                 )
             else:
@@ -273,7 +271,7 @@ def parse_proof_plan(raw: str) -> ProofPlan:
         unexpected = ", ".join(sorted(actual_fields - expected_fields)) or "none"
         raise ProofStrategyError(f"strategy fields differ; missing: {missing}; unexpected: {unexpected}")
 
-    objective = _bounded_text(payload.get("objective"), "objective")
+    objective = _normalized_text(payload.get("objective"), "objective")
     values: dict[str, tuple[str, ...]] = {}
     for field_name in _PLAN_FIELDS:
         raw_items = payload.get(field_name, [])
@@ -281,7 +279,7 @@ def parse_proof_plan(raw: str) -> ProofPlan:
             raise ProofStrategyError(f"{field_name} must be an array")
         if len(raw_items) > _MAX_ITEMS:
             raise ProofStrategyError(f"{field_name} exceeds {_MAX_ITEMS} items")
-        values[field_name] = tuple(_bounded_text(item, f"{field_name} item") for item in raw_items)
+        values[field_name] = tuple(_normalized_text(item, f"{field_name} item") for item in raw_items)
     plan = ProofPlan(objective=objective, **values)
     if len(plan.to_json()) > _MAX_PLAN_CHARS:
         raise ProofStrategyError(f"strategy exceeds {_MAX_PLAN_CHARS} characters")
@@ -308,12 +306,10 @@ def _plan_attempt(
     )
 
 
-def _bounded_text(value: Any, label: str) -> str:
+def _normalized_text(value: Any, label: str) -> str:
     if not isinstance(value, str):
         raise ProofStrategyError(f"{label} must be text")
     text: str = " ".join(value.split())
     if not text:
         raise ProofStrategyError(f"{label} must not be empty")
-    if len(text) > _MAX_ITEM_CHARS:
-        raise ProofStrategyError(f"{label} exceeds {_MAX_ITEM_CHARS} characters")
     return text

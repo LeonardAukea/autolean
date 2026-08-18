@@ -43,14 +43,14 @@ faithfully expresses an informal claim.
   <a href="docs/demos/pythagorean.json">Run manifest</a>
 </p>
 
-The recording runs the front-page workflow live with the configured Claude
+The recording runs the front-page workflow live with a configured subscription
 backend: a reviewed mathematical plan, an isolated formalization compiled
 before proof search, a bounded proof session, and a kernel-checked commit
 exported as a standalone Lean project. It adds one `--guide` fixing the
 geometric statement and the Mathlib lemma that closes it, so the run is
-reproducible; the VHS source holds the exact command. Playback runs at
-four times speed — the session behind it takes minutes, most of them
-spent in Lean. A second recording
+reproducible; the VHS source holds the exact command. Playback runs at four
+times speed. The session behind it takes minutes, most of them spent in Lean.
+A second recording
 [audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
 (arXiv:2506.18616v5) —
 [MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·
@@ -70,9 +70,22 @@ nix develop
 autolean models
 claude                    # enter /login
 # or: codex login
+
+cd ..
+mkdir autolean-quickstart
+cd autolean-quickstart
+autolean init lean
+cd lean
+lake update
+lake exe cache get
+cd ..
 autolean doctor
 autolean prove "the Pythagorean theorem" --review-plan --max-attempts 5
 ```
+
+The checkout's `workspace/` is the release fixture. `autolean init lean`
+creates a proof project whose generated source and proof commits belong to the
+user.
 
 The automatic default selects the strongest profile for an authenticated
 Claude or Codex subscription, or an Anthropic or OpenAI API key. Name a local

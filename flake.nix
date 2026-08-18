@@ -388,6 +388,10 @@
 
           nativeBuildInputs = [pkgs.makeWrapper];
           doCheck = false;
+          pythonImportsCheck = [
+            "autolean.agent"
+            "autolean.finetune"
+          ];
           postFixup = ''
             wrapProgram "$out/bin/autolean" \
               --prefix PATH : "${lib.makeBinPath runtimeTools}" \
