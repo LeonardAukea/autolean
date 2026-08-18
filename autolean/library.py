@@ -15,14 +15,15 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 from autolean import ui
 from autolean.generated_code import (
     safe_lean_comment_text,
     validate_generated_declarations,
+    validate_generated_named_declaration,
 )
-from autolean.llm import GenerateFn
+from autolean.llm import GenerateFn, LLMResponse
+from autolean.provenance import sha256_text
 
 log = logging.getLogger("autolean")
 
@@ -59,6 +60,8 @@ Create a Lean 4 definition or lemma for `{missing_name}` that would
 make the proof work. Output ONLY the Lean 4 definition. No markdown.
 """
 
+FILL_GAP_SYSTEM = "You are a Lean 4 expert. Create minimal, correct definitions."
+
 
 # ---------------------------------------------------------------------------
 # Gap detection
@@ -75,15 +78,21 @@ class MissingDefinition:
     file: str
 
 
+@dataclass(frozen=True)
+class GeneratedDefinition:
+    """One reactive declaration and the request evidence that produced it."""
+
+    code: str
+    response: LLMResponse
+    prompt_sha256: str
+
+
 def detect_missing_definitions(
     error_message: str, context: str = "", file: str = ""
 ) -> list[MissingDefinition]:
     """Parse build errors to find missing identifiers/definitions.
 
-    Detects:
-    - "unknown identifier 'Foo'"
-    - "unknown constant 'Bar.baz'"
-    - "failed to synthesize instance Foo Bar"
+    Detects unknown identifier and unknown constant diagnostics.
     """
     gaps: list[MissingDefinition] = []
 
@@ -93,18 +102,6 @@ def detect_missing_definitions(
         # Skip names that are likely typos of standard things
         if len(name) < 2 or name.startswith("_"):
             continue
-        gaps.append(
-            MissingDefinition(
-                name=name,
-                error_message=error_message[:200],
-                context=context,
-                file=file,
-            )
-        )
-
-    # Failed to synthesize instance
-    for m in re.finditer(r"failed to synthesize\s+(?:instance\s+)?(\S+)", error_message):
-        name = m.group(1)
         gaps.append(
             MissingDefinition(
                 name=name,
@@ -164,12 +161,12 @@ def generate_library_source(
 
 def fill_gap(
     gap: MissingDefinition,
-    lean_file: Path,
     llm_generate: GenerateFn,
-) -> str | None:
+) -> GeneratedDefinition | None:
     """Try to define a missing identifier using the LLM.
 
-    Returns the Lean 4 definition code, or None if it couldn't generate one.
+    Return the closed declaration and its request evidence when generation
+    produces a substantive response.
     """
     prompt = FILL_GAP_PROMPT.format(
         missing_name=gap.name,
@@ -177,10 +174,7 @@ def fill_gap(
         context=gap.context[:2000],
     )
 
-    response = llm_generate(
-        "You are a Lean 4 expert. Create minimal, correct definitions.",
-        prompt,
-    )
+    response = llm_generate(FILL_GAP_SYSTEM, prompt)
 
     code = response.text.strip()
     # Clean markdown
@@ -190,7 +184,11 @@ def fill_gap(
     if not code or len(code) < 5:
         return None
 
-    code = validate_generated_declarations(code)
+    code = validate_generated_named_declaration(code, gap.name)
 
     log.info("Generated definition for '%s': %d chars", gap.name, len(code))
-    return code
+    return GeneratedDefinition(
+        code=code,
+        response=response,
+        prompt_sha256=sha256_text(f"{FILL_GAP_SYSTEM}\0{prompt}"),
+    )

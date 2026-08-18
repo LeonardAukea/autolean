@@ -59,6 +59,24 @@ def test_plan_parser_accepts_json_fence_and_bounds_arrays() -> None:
         parse_proof_plan(json.dumps(payload))
 
 
+def test_plan_parser_accepts_a_detailed_item_within_the_plan_budget() -> None:
+    payload = _plan_payload()
+    detailed_method = "Use the exact Mathlib theorem after checking its namespace. " * 8
+    payload["methods"] = [detailed_method]
+
+    plan = parse_proof_plan(json.dumps(payload))
+
+    assert plan.methods == (" ".join(detailed_method.split()),)
+
+
+def test_plan_parser_bounds_the_complete_normalized_plan() -> None:
+    payload = _plan_payload()
+    payload["methods"] = ["x" * 12_000]
+
+    with pytest.raises(ProofStrategyError, match="strategy exceeds 12000"):
+        parse_proof_plan(json.dumps(payload))
+
+
 def test_plan_parser_rejects_unstructured_prose() -> None:
     with pytest.raises(ProofStrategyError, match="valid JSON"):
         parse_proof_plan("First, think about the theorem.")

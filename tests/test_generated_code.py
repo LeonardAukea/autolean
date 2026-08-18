@@ -9,6 +9,7 @@ from autolean.generated_code import (
     safe_lean_comment_text,
     validate_generated_closed_declarations,
     validate_generated_declarations,
+    validate_generated_named_declaration,
     validate_generated_proof,
 )
 
@@ -53,6 +54,41 @@ def test_noncomputable_declaration_cannot_escape_a_proof_body() -> None:
 def test_closed_declaration_rejects_a_placeholder() -> None:
     with pytest.raises(GeneratedCodeError, match="proof placeholder"):
         validate_generated_closed_declarations("theorem generated : True := by sorry")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def Missing : Nat := 0",
+        "noncomputable def Missing : Nat := Classical.choice inferInstance",
+        "theorem Foo.Missing : True := by trivial",
+    ],
+)
+def test_named_declaration_accepts_one_exact_closed_declaration(code: str) -> None:
+    expected = "Foo.Missing" if "Foo.Missing" in code else "Missing"
+    assert validate_generated_named_declaration(code, expected) == code
+
+
+def test_named_declaration_rejects_the_wrong_name() -> None:
+    with pytest.raises(GeneratedCodeError, match="Missing"):
+        validate_generated_named_declaration("def Other : Nat := 0", "Missing")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def Missing : Nat := 0\ndef Extra : Nat := 1",
+        "namespace Hijack\ndef Missing : Nat := 0\nend Hijack",
+        "open Classical\ndef Missing : Nat := 0",
+        "variable (n : Nat)\ndef Missing : Nat := n",
+        "universe u\ndef Missing : Type u := PUnit",
+        "@[simp] theorem Missing : True := by trivial",
+        "instance : Inhabited Nat := inferInstance\ndef Missing : Nat := 0",
+    ],
+)
+def test_named_declaration_rejects_source_around_the_declaration(code: str) -> None:
+    with pytest.raises(GeneratedCodeError):
+        validate_generated_named_declaration(code, "Missing")
 
 
 @pytest.mark.parametrize(
