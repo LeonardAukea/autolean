@@ -1,24 +1,26 @@
 {
   "backend": "claude_cli",
-  "export_manifest_sha256": "59b4a91f213425f13f0ed4c4694e3a1de4213ccd169efb7fc090711590db0fbf",
+  "export_manifest_sha256": "a008c3da903e18e5df767758ab3a9b864e7eb0da1dab3ad2fb9800749f2f0398",
   "generated_module": "DistSqEqDistSqAddDistSqOfAngleEqPiDivTwo.lean",
-  "generated_sha256": "8bc05c9b4f86702a26e931ae27cab90dfc13122fa755f33f0f4ccc0f52e6cc92",
+  "generated_sha256": "c586a7b6c06e4a3b2fe441a7edcc010ed59ffb9e54782e31428054a8da6b540d",
   "media": [
     {
       "name": "autolean-pythagorean.gif",
-      "sha256": "9b287ab9a331b662f9db0131d135ac04d41d4cb44d78215b04bdaaa65ce4dfe2",
-      "size": 6105202
+      "sha256": "19f27432c3565f07728466298f569342dd1efcf6007c6ba30d68cfd1b4b388c2",
+      "size": 6119053
     },
     {
       "name": "autolean-pythagorean.mp4",
-      "sha256": "ebdd697f7bac9164dcbef354478c710200bf09bcdb5bf862e5221b2b550d89fa",
-      "size": 4498300
+      "sha256": "7728c2f09b00dc05faa6a9cdeb765b66c43d04764831b2fac550b08fa4cc907f",
+      "size": 4174187
     }
   ],
   "model": "fable",
-  "recorded_at": "2026-08-13T07:51:27.726857Z",
+  "playback_speed": 4.0,
+  "recorded_at": "2026-08-17T20:07:46.018872Z",
   "schema": "autolean.demo.v1",
-  "session": "20260813-074326-the-pythagorean-theorem-40332e7e",
+  "session": "20260817-195912-the-pythagorean-theorem-92947b4b",
+  "session_seconds": 248.489,
   "statement": "the Pythagorean theorem",
-  "tape_sha256": "ba44165af708950a1796d7735af90550ac1f26cbf8baaeadb0144200c5d91b42"
+  "tape_sha256": "c65fa55494b02f78a612818ffddae0ea017e56c71ce9e68ff243bacfa312e3e8"
 }

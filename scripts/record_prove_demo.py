@@ -121,10 +121,27 @@ def _assert_export(root: Path) -> None:
         raise SystemExit("demo export contains a proof placeholder")
 
 
+def _assert_compiles(root: Path) -> None:
+    """Compile the recorded source through the pinned project environment."""
+    workspace = root / "workspace"
+    generated = _assert_generated(root)
+    result = subprocess.run(
+        ["lake", "env", "lean", str(generated.relative_to(workspace))],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        diagnostics = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        raise SystemExit(f"pinned Lean rejected the recorded proof:\n{diagnostics}")
+
+
 def _assert_demo(root: Path) -> None:
     _assert_session(root)
     _assert_generated(root)
     _assert_export(root)
+    _assert_compiles(root)
 
 
 def _playback_speed(tape: Path) -> float:

@@ -71,8 +71,13 @@ def _clear_runtime_state(workspace: Path) -> None:
         "AutoLean/Papers",
     ):
         shutil.rmtree(workspace / relative, ignore_errors=True)
-    for path in workspace.glob("AutoLean/Paper_*.lean"):
-        path.unlink()
+    for pattern in (
+        "AutoLean/Paper*.lean",
+        "AutoLean/Challenge_*.lean",
+        "AutoLean/Lib*.lean",
+    ):
+        for path in workspace.glob(pattern):
+            path.unlink()
     for relative in (
         ".overnight.pid",
         "overnight.log",
@@ -94,6 +99,9 @@ def _initialize_repository(workspace: Path) -> None:
         "workspace/\n"
         "AutoLean/Generated/\n"
         "AutoLean/Papers/\n"
+        "AutoLean/Paper*.lean\n"
+        "AutoLean/Challenge_*.lean\n"
+        "AutoLean/Lib*.lean\n"
         "AutoLean/UserTheorems.lean\n"
         "results.tsv\n"
         "overnight.log\n",

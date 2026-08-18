@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.record_paper_demo import recording_environment
-from scripts.record_prove_demo import _assert_export, _assert_generated
+from scripts.record_paper_demo import _clear_runtime_state, recording_environment
+from scripts.record_prove_demo import _assert_compiles, _assert_export, _assert_generated
 
 
 def _write_generated(root: Path, body: str) -> Path:
@@ -51,6 +52,53 @@ def test_generated_source_with_a_placeholder_is_rejected(tmp_path: Path) -> None
 
     with pytest.raises(SystemExit, match="proof placeholder"):
         _assert_generated(tmp_path)
+
+
+def test_generated_source_is_compiled_in_its_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_generated(
+        tmp_path,
+        "import Mathlib\n\ntheorem pythagorean : True := by\n  trivial\n",
+    )
+    observed: dict[str, object] = {}
+
+    def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed.update(options)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("scripts.record_prove_demo.subprocess.run", run)
+
+    _assert_compiles(tmp_path)
+
+    assert observed["command"] == [
+        "lake",
+        "env",
+        "lean",
+        str(source.relative_to(tmp_path / "workspace")),
+    ]
+    assert observed["cwd"] == tmp_path / "workspace"
+    assert observed["timeout"] == 300
+
+
+def test_lean_diagnostics_are_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_generated(
+        tmp_path,
+        "import Mathlib\n\ntheorem pythagorean : True := by\n  trivial\n",
+    )
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, "", "unknown identifier")
+
+    monkeypatch.setattr("scripts.record_prove_demo.subprocess.run", run)
+
+    with pytest.raises(SystemExit, match="unknown identifier"):
+        _assert_compiles(tmp_path)
 
 
 def test_export_with_one_generated_source_is_accepted(tmp_path: Path) -> None:
@@ -110,3 +158,24 @@ def test_the_recording_environment_keeps_terminal_color(
     assert "NO_COLOR" not in environment
     assert "CLICOLOR" not in environment
     assert environment["AUTOLEAN_DEMO_ROOT"] == "/demo"
+
+
+def test_demo_workspace_removes_generated_lean_sources(tmp_path: Path) -> None:
+    autolean = tmp_path / "AutoLean"
+    autolean.mkdir()
+    curated = autolean / "Curated.lean"
+    curated.write_text("theorem curated : True := by trivial\n", encoding="utf-8")
+    generated = [
+        autolean / "PaperTopic.lean",
+        autolean / "Paper_arxiv_1.lean",
+        autolean / "Challenge_Test.lean",
+        autolean / "LibTopic.lean",
+        autolean / "UserTheorems.lean",
+    ]
+    for path in generated:
+        path.write_text("theorem generated : True := by trivial\n", encoding="utf-8")
+
+    _clear_runtime_state(tmp_path)
+
+    assert curated.is_file()
+    assert all(not path.exists() for path in generated)
