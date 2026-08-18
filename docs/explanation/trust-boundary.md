@@ -43,6 +43,19 @@ The generated candidate and compiler outputs live in a temporary directory.
 The validator invokes the pinned Lean binary directly with compiled project
 dependencies. It does not run project build scripts over generated source.
 
+## Compiler-guided generation
+
+AutoLean gives the model a bounded proposal loop over the pinned Lean runner.
+The host process extracts the exact goal, supplies local source structure and
+search evidence, applies the generated-source policy, and runs each candidate
+inside the operating-system sandbox. Lean diagnostics become evidence for the
+next repair or proof attempt.
+
+The host process owns the runner and filesystem authority. The model receives
+the mathematical context and compiler results needed to improve Lean source;
+accepted bytes still pass fresh elaboration, declaration binding, and the
+axiom audit.
+
 ## Source policy
 
 The policy rejects source that carries authority beyond a proof body:
