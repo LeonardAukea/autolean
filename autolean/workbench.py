@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import signal
 import sys
 import tempfile
+import time
+from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -18,12 +23,26 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, OptionList, RichLog, Select, Static
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    Log,
+    OptionList,
+    Select,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 from textual.widgets.option_list import Option
+from textual.worker import Worker, get_current_worker
 
 from autolean.llm import BACKEND_NAMES, BACKENDS, provider_name, resolve_backend_name
 from autolean.models import AUTO_PROFILE, ModelProfile, profile_groups, resolve_profile
 from autolean.program import ProgramConfig, parse_program
+from autolean.progress import MAX_EVENT_BYTES, ProgressEvent, ProgressKind, excerpt
 from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
 from autolean.scanner import SorryTarget, difficulty_score, prioritize_targets, scan_project
 
@@ -290,7 +309,7 @@ class ConfirmSolve(ModalScreen[bool]):
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+enter", "accept", "Accept"),
+        Binding("ctrl+enter", "accept", "Run agent"),
     ]
 
     DEFAULT_CSS = """
@@ -330,16 +349,16 @@ class ConfirmSolve(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container():
-            yield Static("Accept a proof into the Lean project?", classes="modal-title")
+            yield Static("Run the agent on this target?", classes="modal-title")
             yield Static(
                 f"Target: {self.target_name}\n\n"
-                "AutoLean writes only the exact candidate accepted by the "
-                "sandboxed pinned Lean kernel.",
+                "The agent attempts proofs and commits each Lean-accepted "
+                "candidate to the project.",
                 markup=False,
             )
             with Horizontal():
                 yield Button("Cancel", id="cancel-solve")
-                yield Button("Accept proof", id="accept-solve", variant="warning")
+                yield Button("Run agent", id="accept-solve", variant="warning")
 
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
@@ -356,15 +375,16 @@ class AutoLeanWorkbench(App[None]):
     """A keyboard-friendly proof workbench for mathematicians."""
 
     TITLE = "AutoLean Workbench"
-    SUB_TITLE = "model candidates are accepted only by the pinned Lean kernel"
+    SUB_TITLE = "attempts → Lean feedback → reusable proof patterns"
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("ctrl+q", "quit", "Quit"),
         Binding("/", "focus_filter", "Find target"),
+        Binding("ctrl+f", "focus_filter", "Find target", show=False, priority=True),
         Binding("ctrl+d", "doctor", "Check system"),
         Binding("ctrl+i", "inspect", "Inspect goal"),
         Binding("ctrl+v", "validate", "Validate"),
-        Binding("ctrl+s", "solve", "Accept proof"),
+        Binding("ctrl+s", "solve", "Run agent"),
         Binding("escape", "stop", "Stop run"),
     ]
 
@@ -382,6 +402,54 @@ class AutoLeanWorkbench(App[None]):
     #main {
         height: 1fr;
         padding: 1;
+    }
+
+    #workspace, TabPane {
+        height: 1fr;
+    }
+
+    #research-view {
+        padding: 0 1;
+        height: 1fr;
+    }
+
+    #run-progress {
+        height: 3;
+        color: #7dd3fc;
+    }
+
+    #research-goal {
+        height: 3;
+        overflow-y: auto;
+        color: #9fb3c8;
+    }
+
+    #evidence {
+        height: 1fr;
+        min-height: 5;
+    }
+
+    .research-card {
+        border: round #34506f;
+        padding: 0 1;
+    }
+
+    .research-card .pane-title {
+        height: 1;
+        padding-top: 0;
+    }
+
+    #candidate-pane, #feedback-pane {
+        width: 1fr;
+    }
+
+    #candidate-pane {
+        margin-right: 1;
+    }
+
+    #learning-pane {
+        height: 6;
+        border: round #73538f;
     }
 
     .pane {
@@ -446,7 +514,7 @@ class AutoLeanWorkbench(App[None]):
     }
 
     #activity {
-        height: 9;
+        height: 1fr;
         margin: 0 1;
         border: round #263b52;
         background: #080c11;
@@ -462,6 +530,18 @@ class AutoLeanWorkbench(App[None]):
         min-width: 11;
     }
 
+    Screen.compact #research-goal {
+        height: 2;
+    }
+
+    Screen.compact #learning-pane {
+        height: 4;
+    }
+
+    Screen.compact #status {
+        height: 1;
+    }
+
     Footer {
         background: #132238;
     }
@@ -474,8 +554,19 @@ class AutoLeanWorkbench(App[None]):
         self._target_by_option: dict[str, SorryTarget] = {}
         self._temporary_directory = tempfile.TemporaryDirectory(prefix="autolean-workbench-")
         self._session_program = Path(self._temporary_directory.name) / "program.md"
+        self._process: asyncio.subprocess.Process | None = None
+        self._worker: Worker[None] | None = None
+        self._run_started = 0.0
+        self._run_phase = "Ready"
+        self._run_summary = ""
+        self._run_target = ""
+        self._stop_requests = 0
+        self._quit_after_run = False
+        self._lessons: deque[str] = deque(maxlen=8)
+        self._transcript_pending: deque[str] = deque(maxlen=1000)
+        self._transcript_scheduled = False
 
-    def compose(self) -> ComposeResult:
+    def _setup_widgets(self) -> ComposeResult:
         initial_profile = resolve_profile(self.session.config.model)
         is_automatic = self.session.config.model == AUTO_PROFILE
         profile_value = (
@@ -489,7 +580,6 @@ class AutoLeanWorkbench(App[None]):
         backend_value = self.session.config.backend or PROFILE_DEFAULT
         effort_value = self.session.config.effort or PROFILE_DEFAULT
 
-        yield Header(show_clock=False)
         with Horizontal(id="main"):
             with Vertical(id="targets-pane", classes="pane"):
                 yield Static("Proof targets", classes="pane-title")
@@ -560,7 +650,7 @@ class AutoLeanWorkbench(App[None]):
                 )
                 yield Label("Experiment cycles", classes="field-label")
                 yield Input(
-                    value="1",
+                    value=str(self.session.config.max_cycles or 1),
                     type="integer",
                     id="max-cycles",
                 )
@@ -591,40 +681,60 @@ class AutoLeanWorkbench(App[None]):
                     id="guidance",
                 )
                 yield Static("", id="model-details", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with TabbedContent(initial="setup", id="workspace"):
+            with TabPane("Setup", id="setup"):
+                yield from self._setup_widgets()
+            with TabPane("Research", id="research"), Vertical(id="research-view"):
+                yield Static("Ready", id="run-progress", markup=False)
+                yield Static("Select a target and run the agent.", id="research-goal", markup=False)
+                with Horizontal(id="evidence"):
+                    with VerticalScroll(id="candidate-pane", classes="research-card"):
+                        yield Static("Candidate", classes="pane-title")
+                        yield Static("Awaiting a model proposal.", id="candidate", markup=False)
+                    with VerticalScroll(id="feedback-pane", classes="research-card"):
+                        yield Static("Lean feedback", classes="pane-title")
+                        yield Static("Each candidate requires a Lean verdict.", id="feedback", markup=False)
+                with VerticalScroll(id="learning-pane", classes="research-card"):
+                    yield Static("Learning", classes="pane-title")
+                    yield Static(
+                        "Accepted proofs supply reusable patterns. Lean errors guide retries.",
+                        id="learning",
+                        markup=False,
+                    )
+            with TabPane("Transcript", id="transcript"):
+                yield Log(id="activity", max_lines=1000, highlight=False)
         with Horizontal(id="actions"):
             yield Button("Check system", id="doctor", classes="command")
             yield Button("Inspect goal", id="inspect", classes="command")
             yield Button("Validate", id="validate", variant="primary", classes="command")
-            yield Button("Accept proof", id="solve", variant="warning", classes="command")
+            yield Button("Run agent", id="solve", variant="warning", classes="command")
             yield Button("Stop", id="stop", variant="error", disabled=True)
         yield Label(
             "Ready · Validate runs the complete model-to-kernel loop without project writes.",
             id="status",
             markup=False,
         )
-        yield RichLog(id="activity", wrap=True, markup=False, highlight=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self._show_targets(self.session.targets)
         self._update_model_details()
+        self.set_interval(1, self._update_run_progress)
 
     def on_unmount(self) -> None:
         self._temporary_directory.cleanup()
 
     def on_resize(self, event: Resize) -> None:
         self.screen.set_class(event.size.width < 100, "narrow")
+        self.screen.set_class(event.size.height < 34, "compact")
 
     @on(Input.Changed, "#target-filter")
     def filter_targets(self, event: Input.Changed) -> None:
-        query = event.value.casefold().strip()
-        targets = [
-            target
-            for target in self.session.targets
-            if query
-            in " ".join((target.decl_name, target.qualified_decl_name, target.rel_path, target.id)).casefold()
-        ]
-        self._show_targets(targets if query else self.session.targets)
+        del event
+        self._show_targets(self.session.targets)
 
     @on(OptionList.OptionHighlighted, "#target-list")
     def show_target_details(self, event: OptionList.OptionHighlighted) -> None:
@@ -663,7 +773,8 @@ class AutoLeanWorkbench(App[None]):
         self.action_stop()
 
     def action_focus_filter(self) -> None:
-        self.query_one("#target-filter", Input).focus()
+        self.query_one("#workspace", TabbedContent).active = "setup"
+        self.call_after_refresh(self.query_one("#target-filter", Input).focus)
 
     def action_doctor(self) -> None:
         self._launch("doctor")
@@ -675,9 +786,11 @@ class AutoLeanWorkbench(App[None]):
         self._launch("validate")
 
     def action_solve(self) -> None:
+        if self._command_active():
+            return
         target = self._selected_target()
         if target is None:
-            self._show_error("Select a proof target to accept.")
+            self._show_error("Select a proof target to investigate.")
             return
         self.push_screen(
             ConfirmSolve(target.qualified_decl_name or target.decl_name),
@@ -685,19 +798,48 @@ class AutoLeanWorkbench(App[None]):
         )
 
     def action_stop(self) -> None:
-        """Cancel the active child and keep all session choices editable."""
-        workers = self.workers.cancel_group(self, "command")
-        if workers:
-            self.query_one("#status", Label).update(
-                "Stopping current run · model and guidance remain editable."
-            )
+        """Request a stop while the child owns proof installation cleanup."""
+        process = self._process
+        if process is None:
+            if self._worker is not None and not self._worker.is_finished:
+                self._stop_requests += 1
+                self.query_one("#status", Label).update("Stopping command startup…")
+            return
+        if process.returncode is not None:
+            return
+        self._stop_requests += 1
+        try:
+            process.send_signal(signal.SIGINT)
+        except ProcessLookupError:
+            return
+        message = (
+            "Stopping after this attempt · press Stop again to interrupt the candidate."
+            if self._stop_requests == 1
+            else "Interrupting the candidate · preserving accepted proof records."
+        )
+        self.query_one("#status", Label).update(message)
+
+    async def action_quit(self) -> None:
+        """Close after the active child has recorded its final state."""
+        if self._worker is not None and not self._worker.is_finished:
+            self._quit_after_run = True
+            self.action_stop()
+        else:
+            self.exit()
 
     def _confirmed_solve(self, confirmed: bool | None) -> None:
         if confirmed:
-            self._launch("solve")
+            self.call_after_refresh(self._launch, "solve")
 
     def _show_targets(self, targets: list[SorryTarget] | tuple[SorryTarget, ...]) -> None:
         option_list = self.query_one("#target-list", OptionList)
+        query = self.query_one("#target-filter", Input).value.casefold().strip()
+        targets = [
+            target
+            for target in targets
+            if query
+            in " ".join((target.decl_name, target.qualified_decl_name, target.rel_path, target.id)).casefold()
+        ]
         self._visible_targets = list(targets)
         self._target_by_option.clear()
         options: list[Option] = []
@@ -816,6 +958,8 @@ class AutoLeanWorkbench(App[None]):
         details.update(f"{profile.description}\nProvider: {provider_name(profile.backend)}{route}{setup}")
 
     def _launch(self, action: WorkbenchAction) -> None:
+        if self._command_active():
+            return
         try:
             target = None if action == "doctor" else self._selected_target()
             if action != "inspect":
@@ -825,7 +969,14 @@ class AutoLeanWorkbench(App[None]):
         except (OSError, WorkbenchInputError, ValueError) as error:
             self._show_error(str(error))
             return
-        self.run_plan(plan)
+        self._stop_requests = 0
+        self._worker = self.run_plan(plan)
+
+    def _command_active(self) -> bool:
+        if self._worker is not None and not self._worker.is_finished:
+            self.notify("A command is running. Stop it before starting another.")
+            return True
+        return False
 
     def _show_error(self, message: str) -> None:
         self.query_one("#status", Label).update(f"Input error · {message}")
@@ -837,17 +988,110 @@ class AutoLeanWorkbench(App[None]):
                 button.disabled = disabled
         self.query_one("#stop", Button).disabled = not disabled
 
+    def _update_run_progress(self) -> None:
+        """Keep elapsed time visible while a model or Lean call is pending."""
+        if self._process is not None and self._process.returncode is None:
+            elapsed = int(time.monotonic() - self._run_started)
+            duration = f"{elapsed // 60}m {elapsed % 60:02d}s"
+        else:
+            duration = ""
+        self.query_one("#run-progress", Static).update(
+            Text(
+                "\n".join(
+                    filter(None, (f"{self._run_phase}  {duration}", self._run_target, self._run_summary))
+                )
+            )
+        )
+
+    def _receive_progress(self, event: ProgressEvent) -> None:
+        """Update research views from explicit observations of the child."""
+        if event.target:
+            self._run_target = event.target
+        if event.kind is ProgressKind.SUMMARY:
+            self._run_summary = event.message
+        else:
+            self._run_phase = event.message
+        if event.kind in {ProgressKind.TARGET, ProgressKind.GOAL}:
+            context = event.detail or event.message
+            if event.kind is ProgressKind.GOAL:
+                lines = context.splitlines()
+                goals = [line for line in lines if line.lstrip().startswith("⊢")]
+                hypotheses = [
+                    line
+                    for line in lines
+                    if not line.lstrip().startswith("⊢") and line.strip() != "unsolved goals"
+                ]
+                context = "\n".join([*goals, *hypotheses])
+            self.query_one("#research-goal", Static).update(Text(context))
+        if event.kind is ProgressKind.TARGET:
+            self.query_one("#candidate", Static).update("Awaiting a model proposal.")
+            self.query_one("#feedback", Static).update("This attempt has no Lean verdict yet.")
+        if event.kind is ProgressKind.CANDIDATE:
+            self.query_one("#candidate", Static).update(Text(event.detail))
+        if event.kind is ProgressKind.FEEDBACK:
+            self.query_one("#feedback", Static).update(Text(f"{event.message}\n{event.detail}"))
+        if event.kind is ProgressKind.LEARNING:
+            self._lessons.append(f"{event.message}\n{event.detail}")
+            self.query_one("#learning", Static).update(Text("\n\n".join(reversed(self._lessons))))
+        self._update_run_progress()
+
+    def _receive_output(self, line: str) -> None:
+        """Keep human output and validated progress observations readable."""
+        try:
+            event = ProgressEvent.from_line(line)
+        except ValueError as error:
+            self._write_transcript(f"Activity record rejected: {error}")
+            return
+        if event is None:
+            self._write_transcript(Text.from_ansi(line).plain)
+            return
+        self._receive_progress(event)
+        self._write_transcript(f"{event.time_label}  {event.message}\n{event.detail}".rstrip())
+
+    def _write_transcript(self, text: str) -> None:
+        """Bound pending lines and coalesce a burst into one UI write."""
+        self._transcript_pending.extend(excerpt(line) for line in text.splitlines() or [""])
+        if not self._transcript_scheduled:
+            self._transcript_scheduled = True
+            self.call_later(self._flush_transcript)
+
+    def _flush_transcript(self) -> None:
+        self._transcript_scheduled = False
+        if self._transcript_pending:
+            self.query_one("#activity", Log).write("\n".join(self._transcript_pending) + "\n")
+            self._transcript_pending.clear()
+
     @work(exclusive=True, group="command")
     async def run_plan(self, plan: CommandPlan) -> None:
         """Stream one child CLI workflow into the activity log."""
-        activity = self.query_one("#activity", RichLog)
+        worker = get_current_worker()
+        if self._worker is not worker:
+            self._stop_requests = 0
+        self._worker = worker
+        activity = self.query_one("#activity", Log)
         status = self.query_one("#status", Label)
         activity.clear()
-        activity.write(Text(f"$ {plan.display}", style="bold cyan"))
+        self._transcript_pending.clear()
+        activity.write(f"$ {plan.display}\n")
         status.update(f"Running {plan.action}…")
+        self._run_started = time.monotonic()
+        self._run_phase = f"Starting {plan.action}"
+        self._run_summary = ""
+        self._run_target = ""
+        self._lessons.clear()
+        self.query_one("#research-goal", Static).update("Waiting for a proof target.")
+        self.query_one("#candidate", Static).update("Awaiting a model proposal.")
+        self.query_one("#feedback", Static).update("This run has no Lean verdict yet.")
+        self.query_one("#learning", Static).update("Waiting for learning observations from this run.")
+        self.query_one("#workspace", TabbedContent).active = (
+            "research" if plan.action in {"solve", "validate"} else "transcript"
+        )
+        if plan.action in {"solve", "validate"}:
+            self.query_one("#candidate-pane", VerticalScroll).focus()
         self._set_commands_disabled(True)
         environment = os.environ.copy()
         environment["PYTHONUNBUFFERED"] = "1"
+        environment["AUTOLEAN_PROGRESS"] = "json"
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -856,15 +1100,19 @@ class AutoLeanWorkbench(App[None]):
                 env=environment,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
+            self._process = process
+            if self._stop_requests:
+                with suppress(ProcessLookupError):
+                    process.send_signal(signal.SIGINT)
             assert process.stdout is not None
-            while line := await process.stdout.readline():
-                activity.write(Text.from_ansi(line.decode(errors="replace").rstrip()))
+            async for line in _terminal_lines(process.stdout):
+                self._receive_output(line)
             return_code = await process.wait()
             if return_code == 0:
-                verb = "accepted" if plan.mutates_project else "completed"
-                status.update(f"{plan.action.title()} {verb} successfully.")
-                self.notify(f"{plan.action.title()} {verb} successfully.")
+                status.update(f"{plan.action.title()} finished · review the Lean verdict and open targets.")
+                self.notify(f"{plan.action.title()} finished.")
                 if plan.mutates_project:
                     # The rescan reads every project source; keep the UI live.
                     self.session = await asyncio.to_thread(
@@ -876,20 +1124,62 @@ class AutoLeanWorkbench(App[None]):
                 status.update(f"{plan.action.title()} failed with exit code {return_code}.")
                 self.notify(f"{plan.action.title()} failed.", severity="error")
         except asyncio.CancelledError:
-            if process is not None and process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
-            status.update(f"Cancelled {plan.action}.")
+            if self._worker is worker:
+                status.update(f"Cancelled {plan.action}.")
             raise
         except OSError as error:
-            status.update(f"Could not start {plan.action}: {error}")
+            status.update(f"Could not complete {plan.action}: {error}")
             self.notify(str(error), severity="error")
         finally:
-            self._set_commands_disabled(False)
+            if process is not None and process.returncode is None:
+                await _interrupt_child(process)
+            if self._worker is worker:
+                self._process = None
+                self._worker = None
+                self._update_run_progress()
+                self._set_commands_disabled(False)
+                if self._quit_after_run:
+                    self.exit()
+
+
+async def _terminal_lines(reader: asyncio.StreamReader) -> AsyncIterator[str]:
+    """Drain complete lines and bounded fragments of long diagnostics."""
+    pending = bytearray()
+    while chunk := await reader.read(8192):
+        pending.extend(chunk)
+        while pending:
+            newline = pending.find(b"\n")
+            if 0 <= newline < MAX_EVENT_BYTES:
+                yield bytes(pending[:newline]).decode("utf-8", errors="replace").rstrip("\r")
+                del pending[: newline + 1]
+            elif len(pending) >= MAX_EVENT_BYTES:
+                yield bytes(pending[:MAX_EVENT_BYTES]).decode("utf-8", errors="replace")
+                del pending[:MAX_EVENT_BYTES]
+            else:
+                break
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
+
+
+async def _interrupt_child(process: asyncio.subprocess.Process) -> None:
+    """Let the agent unwind owned processes and finish accepted records."""
+
+    async def drain() -> None:
+        if process.stdout is not None:
+            while await process.stdout.read(8192):
+                pass
+        await process.wait()
+
+    cleanup = asyncio.create_task(drain())
+    try:
+        process.send_signal(signal.SIGINT)
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup), timeout=2)
+        except TimeoutError:
+            process.send_signal(signal.SIGINT)
+            await cleanup
+    except ProcessLookupError:
+        await cleanup
 
 
 def run_workbench(program_path: Path) -> None:

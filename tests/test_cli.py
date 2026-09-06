@@ -715,6 +715,25 @@ def test_prove_refuses_a_gitignored_generated_path(
 
 
 class TestInitCommand:
+    def test_init_preserves_configuration_when_project_is_named_lakefile(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "lakefile"
+        result = runner.invoke(main, ["init", str(target), "--no-mathlib", "--no-cslib"])
+        assert result.exit_code == 0, result.output
+        assert "package lakefileproofs where" in (target / "lakefile.lean").read_text()
+        assert "theorem example_1" in (target / "LakefileProofs.lean").read_text()
+
+    @pytest.mark.parametrize("name", ["lean", "Lean", "Mathlib", "Cslib", "Init", "Std"])
+    def test_init_leaves_library_root_modules_visible(
+        self, runner: CliRunner, tmp_path: Path, name: str
+    ) -> None:
+        target = tmp_path / name
+        result = runner.invoke(main, ["init", str(target)])
+        assert result.exit_code == 0, result.output
+        assert (target / f"{name.capitalize()}Proofs.lean").is_file()
+        assert not (target / f"{name}.lean").exists()
+
     @pytest.mark.parametrize("libraries", [True, False])
     def test_init_commands_keep_the_program_working_directory(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libraries: bool
@@ -1543,3 +1562,37 @@ def test_init_program_resolves_the_default_codex_controls(
     program.model = "codex"
     config = program.llm_config()
     assert (config.model, config.effort) == ("gpt-6-astra", "max")
+
+
+def test_init_gromov_keeps_the_open_question_and_supporting_targets_distinct(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autolean.program import parse_program
+    from autolean.scanner import scan_project
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main, ["init", "research", "--example", "gromov"])
+    assert result.exit_code == 0, result.output
+    source = (tmp_path / "research/research.lean").read_text()
+    assert "∃ S : Finset G" in source
+    assert "X.Connected ∧" in source
+    assert {target.decl_name for target in scan_project(tmp_path / "research")} == {
+        "finite_quotient_injective",
+        "residually_finite_of_finite_quotients",
+        "residual_finiteness_question",
+    }
+    statement = source.split("theorem residual_finiteness_question", 1)[1]
+    assert "[Group.ResiduallyFinite" not in statement
+    assert any(
+        "open implication" in constraint for constraint in parse_program(tmp_path / "program.md").constraints
+    )
+
+
+def test_gromov_requires_mathlib_before_writing_files(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main, ["init", "research", "--example", "gromov", "--no-mathlib"])
+    assert result.exit_code != 0
+    assert "requires Mathlib" in result.output
+    assert not (tmp_path / "research").exists()

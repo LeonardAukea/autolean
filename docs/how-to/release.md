@@ -54,14 +54,18 @@ audits the locked dependency graph and emits a CycloneDX SBOM.
 Regenerate a recorded demonstration when its command or output changes:
 
 ```bash
-vhs validate docs/demos/pythagorean.tape docs/demos/ionescu-tulcea.tape
+vhs validate docs/demos/*.tape
 python scripts/record_prove_demo.py    # README front page
 python scripts/record_paper_demo.py    # paper audit
+python -m scripts.record_gromov_demo   # supporting proof and open question
 ```
 
 Each recorder requires the configured live provider and the complete VHS,
 FFmpeg, and ffprobe toolchain. It drives the versioned VHS tape in an isolated
-project, then checks the accepted evidence and standalone export. The tape
+project, then checks the accepted evidence and its Lean source. Proof and
+paper recordings also check the standalone export. The Gromov recorder
+requires a live supporting proof, pattern reuse, and an unresolved open
+attempt. Its receipt binds the activity journal and final source. The tape
 declares its command dependencies and sources the shared
 presentation settings. Recording pauses during provider and compiler latency;
 the resulting media retains every review, acceptance, artifact, and

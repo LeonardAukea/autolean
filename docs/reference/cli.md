@@ -17,6 +17,8 @@ autolean COMMAND --help
 `workbench`
 
 : Open the interactive interface over the same commands and configuration.
+  Setup selects targets and model controls. Research displays the goal,
+  candidate, Lean feedback, and learned patterns. Transcript retains details.
 
 ## Proof workflows
 
@@ -85,7 +87,8 @@ autolean COMMAND --help
 `init PATH`
 
 : Create a pinned Lean project and a `program.md` in the current directory.
-  Mathlib and CSLib are enabled by default.
+  Mathlib and CSLib are enabled by default. `--example gromov` selects
+  [supporting lemmas and an open research question](../tutorials/gromov.md).
 
 `export OUTPUT`
 

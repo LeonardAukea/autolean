@@ -131,10 +131,14 @@ class TestTacticVocabulary:
             "subst h\nrfl",
             "rwa [Nat.add_comm]",
             "ring_nf",
+            "classical\nexact Classical.choice h",
+            "change P\nexact h",
+            "custom_tactic\nexact h",
+            "Here is a proof.\ncustom_tactic\nexact h",
         ],
     )
     def test_a_real_proof_passes_through_unchanged(self, proof: str) -> None:
-        assert clean_llm_proof(proof, tactic_mode=True) == proof
+        assert clean_llm_proof(proof, tactic_mode=True) == proof.removeprefix("Here is a proof.\n")
 
     def test_the_cleaner_never_returns_less_than_nothing(self) -> None:
         """Trimming to empty would elaborate a proof the model never wrote."""

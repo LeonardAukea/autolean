@@ -105,7 +105,7 @@ An accepted proof also changes future questions. The skill memory extracts
 the proof's tactic sequence, names the pattern it instantiates — computation
 by `rfl`, simplification, induction with case analysis, arithmetic closure —
 and persists a small record: the tactics, an applicability condition, the
-theorem that produced it, and the number of accepted proofs that reached the
+latest accepted example, and the number of accepted proofs that reached the
 same pattern.
 
 Before each attempt, stored skills are ranked against the current goal state
@@ -126,8 +126,9 @@ flowchart LR
 
 The count measures reuse, not a success rate. Only accepted proofs reach the
 store, and a prompt carries several patterns at once, so a rejected candidate
-names no pattern to charge it to. Ranking therefore rests on how well a
-pattern's applicability condition matches the goal in front of it.
+names no pattern to charge it to. Ranking uses the applicability condition,
+tactic names, and the latest accepted example, including its hypotheses and
+conclusion.
 
 Skills are evidence, not authority. An injected pattern can only shape a
 proposal; the candidate it shapes passes the same source policy, sandbox,

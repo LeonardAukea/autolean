@@ -1354,6 +1354,25 @@ def verify_paper(
 def _lean_project_name(path: Path) -> str:
     name = re.sub(r"[^A-Za-z0-9_]", "_", path.name).strip("_")
     name = re.sub(r"_+", "_", name) or "AutoLeanProject"
+    # Root modules must leave the pinned libraries visible on every host.
+    if name.casefold() in {
+        "aesop",
+        "batteries",
+        "cli",
+        "cslib",
+        "importgraph",
+        "init",
+        "lake",
+        "lakefile",
+        "lean",
+        "leansearchclient",
+        "mathlib",
+        "plausible",
+        "proofwidgets",
+        "qq",
+        "std",
+    }:
+        name = name.capitalize() + "Proofs"
     return f"Project_{name}" if name[0].isdigit() else name
 
 
@@ -1377,13 +1396,14 @@ def _render_lakefile(project_name: str, *, mathlib: bool, cslib: bool) -> str:
     return content + f'@[default_target]\nlean_lib {project_name} where\n  srcDir := "."\n'
 
 
-def _render_example(project_name: str, *, mathlib: bool, cslib: bool) -> str:
-    content = (
+def _render_example(project_name: str, *, mathlib: bool, cslib: bool, example: str = "basic") -> str:
+    if example == "gromov":
+        return (Path(__file__).parent / "examples" / "gromov.lean").read_text(encoding="utf-8")
+    header = (
         f"/-! # {project_name} — AutoLean Project\n\nEdit this file and add theorems with `sorry`.\n-/\n\n"
     )
     imports = [name for enabled, name in ((mathlib, "Mathlib"), (cslib, "Cslib")) if enabled]
-    if imports:
-        content += "".join(f"import {name}\n" for name in imports) + "\n"
+    content = ("".join(f"import {name}\n" for name in imports) + "\n" if imports else "") + header
     return content + (
         "-- Example: replace sorry with a proof\n"
         "theorem example_1 : 1 + 1 = 2 := by\n  sorry\n\n"
@@ -1415,13 +1435,29 @@ def _prove_commit_error(
     )
 
 
-def _create_program(path: Path) -> bool:
+def _create_program(path: Path, *, example: str = "basic") -> bool:
+    research = (
+        "## Goals\n\n"
+        "- Prove the finite-quotient supporting lemmas.\n"
+        "- Investigate Gromov's residual-finiteness question.\n\n"
+        "## Constraints\n\n"
+        "- Preserve every statement and hypothesis.\n"
+        "- Keep the open implication distinct from the supporting lemmas.\n"
+        "- Accepted proofs must use only established Lean declarations.\n\n"
+        "## Strategy Hints\n\n"
+        "- Separate finitely many pairs with finite-index normal subgroups.\n"
+        "- Their finite intersection gives one separating finite quotient.\n"
+        "- Track the remaining step from hyperbolicity to finite quotients.\n\n"
+        if example == "gromov"
+        else ""
+    )
     content = (
         "# AutoLean Program\n\n"
         "## Mode\n\n"
         "sorry-elimination\n\n"
         "## Lean Project Path\n\n"
         f"{path}\n\n"
+        f"{research}"
         "## LLM Configuration\n\n"
         "model: auto\n"
         "search_scope: auto\n"
@@ -1452,8 +1488,17 @@ def _create_program(path: Path) -> bool:
     help="Include the pinned computer-science library.",
 )
 @click.option("--toolchain", default=DEFAULT_LEAN_TOOLCHAIN, help="Lean toolchain.")
-def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
+@click.option(
+    "--example",
+    type=click.Choice(("basic", "gromov")),
+    default="basic",
+    show_default=True,
+    help="Starting proof targets; gromov includes an open research question.",
+)
+def init(path: Path, mathlib: bool, cslib: bool, toolchain: str, example: str) -> None:
     """Create a pinned Lean project and `program.md`."""
+    if example == "gromov" and not mathlib:
+        raise click.ClickException("The Gromov example requires Mathlib.")
     path = path.resolve()
     if path.exists() and not path.is_dir():
         raise click.ClickException(f"Project path is not a directory: {path}")
@@ -1477,10 +1522,10 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
         encoding="utf-8",
     )
     (path / f"{project_name}.lean").write_text(
-        _render_example(project_name, mathlib=mathlib, cslib=cslib),
+        _render_example(project_name, mathlib=mathlib, cslib=cslib, example=example),
         encoding="utf-8",
     )
-    program_created = _create_program(path)
+    program_created = _create_program(path, example=example)
     gitignore = path / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text("/.lake/\n/build/\n", encoding="utf-8")
@@ -1506,6 +1551,9 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
         f"{ui.command()} solve",
     ):
         console.print(Text(f"    {command}"), soft_wrap=True)
+    console.print(f"    {ui.command()} workbench")
+    if example == "gromov":
+        console.print("\n  Gromov's question remains open; supporting lemmas have separate Lean targets.")
 
 
 _register_workflow_commands(main)

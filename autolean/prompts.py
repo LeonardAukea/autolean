@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-#: Tactic names this project recognises. A name outside this set is not a
-#: tactic — it is a branch label, a hypothesis, or a hallucination — and must
-#: never be handed back to the model as one to reuse.
+#: Known tactic names used to extract reusable patterns. Lean validates
+#: candidate proofs, including tactics outside this vocabulary.
 LEAN_TACTICS = frozenset(
     {
         "aesop",
@@ -14,6 +13,8 @@ LEAN_TACTICS = frozenset(
         "by_contra",
         "calc",
         "cases",
+        "change",
+        "classical",
         "constructor",
         "contradiction",
         "conv",

@@ -188,3 +188,16 @@ class TestSkillRanking:
         sm = self._memory(tmp_path)
 
         assert sm._relevance_score(sm.skills["induction_proof"], "⊢ True") == 0.0
+
+    def test_an_accepted_example_connects_patterns_to_later_goals(self, tmp_path: Path) -> None:
+        sm = self._memory(tmp_path)
+        skill = sm.learn_from_proof(
+            "finite_quotient",
+            "[Group.ResiduallyFinite G] (s : Finset G)",
+            "classical\nrefine ⟨N, ?_⟩\nintro x hx y hy h\nexact separate x y h",
+        )
+        assert skill is not None
+        goal = "G : Type u\ninst : Group G\n⊢ Group.ResiduallyFinite G"
+        injection = sm.get_prompt_injection(goal, max_skills=1)
+        assert "finite_quotient" in injection
+        assert "induction_proof" not in injection

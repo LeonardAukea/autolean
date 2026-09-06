@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -1114,12 +1115,15 @@ class LeanProject:
         tactics: list[str],
         *,
         timeout_per_tactic: int = 30,
+        on_attempt: Callable[[str, BuildResult | None], None] | None = None,
     ) -> str | None:
         """Return the first closing tactic; a timeout ends the search pass."""
         original = self.read_file(lean_file)
         original_sorries = count_sorries(original)
 
         for tactic in tactics:
+            if on_attempt is not None:
+                on_attempt(tactic, None)
             new_content = self.replace_sorry_at(
                 lean_file,
                 line,
@@ -1132,6 +1136,8 @@ class LeanProject:
                 new_content,
                 timeout=timeout_per_tactic,
             )
+            if on_attempt is not None:
+                on_attempt(tactic, result)
 
             if result.success and count_sorries(new_content) == original_sorries - 1:
                 return tactic

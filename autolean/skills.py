@@ -308,10 +308,18 @@ class SkillMemory:
             return None
 
         pattern_name, description, applicable = self._classify_pattern(tactics)
+        example = f"{theorem_name} : {theorem_statement}"
+        if len(example) > 4096:
+            example = example[:2047] + "…" + example[-2048:]
 
         if pattern_name in self.skills:
             existing = self.skills[pattern_name]
-            updated = replace(existing, times_observed=existing.times_observed + 1)
+            updated = replace(
+                existing,
+                tactics=tuple(tactics),
+                example_theorem=example,
+                times_observed=existing.times_observed + 1,
+            )
             self.skills[pattern_name] = updated
             self._save_skill(updated)
             log.debug(
@@ -326,7 +334,7 @@ class SkillMemory:
             description=description,
             tactics=tuple(tactics),
             applicable_when=applicable,
-            example_theorem=f"{theorem_name} : {theorem_statement[:100]}",
+            example_theorem=example,
         )
         self.skills[pattern_name] = skill
         self._save_skill(skill)
@@ -361,7 +369,8 @@ class SkillMemory:
             lines.append(
                 f"- **{s.name}** (from {seen}): {s.description}\n"
                 f"  Tactics: `{' ; '.join(s.tactics)}`\n"
-                f"  Use when: {s.applicable_when}"
+                f"  Use when: {s.applicable_when}\n"
+                f"  Example: {s.example_theorem}"
             )
         return "\n".join(lines)
 
@@ -423,6 +432,7 @@ class SkillMemory:
         if not goal_words:
             return 0.0
         score = float(len(_words(skill.applicable_when) & goal_words))
+        score += len(_words(skill.example_theorem) & goal_words)
         score += len(_symbols(skill.applicable_when) & _symbols(goal_state))
         score += 2.0 * len({tactic.lower() for tactic in skill.tactics} & goal_words)
         if skill.times_observed > 3:

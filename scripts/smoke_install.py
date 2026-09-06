@@ -42,6 +42,17 @@ def main() -> None:
         program = parse_program(Path(directory) / "program.md")
         program.model = "codex"
         assert program.llm_config().model == "gpt-6-astra"
+        subprocess.run(
+            [sys.executable, "-m", "autolean", "init", "research", "--example", "gromov", "--no-cslib"],
+            cwd=directory,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        research = (Path(directory) / "research" / "research.lean").read_text(encoding="utf-8")
+        assert "theorem residual_finiteness_question" in research
+        assert "∃ S : Finset G" in research
     print(f"Installed {len(modules)} modules: imports, model selection, CLI, and project creation passed")
 
 

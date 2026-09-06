@@ -1,0 +1,94 @@
+{
+  "accepted_support": {
+    "attempt": "1",
+    "axioms": "Classical.choice,Quot.sound,propext",
+    "backend": "codex_cli",
+    "build_s": "10.0",
+    "cycle": "1",
+    "decl_name": "residually_finite_of_finite_quotients",
+    "duration_s": "225.8",
+    "environment_sha256": "eeb1795327b07472b26bcbab63a62120ef78cf7b300203b88e410db5e0c8c77a",
+    "error": "",
+    "error_category": "",
+    "file": "LeanProofs.lean",
+    "indexed_context_sha256": "4e6a5273ffa76cebbca98beb9e43c8ee4148cacb480ce2a4316ade3073f9835d",
+    "inference_location": "remote",
+    "line": "48",
+    "llm_input_tokens": "15669",
+    "llm_tok_s": "26.7",
+    "llm_tokens": "1384",
+    "model": "gpt-6-astra",
+    "model_artifact_sha256": "",
+    "model_revision": "",
+    "outcome": "success",
+    "prompt_sha256": "8fcae97f356fce8b02a38b51a150fa35a2a258473ab4af61be3d91816137e7a8",
+    "proof_lines": "9",
+    "proof_sha256": "f8d9bf04c9e2356313fc2ffc0e1fe3bac50a97b1e5ffcd534a41a6138693cda8",
+    "remote_search": "false",
+    "sampling_seed": "",
+    "search_context_sha256": "",
+    "source_after_sha256": "66f382775b25f19cc50373c8b02d058ba24662185273e6c6fc20622ab5b4a67b",
+    "source_before_sha256": "2af14dc8baca831874622643a7eadee4b059e96408bc90224dfdd00068e0724d",
+    "strategy_response_sha256": "60f3bef03ad858aead97959b709053a1b5c8a47d10a637087b550df19755634a",
+    "strategy_sha256": "31f4e12611cbc5b57fc22e37e5a60deca1e5c79815119de900129eac4608fff2",
+    "structural_context_sha256": "2ebf0b2ee1bbd1431db0bc31a751d237281a95c6e76dce92cb18da43439f8381",
+    "target_id": "LeanProofs.lean:48:2:residually_finite_of_finite_quotients",
+    "timestamp": "2026-09-06T19:00:43.183552+00:00"
+  },
+  "activity": {
+    "name": "gromov-events.jsonl",
+    "sha256": "7c1b1942571c54b9d22c1efe6a1cf5cdde3a2e0eaf8b97005055a1f55c6f1e4e",
+    "size": 25541
+  },
+  "effort": "max",
+  "hidden_waits": "Model and Lean waits are omitted from playback.",
+  "media": [
+    {
+      "duration_seconds": 31.6,
+      "frame_rate": "25/1",
+      "height": 800,
+      "name": "autolean-gromov.gif",
+      "sha256": "8918cc873e16993475bc9a4553f163e976f149e50f27a17c82d34f6b35b2d8d6",
+      "size": 802926,
+      "width": 1280
+    },
+    {
+      "duration_seconds": 31.6,
+      "frame_rate": "25/1",
+      "height": 800,
+      "name": "autolean-gromov.mp4",
+      "sha256": "1798898696806dfc39a5ca97b00c4e329c8893abfe023130aa23d1e9506835a9",
+      "size": 553790,
+      "width": 1280
+    }
+  ],
+  "model": "gpt-6-astra",
+  "open_target": "residual_finiteness_question",
+  "open_targets": [
+    "finite_quotient_injective",
+    "residual_finiteness_question"
+  ],
+  "playback_speed": 1.25,
+  "program_sha256": "2d8ce6024ea8a5327387ea32db28774e71bf3fb347333389ff3aa6354a7b9c82",
+  "recorded_at": "2026-09-06T19:09:22.721696+00:00",
+  "schema": "autolean.research-demo.v1",
+  "source_after": {
+    "name": "gromov-run.lean",
+    "sha256": "66f382775b25f19cc50373c8b02d058ba24662185273e6c6fc20622ab5b4a67b",
+    "size": 2270
+  },
+  "source_before_sha256": "2af14dc8baca831874622643a7eadee4b059e96408bc90224dfdd00068e0724d",
+  "tape_sources": [
+    {
+      "name": "docs/demos/gromov.tape",
+      "sha256": "a0bf0e76e293f918fbaa3f3864ffa234cd829ee95f5272726b063a002c227fc9",
+      "size": 1151
+    },
+    {
+      "name": "docs/demos/style.tape",
+      "sha256": "496c4215b922fecaf3764209e931460534820cd0cbf1ed4594982af773711f96",
+      "size": 291
+    }
+  ],
+  "vhs_version": "0.11.0"
+}
