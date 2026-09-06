@@ -62,6 +62,7 @@ For open research,
 [investigate Gromov's residual-finiteness question](docs/tutorials/gromov.md).
 The terminal and TUI show proof attempts, Lean feedback, and reuse of accepted
 patterns while keeping supporting results and open targets distinct.
+[Watch the live research run](docs/assets/autolean-gromov.mp4).
 
 ## Start here
 

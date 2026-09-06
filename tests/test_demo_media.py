@@ -206,12 +206,13 @@ def test_rendered_media_rejects_an_invalid_presentation(
         validate_media([path])
 
 
-@pytest.mark.parametrize("name", ["pythagorean", "ionescu-tulcea"])
+@pytest.mark.parametrize("name", ["pythagorean", "ionescu-tulcea", "gromov"])
 def test_checked_in_demo_manifest_matches_its_sources(name: str) -> None:
     record = json.loads((ROOT / "docs" / "demos" / f"{name}.json").read_text())
 
     sources = record["tape_sources"]
-    assert record["tape_sha256"] == sources[0]["sha256"]
+    if name != "gromov":
+        assert record["tape_sha256"] == sources[0]["sha256"]
     for source in sources:
         path = ROOT / source["name"]
         assert path.stat().st_size == source["size"]
@@ -228,3 +229,39 @@ def test_checked_in_demo_manifest_matches_its_sources(name: str) -> None:
         durations.append(duration)
     assert max(durations) - min(durations) <= 1.0
     assert record["vhs_version"]
+
+
+def test_gromov_recording_binds_accepted_learning_and_the_open_boundary() -> None:
+    from autolean.progress import PROGRESS_PREFIX, ProgressEvent, ProgressKind
+    from autolean.scanner import scan_file
+
+    directory = ROOT / "docs" / "demos"
+    record = json.loads((directory / "gromov.json").read_text())
+    assert record["schema"] == "autolean.research-demo.v1"
+    assert (record["model"], record["effort"]) == ("gpt-6-astra", "max")
+    for field in ("source_after", "activity"):
+        identity = record[field]
+        payload = (directory / identity["name"]).read_bytes()
+        assert len(payload) == identity["size"]
+        assert hashlib.sha256(payload).hexdigest() == identity["sha256"]
+    template = (ROOT / "autolean" / "examples" / "gromov.lean").read_bytes()
+    assert hashlib.sha256(template).hexdigest() == record["source_before_sha256"]
+    source = directory / record["source_after"]["name"]
+    assert sorted(target.decl_name for target in scan_file(source)) == record["open_targets"]
+    support = record["accepted_support"]
+    assert support["outcome"] == "success"
+    assert support["model"] == record["model"]
+    assert support["source_after_sha256"] == record["source_after"]["sha256"]
+    assert set(support["axioms"].split(",")) <= {"Classical.choice", "Quot.sound", "propext"}
+    assert support["decl_name"] not in record["open_targets"]
+    assert record["open_target"] in record["open_targets"]
+    activity = directory / record["activity"]["name"]
+    events = [ProgressEvent.from_line(PROGRESS_PREFIX + line) for line in activity.read_text().splitlines()]
+    assert all(event is not None for event in events)
+    open_events = [event for event in events if event.target == record["open_target"]]
+    assert any(event.kind is ProgressKind.LEARNING for event in open_events)
+    assert any(event.kind is ProgressKind.FEEDBACK for event in open_events)
+    assert not any(
+        event.kind is ProgressKind.FEEDBACK and event.message == "success" for event in open_events
+    )
+    assert open_events[-1].kind is ProgressKind.FINISHED

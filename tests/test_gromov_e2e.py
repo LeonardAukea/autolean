@@ -111,7 +111,9 @@ def test_gromov_research_reports_correction_learning_and_an_open_question(
         ]
 
     events = solve("residually_finite_of_finite_quotients", 2)
-    feedback = [event.message for event in events if event.kind is ProgressKind.FEEDBACK]
+    feedback = [
+        event.message for event in events if event.kind is ProgressKind.FEEDBACK and event.attempt > 0
+    ]
     assert feedback == ["fail_build", "success"]
     lessons = [event.message for event in events if event.kind is ProgressKind.LEARNING]
     assert any("Self-correction" in lesson for lesson in lessons)

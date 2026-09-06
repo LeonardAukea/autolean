@@ -8,6 +8,15 @@ a precise piece of progress.
 Gromov discusses the question in [Hyperbolic Groups (1987), p. 141][gromov].
 Its open status is stated by [Gardam, Kielak and Logan (2026)][status].
 
+![An accepted supporting proof and an unresolved Gromov question][recording]
+
+This live GPT-6 Astra `max` run accepts the finite-quotient converse, reuses
+its learned pattern, and leaves the open implication unresolved. The
+[recorder](../../scripts/record_gromov_demo.py) supplies explicit library
+hints. Model and Lean waits are omitted from playback.
+[MP4](../assets/autolean-gromov.mp4) · [Run evidence](../demos/gromov.json) ·
+[Accepted source](../demos/gromov-run.lean)
+
 ## Create the research project
 
 Enter the repository's pinned development shell and authenticate Codex as in
@@ -79,3 +88,4 @@ observable events and their relationship to proof evidence.
 [gromov]: https://www.ihes.fr/~gromov/wp-content/uploads/2018/08/657.pdf
 [status]: https://doi.org/10.1017/S0305004126101959
 [records]: ../reference/research-artifacts.md
+[recording]: ../assets/autolean-gromov.gif

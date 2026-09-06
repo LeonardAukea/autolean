@@ -309,7 +309,7 @@ class ConfirmSolve(ModalScreen[bool]):
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+enter", "accept", "Accept"),
+        Binding("ctrl+enter", "accept", "Run agent"),
     ]
 
     DEFAULT_CSS = """
@@ -349,16 +349,16 @@ class ConfirmSolve(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container():
-            yield Static("Accept a proof into the Lean project?", classes="modal-title")
+            yield Static("Run the agent on this target?", classes="modal-title")
             yield Static(
                 f"Target: {self.target_name}\n\n"
-                "AutoLean writes only the exact candidate accepted by the "
-                "sandboxed pinned Lean kernel.",
+                "The agent attempts proofs and commits each Lean-accepted "
+                "candidate to the project.",
                 markup=False,
             )
             with Horizontal():
                 yield Button("Cancel", id="cancel-solve")
-                yield Button("Accept proof", id="accept-solve", variant="warning")
+                yield Button("Run agent", id="accept-solve", variant="warning")
 
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
@@ -790,7 +790,7 @@ class AutoLeanWorkbench(App[None]):
             return
         target = self._selected_target()
         if target is None:
-            self._show_error("Select a proof target to accept.")
+            self._show_error("Select a proof target to investigate.")
             return
         self.push_screen(
             ConfirmSolve(target.qualified_decl_name or target.decl_name),
