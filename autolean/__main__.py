@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1497,9 +1498,14 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
     else:
         console.print("  program.md (preserved; update Lean Project Path to select this project)")
     console.print("\n  Next:")
-    console.print(f"    cd {path} && lake update && lake exe cache get && lake build")
-    console.print(f"    {ui.command()} targets -d {path}")
-    console.print(f"    {ui.command()} solve")
+    project_argument = shlex.quote(str(path))
+    prepare = "lake update && lake exe cache get && " if libraries else ""
+    for command in (
+        f"(cd {project_argument} && {prepare}lake build)",
+        f"{ui.command()} targets -d {project_argument}",
+        f"{ui.command()} solve",
+    ):
+        console.print(Text(f"    {command}"), soft_wrap=True)
 
 
 _register_workflow_commands(main)

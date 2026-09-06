@@ -715,6 +715,36 @@ def test_prove_refuses_a_gitignored_generated_path(
 
 
 class TestInitCommand:
+    @pytest.mark.parametrize("libraries", [True, False])
+    def test_init_commands_keep_the_program_working_directory(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libraries: bool
+    ) -> None:
+        import shlex
+
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "research [G]; ' quoted path"
+        arguments = ["init", str(target)]
+        if not libraries:
+            arguments.extend(("--no-mathlib", "--no-cslib"))
+        result = runner.invoke(main, arguments)
+        assert result.exit_code == 0, result.output
+        commands = result.output.split("  Next:\n", 1)[1].splitlines()
+        build = commands[0].strip()
+        assert build.endswith("lake build)")
+        assert ("lake exe cache get" in build) is libraries
+        assert shlex.split(commands[1])[-1] == str(target.resolve())
+        executed = subprocess.run(
+            ["sh", "-c", "lake() { pwd; }\n" + build + "\npwd\n"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        directories = executed.stdout.splitlines()
+        assert directories[:-1] == [str(target.resolve())] * (3 if libraries else 1)
+        assert directories[-1] == str(tmp_path.resolve())
+        assert (tmp_path / "program.md").is_file()
+
     def test_init_creates_project(self, runner: CliRunner, tmp_path: Path) -> None:
         target = tmp_path / "my_project"
         result = runner.invoke(main, ["init", str(target)])
