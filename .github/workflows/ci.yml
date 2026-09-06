@@ -236,7 +236,7 @@ jobs:
           AUTOLEAN_RUN_SANDBOX_E2E=1
           python -m pytest -q -p no:cacheprovider
           tests/test_lean_sandbox_e2e.py
-      - name: Run the tutorial end to end against a scripted model
+      - name: Run tutorials and open research against a scripted model
         run: >-
           nix develop . --command env
           AUTOLEAN_BWRAP=/usr/bin/bwrap
@@ -246,7 +246,7 @@ jobs:
           GIT_COMMITTER_NAME=autolean-ci
           GIT_COMMITTER_EMAIL=ci@autolean.invalid
           python -m pytest -q -p no:cacheprovider
-          tests/test_tutorial_e2e.py
+          tests/test_tutorial_e2e.py tests/test_gromov_e2e.py
       - name: Record the proof environment
         run: >-
           nix run .#default -- environment --project workspace --json

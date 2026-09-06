@@ -1210,6 +1210,10 @@ class TestPreSearchTrainingData:
     ) -> None:
         agent, _ = _prepare_agent(tmp_path, monkeypatch)
         agent.dry_run = False
+        from autolean.progress import ProgressKind
+
+        observations = []
+        monkeypatch.setattr("autolean.agent.ui.progress", lambda event, **kwargs: observations.append(event))
         monkeypatch.setattr(agent.project, "try_tactics_fast", lambda *a, **k: "trivial")
         monkeypatch.setattr(
             agent.project,
@@ -1228,6 +1232,11 @@ class TestPreSearchTrainingData:
         assert examples, "the pre-search recorded no training example"
         assert all(example.goal_state for example in examples), (
             "a proof was collected without the goal it closed"
+        )
+        for kind in (ProgressKind.TARGET, ProgressKind.GOAL, ProgressKind.CANDIDATE, ProgressKind.FEEDBACK):
+            assert any(event.kind is kind and event.target == "target" for event in observations)
+        assert any(
+            event.kind is ProgressKind.FEEDBACK and event.message == "success" for event in observations
         )
 
 

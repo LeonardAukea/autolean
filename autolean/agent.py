@@ -14,7 +14,6 @@ from typing import Literal
 
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from autolean import ui
 from autolean.error_classifier import (
@@ -53,6 +52,7 @@ from autolean.llm import (
     provider_name,
 )
 from autolean.program import parse_program
+from autolean.progress import ProgressEvent, ProgressKind, excerpt
 from autolean.prompts import LEAN_TACTICS, SORRY_FILL_USER, SYSTEM_PROMPT
 from autolean.proof_loop import (
     EscalationDecision,
@@ -181,6 +181,10 @@ _WRAPPED_PROOF = re.compile(
 #: Lean keywords that open a line without being tactics. `_is_tactic_line`
 #: separates Lean from English, so it recognises these as well as tactics.
 _LEAN_LINE_OPENERS = frozenset({"by", "do", "else", "fun", "if", "match", "return", "then", "where", "with"})
+_EXPLANATORY_PROSE = re.compile(
+    r"^(?:Here (?:is|are)|This (?:proof|theorem)|The proof|"
+    r"It (?:proceeds|follows|uses)|We (?:can|will|use)|I (?:will|can)|I'll)\b"
+)
 
 
 def _is_tactic_line(line: str) -> bool:
@@ -224,20 +228,13 @@ def _strip_blank_edges(lines: list[str]) -> list[str]:
 
 
 def _trim_explanatory_prose(lines: list[str]) -> list[str]:
-    """Keep the tactic-shaped suffix of a prose-prefixed completion."""
-    if not lines or _is_tactic_line(lines[0]):
-        return lines
-    tactic_start = next(
-        (index for index, line in enumerate(lines) if line.strip() and _is_tactic_line(line)),
-        len(lines),
-    )
-    tactics = lines[tactic_start:]
-    while tactics and not _is_tactic_line(tactics[-1]):
-        tactics.pop()
-    # Recognising no tactic is not evidence that the completion held none.
-    # Discarding it would elaborate a proof the model did not write, or an
-    # empty one, and record either as the model's attempt.
-    return tactics or lines
+    """Remove explicit narrative while preserving unrecognized Lean syntax."""
+    start, end = 0, len(lines)
+    while start < end and (not lines[start].strip() or _EXPLANATORY_PROSE.match(lines[start].strip())):
+        start += 1
+    while end > start and (not lines[end - 1].strip() or _EXPLANATORY_PROSE.match(lines[end - 1].strip())):
+        end -= 1
+    return lines[start:end] or lines
 
 
 def _peel_trailing_tactic(line: str) -> str:
@@ -409,6 +406,10 @@ class AutoLeanAgent:
         self._environment_sha256 = ""
         self._model_router = EscalationRouter(confirm_escalation)
         self._logging_handle: LoggingHandle | None = None
+        self._progress_file: Path | None = None
+        self._progress_target = ""
+        self._progress_cycle = 0
+        self._progress_attempt = 0
 
         self.config = parse_program(self.program_path)
         if model is not None:
@@ -701,6 +702,7 @@ class AutoLeanAgent:
 
     def _initialize_run(self) -> AgentRunResult | None:
         """Validate and preflight every resource required by a proof run."""
+        self._progress(ProgressKind.PHASE, "Identifying the pinned proof environment")
         try:
             self.config.validate()
         except ValueError as error:
@@ -715,7 +717,12 @@ class AutoLeanAgent:
                 self.project.root / "logs",
                 verbose=self.verbose,
             )
+            self._progress_file = self._logging_handle.path.with_suffix(".events.jsonl")
         self._show_run_identity(environment.sha256)
+        self._progress(
+            ProgressKind.PHASE,
+            f"Using {self.llm.config.model} · effort {self.llm.config.effort or 'default'}",
+        )
         return self._preflight_provider() or self._prepare_git_branch()
 
     @staticmethod
@@ -900,6 +907,10 @@ class AutoLeanAgent:
         tactics: list[str],
     ) -> tuple[bool, AgentRunResult | None]:
         """Attempt and accept one deterministic tactic proof."""
+        self._progress_target = target.decl_name
+        self._progress_cycle = 0
+        self._progress_attempt = 0
+        self._progress(ProgressKind.TARGET, f"Tactic search · {target.decl_name}", target.context_before)
         self._step(f"Trying {len(tactics)} tactics on {target.decl_name}...")
         tactic = self.project.try_tactics_fast(
             target.file,
@@ -907,9 +918,12 @@ class AutoLeanAgent:
             target.col,
             tactics=tactics,
             timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
+            on_attempt=self._tactic_progress,
         )
         if not tactic:
+            self._progress(ProgressKind.FEEDBACK, "Tactic search found no closing proof")
             return False, None
+        self._progress(ProgressKind.CANDIDATE, "Tactic candidate · awaiting Lean audit", tactic)
         original = self.project.read_file(target.file)
         new_content = self.project.replace_sorry_at(
             target.file,
@@ -928,6 +942,7 @@ class AutoLeanAgent:
         )
         if not audit.success:
             detail = audit.stderr or (audit.errors[0].message if audit.errors else "axiom audit failed")
+            self._progress(ProgressKind.FEEDBACK, "Tactic proof rejected", detail)
             self._step(f"Tactic proof rejected: {detail[:160]}", "red")
             return False, None
         goal_state = self._goal_cache.get(target.id) or self.project.get_goal_via_hole_punch(
@@ -936,27 +951,42 @@ class AutoLeanAgent:
             target.col,
             timeout=self.config.cycle_timeout_seconds,
         )
+        if goal_state:
+            self._progress(ProgressKind.GOAL, "Lean goal", goal_state)
         record = self._tactic_record(target, tactic, audit)
         record = record.bind_source(original, new_content)
         failure = self._accept_source(target.file, new_content, original, record)
         if failure is not None:
             message = f"Could not accept tactic proof: {failure[1]}"
+            self._progress(ProgressKind.FEEDBACK, "Tactic acceptance failed", message)
             console.print(f"[red]{message}[/]")
             return False, AgentRunResult(False, message)
         self.tracker.log(record)
         self._accepting = False
+        self._progress_cycle = record.cycle
+        self._progress(ProgressKind.FEEDBACK, "success", "Lean accepted the deterministic tactic proof.")
         console.print(
             f"  [bold green]PROVED (tactic search):[/bold green] "
             f"[green]{target.decl_name}[/green] — [cyan]{tactic}[/cyan]"
         )
         self.collector.set_context(target.id, goal_state or "", target.context_before)
         self.collector.record_attempt(record, tactic)
-        self.skill_memory.learn_from_proof(
-            theorem_name=target.decl_name,
-            theorem_statement=target.context_before[:200],
-            proof=tactic,
-        )
+        self._learn_pattern(target, tactic)
         return True, None
+
+    def _tactic_progress(self, tactic: str, result: BuildResult | None) -> None:
+        """Expose deterministic trials while preserving the acceptance boundary."""
+        if result is None:
+            self._progress(ProgressKind.CANDIDATE, "Checking deterministic tactic", tactic)
+            return
+        if result.timed_out:
+            message = "Tactic timed out · ending deterministic search"
+        elif result.success:
+            message = "Tactic closes the goal · checking proof authority"
+        else:
+            message = "Tactic did not close the goal"
+        detail = "\n".join(error.message for error in result.errors) or result.stderr
+        self._progress(ProgressKind.FEEDBACK, message, detail)
 
     def _tactic_record(
         self,
@@ -1022,6 +1052,14 @@ class AutoLeanAgent:
                 continue
             attempt = self._attempts.get(target.id, 0) + 1
             self._attempts[target.id] = attempt
+            self._progress_target = target.decl_name
+            self._progress_cycle = cycle
+            self._progress_attempt = attempt
+            self._progress(
+                ProgressKind.TARGET,
+                f"Attempt {attempt}/{self.config.max_retries_per_sorry} · {target.decl_name}",
+                target.context_before,
+            )
             console.rule(
                 f"Cycle {cycle} | {target.decl_name} | attempt {attempt}/{self.config.max_retries_per_sorry}"
             )
@@ -1043,7 +1081,8 @@ class AutoLeanAgent:
     def _renew_epoch(self, targets: Sequence[SorryTarget]) -> bool:
         """Renew exhausted overnight budgets after an epoch reached Lean."""
         if self.config.max_cycles != 0 or not targets:
-            console.print("\n[green]All targets either proved or exhausted retries. Done![/]")
+            if targets:
+                console.print(f"\n[yellow]Retry budget exhausted; {len(targets)} target(s) remain open.[/]")
             return False
         if not self._epoch_reached_lean:
             console.print(
@@ -1079,6 +1118,12 @@ class AutoLeanAgent:
             self._epoch_reached_lean = True
         self.tracker.log(record)
         self._accepting = False
+        self._progress(
+            ProgressKind.FEEDBACK,
+            record.outcome.value,
+            record.error_summary or "Lean check completed; the outcome identifies its acceptance status.",
+            visible=False,
+        )
 
     def _refresh_accepted_targets(
         self,
@@ -1117,13 +1162,14 @@ class AutoLeanAgent:
         self._show_record_error(record)
         summary = self.tracker.summary()
         proved = summary.get("success", 0)
-        remaining = len(self._active_targets(targets))
+        remaining = len(targets)
+        eligible = len(self._active_targets(targets))
         elapsed = time.monotonic() - session_start
         rate = proved / (elapsed / 3600) if elapsed > 0 else 0
         coverage = proved / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
         stats = (
             f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
-            f"({coverage:.0f}%) | {remaining} left | {rate:.1f}/hr | "
+            f"({coverage:.0f}%) | {remaining} open, {eligible} eligible | {rate:.1f}/hr | "
             f"{elapsed / 60:.0f}m elapsed"
         )
         if console.is_terminal:
@@ -1131,6 +1177,12 @@ class AutoLeanAgent:
             filled = int(coverage / 100 * width) if self._initial_sorry_count else 0
             stats = f"[{'█' * filled}{'░' * (width - filled)}] {stats}"
         console.print(f"  {stats}")
+        self._progress(
+            ProgressKind.SUMMARY,
+            f"{proved} accepted · {remaining} open · {eligible} eligible · "
+            f"{len(self.skill_memory.skills)} proof patterns",
+            visible=False,
+        )
 
     @staticmethod
     def _show_record_error(record: ExperimentRecord) -> None:
@@ -1152,6 +1204,7 @@ class AutoLeanAgent:
         targets = self._select_targets()
         if not targets:
             console.print("[green]No sorries found — nothing to do![/]")
+            self._progress(ProgressKind.FINISHED, "Run finished · 0 selected proof targets remain open")
             return AgentRunResult(True)
         failure = self._validate_target_paths(targets) or self._sandbox_target_files(targets)
         if failure is not None:
@@ -1164,6 +1217,7 @@ class AutoLeanAgent:
         if not targets:
             console.print("[green]All targets solved by tactic pre-search![/]")
             self._print_final_report(targets, time.monotonic())
+            self._progress(ProgressKind.FINISHED, "Run finished · 0 selected proof targets remain open")
             return AgentRunResult(True)
 
         # -- Main loop ------------------------------------------------------
@@ -1172,6 +1226,10 @@ class AutoLeanAgent:
         targets = self._autonomous_loop(targets, session_start)
         # -- Session complete — full report -----------------------------------
         self._print_final_report(targets, session_start)
+        self._progress(
+            ProgressKind.FINISHED,
+            f"Run finished · {len(targets)} proof target(s) remain open",
+        )
         if self._terminal_failure is not None:
             return AgentRunResult(False, self._terminal_failure)
         if self._interrupted:
@@ -1182,8 +1240,36 @@ class AutoLeanAgent:
 
     def _step(self, msg: str, style: str = "dim") -> None:
         """Print a timestamped agent step."""
-        ts = datetime.now().strftime("%H:%M:%S")
-        console.print(f"  [dim]{ts}[/dim] [{style}]{msg}[/{style}]")
+        del style
+        self._progress(ProgressKind.PHASE, msg)
+
+    def _progress(
+        self,
+        kind: ProgressKind,
+        message: str,
+        detail: str = "",
+        *,
+        visible: bool = True,
+    ) -> None:
+        """Emit a bounded observation independently of proof acceptance."""
+        event = ProgressEvent(
+            kind,
+            excerpt(message, 512),
+            excerpt(detail),
+            excerpt(getattr(self, "_progress_target", ""), 512),
+            getattr(self, "_progress_cycle", 0),
+            getattr(self, "_progress_attempt", 0),
+        )
+        if path := getattr(self, "_progress_file", None):
+            try:
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(event.to_json() + "\n")
+            except OSError as error:
+                log.warning("Cannot append activity journal: %s", error)
+        try:
+            ui.progress(event, visible=visible)
+        except OSError as error:
+            log.warning("Cannot display activity: %s", error)
 
     def _accept_source(
         self,
@@ -1303,6 +1389,7 @@ class AutoLeanAgent:
         """Return the cached goal for the target's exact source identity."""
         if target.id in self._goal_cache:
             self._step("Goal state cached from previous attempt")
+            self._progress(ProgressKind.GOAL, "Lean goal", self._goal_cache[target.id] or "Unavailable")
             return self._goal_cache[target.id] or ""
         self._step("Extracting goal state (hole-punch: sorry -> ?_)")
         with ui.status("Extracting goal state..."):
@@ -1314,7 +1401,7 @@ class AutoLeanAgent:
             )
         self._goal_cache[target.id] = goal
         if goal:
-            self._step(f"Goal: {goal.replace(chr(10), ' ')[:100]}", "cyan")
+            self._progress(ProgressKind.GOAL, "Lean goal", goal)
         else:
             self._step("Goal state unavailable; source context will guide the attempt", "yellow")
         return goal or ""
@@ -1336,6 +1423,11 @@ class AutoLeanAgent:
             category, message = last_error
             self._step(f"Last error: {category.value} — feeding hint to LLM", "yellow")
             parts.append(retry_hint_for(category, message))
+        self._progress(
+            ProgressKind.LEARNING,
+            f"Self-correction from {len(failed)} rejected candidate(s)",
+            "\n\n".join(parts),
+        )
         return "\n".join(parts)
 
     def _program_context(self, context: str) -> str:
@@ -1361,7 +1453,11 @@ class AutoLeanAgent:
         if not injection:
             return context
         count = injection.count("**") // 2
-        self._step(f"Injecting {count} learned skills into prompt", "magenta")
+        self._progress(
+            ProgressKind.LEARNING,
+            f"Using {count} {'pattern' if count == 1 else 'patterns'} from accepted proofs",
+            injection,
+        )
         return f"{context}\n\n{injection}"
 
     def _build_attempt_prompt(
@@ -1583,19 +1679,7 @@ class AutoLeanAgent:
 
     def _show_proof_candidate(self, proof: str) -> None:
         """Display one generated proof with bounded terminal output."""
-        lines = proof.splitlines()
-        if len(lines) <= 5 or self.verbose:
-            console.print(f"  [bold]Proof[/] ({len(lines)} lines):")
-            for line in lines[:12]:
-                console.print(Text(f"    {line}", style="cyan"))
-            if len(lines) > 12:
-                console.print(f"    [dim]... ({len(lines) - 12} more lines)[/]")
-            return
-        summary = Text("  Proof", style="bold")
-        summary.append(f" ({len(lines)} lines): ")
-        summary.append(lines[0].strip(), style="cyan")
-        summary.append(" ...")
-        console.print(summary)
+        self._progress(ProgressKind.CANDIDATE, "Candidate · awaiting Lean", proof)
 
     def _check_proof_candidate(
         self,
@@ -1814,17 +1898,30 @@ class AutoLeanAgent:
         self._error_history.pop(target.id, None)
         self._step("Committing to git + collecting training data", "green")
         self.collector.record_attempt(record, candidate.proof)
+        self._learn_pattern(target, candidate.proof)
+        return record
+
+    def _learn_pattern(self, target: SorryTarget, proof: str) -> None:
+        """Report only patterns extracted from an accepted proof."""
+        self._progress(
+            ProgressKind.LEARNING,
+            f"Checked lemma available: {target.qualified_decl_name or target.decl_name}",
+            "Its accepted source is available to subsequent proof attempts in this project.",
+        )
         skill = self.skill_memory.learn_from_proof(
             theorem_name=target.decl_name,
-            theorem_statement=target.context_before[:200],
-            proof=candidate.proof,
+            theorem_statement=target.context_before,
+            proof=proof,
         )
         if skill:
-            self._step(
-                f"Learned skill: {skill.name} ({skill.description[:60]})",
-                "magenta",
+            self._progress(
+                ProgressKind.LEARNING,
+                f"{'Learned' if skill.times_observed == 1 else 'Reinforced'} pattern: {skill.name}",
+                f"{skill.description}\n"
+                f"Tactics: {' ; '.join(skill.tactics)}\n"
+                f"Use when: {skill.applicable_when}\n"
+                f"Evidence: {skill.times_observed} accepted proof(s); latest {target.decl_name}",
             )
-        return record
 
     def _proof_acceptance_failure(
         self,

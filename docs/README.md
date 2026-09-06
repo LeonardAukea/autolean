@@ -16,6 +16,7 @@ How-to guides solve a named operational problem.
 - [Run a research session](how-to/run-a-research-session.md)
 - [Verify a paper](how-to/verify-a-paper.md)
 - [Profile runtime and memory](how-to/profile.md)
+- [Investigate Gromov's open question](tutorials/gromov.md)
 - [Qualify and publish a release](how-to/release.md)
 - [Maintain public distribution](how-to/open-the-repository.md)
 

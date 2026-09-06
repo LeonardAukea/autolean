@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 from rich.theme import Theme
+
+from autolean.progress import PROGRESS_PREFIX, ProgressEvent, ProgressKind, excerpt
 
 THEME = Theme(
     {
@@ -73,3 +78,30 @@ def warn(message: str) -> None:
 def kv(label: str, value: str) -> None:
     """One aligned provenance line: dim label, plain value."""
     console.print(f"  [provenance]{label:<12}[/] {value}")
+
+
+def progress(event: ProgressEvent, *, visible: bool = True) -> None:
+    """Present the same observation to terminal readers and the workbench."""
+    if os.environ.get("AUTOLEAN_PROGRESS") == "json":
+        console.file.write(PROGRESS_PREFIX + event.to_json() + "\n")
+        console.file.flush()
+        return
+    if not visible:
+        return
+    title = Text(event.message, style="bold cyan")
+    if event.detail:
+        lines = event.detail.splitlines()
+        body = "\n".join(lines[:12])
+        if len(lines) > 12:
+            body += f"\n… {len(lines) - 12} more lines in the activity journal"
+        console.print(
+            Panel(
+                Text(body),
+                title=title,
+                border_style="magenta" if event.kind is ProgressKind.LEARNING else "cyan",
+            )
+        )
+    else:
+        text = Text(f"  {event.time_label}  ", style="dim")
+        text.append(excerpt(event.message, 512), style="cyan")
+        console.print(text)

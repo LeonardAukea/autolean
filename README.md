@@ -19,9 +19,8 @@ dependency closure that checked it, to the proof hash, and to the transitive
 axiom report, so the theorem can be re-checked in the same pinned environment.
 Every attempt records the model and identities of its prompt and search
 context. Exports bind the selected source and session to a manifest.
-Acceptance requires a source policy, an
-operating-system sandbox, elaboration by the pinned toolchain, and a
-declaration and axiom audit stand between a proposal and a commit.
+Acceptance requires a source policy, an operating-system sandbox,
+elaboration by the pinned toolchain, and a declaration and axiom audit.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
@@ -58,6 +57,11 @@ artifact, and independent Lean check at 1.25 times speed. A second recording
 [run manifest](docs/demos/ionescu-tulcea.json). Both recordings use the
 versioned [VHS presentation](docs/demos/style.tape); the
 [release guide](docs/how-to/release.md) states how to re-record them.
+
+For open research,
+[investigate Gromov's residual-finiteness question](docs/tutorials/gromov.md).
+The terminal and TUI show proof attempts, Lean feedback, and reuse of accepted
+patterns while keeping supporting results and open targets distinct.
 
 ## Start here
 

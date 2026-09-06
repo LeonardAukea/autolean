@@ -872,11 +872,24 @@ def test_tactic_search_yields_after_a_timeout_and_preserves_source(
         return BuildResult(success=True)
 
     monkeypatch.setattr(project, "validate_candidate", validate)
-    result = project.try_tactics_fast(source, 2, 2, ["rfl", "trivial"])
+    observed = []
+    result = project.try_tactics_fast(
+        source,
+        2,
+        2,
+        ["rfl", "trivial"],
+        on_attempt=lambda tactic, verdict: observed.append((tactic, verdict)),
+    )
 
     assert source.read_text() == original
     assert result == (None if timed_out else "trivial")
     assert len(candidates) == (1 if timed_out else 2)
+    assert [tactic for tactic, verdict in observed if verdict is None] == (
+        ["rfl"] if timed_out else ["rfl", "trivial"]
+    )
+    verdicts = [verdict for _, verdict in observed if verdict is not None]
+    assert len(verdicts) == len(candidates)
+    assert verdicts[0].timed_out == timed_out
 
 
 class TestStatementPolicy:

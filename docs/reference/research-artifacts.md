@@ -22,6 +22,25 @@ Each row identifies a target attempt, candidate, outcome, Lean diagnostic,
 model, prompt context, proof environment, and strategy-response hash. Rows are
 append-only evidence for `autolean results`, resume logic, and training export.
 
+## Activity journal
+
+Schema: `autolean.progress.v1`
+
+Location: `PROJECT/logs/*.events.jsonl`
+
+Each JSON Lines record names a phase, target, goal, candidate, feedback,
+learning observation, summary, or completion. It includes a UTC timestamp,
+target, cycle, and attempt. Detail is bounded to 8,192 characters; terminal
+panels show a shorter excerpt. The TUI reads the same events from child
+output, framed by `AUTOLEAN_EVENT ` when `AUTOLEAN_PROGRESS=json` is set.
+Deterministic search reports each tactic and verdict. Cycle zero denotes
+activity before an experiment record exists. The transcript retains at most
+1,000 lines and coalesces pending updates within the same bound.
+
+Events describe activity. Experiment rows and proof commits establish
+acceptance. Journal or display failures leave that acceptance path intact.
+Open targets remain open when an attempt budget is exhausted.
+
 ## Paper plan
 
 Schema: `autolean.paper-plan.v2`

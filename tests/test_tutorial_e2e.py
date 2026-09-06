@@ -199,8 +199,28 @@ def test_tutorial_first_proof_end_to_end(
     assert "mathlib4" in lakefile
     assert "cslib" in lakefile
     assert (scaffold / "lean" / "lean-toolchain").read_text(encoding="utf-8").strip()
-    assert (scaffold / "lean" / "lean.lean").is_file()
+    example = scaffold / "lean" / "LeanProofs.lean"
+    assert example.is_file()
     assert (scaffold / "program.md").is_file()
+
+    # The default directory name must preserve Lean's own import namespace.
+    from autolean.lean_interface import LeanProject
+
+    default_source = project_root / example.name
+    default_source.write_bytes(example.read_bytes())
+    default_content = default_source.read_text().replace("  sorry", "  rfl", 1)
+    declaration_line = next(
+        index
+        for index, line in enumerate(default_content.splitlines(), 1)
+        if line.startswith("theorem example_1")
+    )
+    audit = LeanProject(project_root).validate_candidate(
+        default_source,
+        default_content,
+        declaration="example_1",
+        declaration_line=declaration_line,
+    )
+    assert audit.success, audit.stderr or str(audit.errors)
 
     # 3. `doctor` checks the model and the sandboxed Lean path.
     doctor = run("doctor", "--program", str(program_file))

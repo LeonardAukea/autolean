@@ -141,6 +141,8 @@ def assert_tape_contract(
     repository: Path,
     tape: Path,
     required_commands: Sequence[str],
+    *,
+    interactive: bool = False,
 ) -> list[dict[str, object]]:
     """Validate and identify the source files that control one recording."""
     style = repository / DEMO_STYLE
@@ -168,7 +170,7 @@ def assert_tape_contract(
             hidden = False
         elif line.startswith("Enter"):
             last_enter = index
-        elif line.startswith("Wait") and hidden and last_hide > last_enter:
+        elif line.startswith("Wait") and hidden and last_hide > last_enter and not interactive:
             raise SystemExit("demo tape arms a hidden wait after submitting its command")
 
     settings = _settings(style)
