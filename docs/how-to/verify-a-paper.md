@@ -43,8 +43,9 @@ autolean verify scans.pdf \
   --paddleocr-url http://127.0.0.1:8080
 ```
 
-The service receives the selected PDF pages. AutoLean records the extractor
-input and output hashes with the acquired source.
+The service receives the selected PDF pages. AutoLean records its endpoint,
+local or remote placement, exact transferred byte count and hash, page set,
+and output hash in the paper coverage ledger.
 
 ## Review the formalization
 
@@ -68,10 +69,13 @@ obligation.
 autolean verify paper.pdf --max-cycles 5
 ```
 
-Use `--output` to choose the Lean module. Use `--model` and `--backend` exactly
+Use `--output` to choose the Lean module. Use `--model` and `--provider` exactly
 as with `prove` and `solve`.
 
-Hosted Anthropic and OpenAI backends receive the native PDF and page-addressed
-Markdown. Other backends receive bounded Markdown. Read
+Hosted Anthropic and OpenAI providers receive a native PDF containing only the
+selected pages and bounded, page-addressed Markdown. The coverage ledger
+records the effective inference placement, request and response hashes, PDF
+hash and byte count, and transferred page numbers. Other providers receive
+bounded Markdown. Read
 [Trust boundary](../explanation/trust-boundary.md) before sending unpublished
 or confidential papers to a provider.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+from rich.text import Text
 
 from autolean import cli_runtime
 from autolean.ui import console
@@ -12,7 +13,7 @@ from autolean.ui import console
 _agent_for = cli_runtime.agent_for
 _configure_escalation = cli_runtime.configure_escalation
 _run_session_agent = cli_runtime.run_session_agent
-backend_option = cli_runtime.backend_option
+provider_option = cli_runtime.provider_option
 escalation_options = cli_runtime.escalation_options
 model_option = cli_runtime.model_option
 program_option = cli_runtime.program_option
@@ -49,12 +50,11 @@ def sessions(program: Path, as_json: bool, active: bool) -> None:
         return
 
     table = Table(title="Proof sessions")
-    table.add_column("Session", style="cyan", no_wrap=True)
-    table.add_column("Kind")
-    table.add_column("Status")
-    table.add_column("Model")
-    table.add_column("Remaining", justify="right")
-    table.add_column("Title")
+    table.add_column("Session", style="cyan", overflow="fold", max_width=36)
+    table.add_column("Kind", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Model", overflow="fold", max_width=20)
+    table.add_column("Remaining", justify="right", no_wrap=True)
     for record in records:
         style = {
             SessionStatus.COMPLETED: "green",
@@ -65,21 +65,24 @@ def sessions(program: Path, as_json: bool, active: bool) -> None:
         if record.model_transitions:
             model_path = f"{record.model_transitions[0].from_model} → {record.model}"
         table.add_row(
-            record.id,
+            Text(f"{record.title}\n{record.id}"),
             record.kind.value,
             f"[{style}]{record.status.value}[/{style}]",
-            model_path,
+            Text(model_path),
             "?" if record.remaining_targets is None else str(record.remaining_targets),
-            record.title,
         )
     console.print(table)
-    console.print(f"\n[dim]Continue the latest:[/] autolean resume {records[0].id}")
+    if any(record.status is not SessionStatus.COMPLETED for record in records):
+        import shlex
+
+        command = shlex.join(("autolean", "resume", "--program", str(program)))
+        console.print(f"\n[dim]Continue the latest unfinished session:[/] {command}")
 
 
 @session_commands.command("resume")
 @click.argument("session_id", required=False)
 @model_option
-@backend_option
+@provider_option
 @escalation_options
 @click.option(
     "--max-cycles",
@@ -126,6 +129,7 @@ def resume_session(
         program,
         model=model or session.model,
         backend=backend or session.backend,
+        effort=session.effort if model is None and backend is None else None,
         verbose=True,
         resume=True,
         target_filter=session.target_filter or None,
@@ -140,23 +144,11 @@ def resume_session(
         escalate_to=escalate_to,
         escalate_after=escalate_after,
     )
-    updated = store.save(
-        session.update(
-            model=agent.llm.config.model,
-            backend=agent.llm.config.backend,
-            max_cycles=cycle_budget,
-            guidance=guidance,
-            escalation_policy=agent.config.escalation_policy,
-            escalation_model=agent.config.escalation_model or "",
-            escalation_after_failures=agent.config.escalation_after_failures,
-        )
-    )
+    settings = cli_runtime.session_settings(agent)
+    # A resumed run keeps the session's own budget unless the caller sets one.
+    settings["max_cycles"] = cycle_budget
+    updated = store.save(session.update(guidance=guidance, **settings))
     _run_session_agent(agent, store, updated)
-
-
-# ---------------------------------------------------------------------------
-# targets — find sorry targets
-# ---------------------------------------------------------------------------
 
 
 def register_commands(root: click.Group) -> None:

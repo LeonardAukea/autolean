@@ -17,6 +17,8 @@ result-*
 
 # AutoLean runtime
 .autolean/
+# `autolean init lean` creates this directory in the current working tree.
+/lean/
 results.tsv
 progress.md
 *.log

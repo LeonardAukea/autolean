@@ -9,13 +9,21 @@ import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from autolean.routing import (
     DEFAULT_ESCALATION_AFTER,
     EscalationPolicy,
     ModelTransition,
+)
+from autolean.validation import (
+    require_aware_datetime,
+    require_instance,
+    require_int,
+    require_optional_int,
+    require_text,
+    require_texts,
 )
 
 SESSION_SCHEMA = "autolean.proof-session.v1"
@@ -68,6 +76,7 @@ class ProofSession:
     model: str
     backend: str
     max_cycles: int
+    effort: str | None = None
     escalation_policy: EscalationPolicy = EscalationPolicy.ASK
     escalation_model: str = ""
     escalation_after_failures: int = DEFAULT_ESCALATION_AFTER
@@ -81,18 +90,127 @@ class ProofSession:
     schema: str = SESSION_SCHEMA
 
     def __post_init__(self) -> None:
+        require_texts(
+            (
+                self.id,
+                self.title,
+                self.created_at,
+                self.updated_at,
+                self.model,
+                self.backend,
+                self.escalation_model,
+                self.target_file,
+                self.target_filter,
+                self.message,
+                self.schema,
+            ),
+            "proof session text fields must be strings",
+            allow_empty=True,
+            error_type=SessionError,
+        )
         if self.schema != SESSION_SCHEMA:
             raise SessionError(f"unsupported proof session schema: {self.schema}")
         if _SESSION_ID.fullmatch(self.id) is None:
             raise SessionError(f"invalid proof session ID: {self.id}")
-        if not self.title.strip():
-            raise SessionError("proof session title must not be empty")
-        if self.max_cycles < 0:
-            raise SessionError("proof session cycle budget must be non-negative")
-        if self.escalation_after_failures <= 0:
-            raise SessionError("proof session escalation threshold must be positive")
-        if self.remaining_targets is not None and self.remaining_targets < 0:
-            raise SessionError("remaining target count must be non-negative")
+        require_text(
+            self.title,
+            "proof session title must not be empty",
+            error_type=SessionError,
+        )
+        require_instance(
+            self.kind,
+            SessionKind,
+            "proof session kind and status must use their vocabularies",
+            error_type=SessionError,
+        )
+        require_instance(
+            self.status,
+            SessionStatus,
+            "proof session kind and status must use their vocabularies",
+            error_type=SessionError,
+        )
+        require_instance(
+            self.escalation_policy,
+            EscalationPolicy,
+            "proof session escalation policy is invalid",
+            error_type=SessionError,
+        )
+        require_texts(
+            (self.model, self.backend),
+            "proof session model and backend must not be empty",
+            error_type=SessionError,
+        )
+        require_int(
+            self.max_cycles,
+            "proof session cycle budget must be non-negative",
+            minimum=0,
+            error_type=SessionError,
+        )
+        if self.effort not in (None, "none", "low", "medium", "high", "xhigh", "max"):
+            raise SessionError("proof session reasoning effort is invalid")
+        require_int(
+            self.escalation_after_failures,
+            "proof session escalation threshold must be positive",
+            minimum=1,
+            error_type=SessionError,
+        )
+        require_optional_int(
+            self.remaining_targets,
+            "remaining target count must be non-negative",
+            minimum=0,
+            error_type=SessionError,
+        )
+        created = require_aware_datetime(
+            self.created_at,
+            "proof session timestamps must be ISO 8601 with a UTC offset",
+            error_type=SessionError,
+        )
+        updated = require_aware_datetime(
+            self.updated_at,
+            "proof session timestamps must be ISO 8601 with a UTC offset",
+            error_type=SessionError,
+        )
+        if updated < created:
+            raise SessionError("proof session update precedes its creation")
+        require_instance(
+            self.artifacts,
+            tuple,
+            "proof session artifacts and guidance must be tuples",
+            error_type=SessionError,
+        )
+        require_instance(
+            self.guidance,
+            tuple,
+            "proof session artifacts and guidance must be tuples",
+            error_type=SessionError,
+        )
+        require_instance(
+            self.model_transitions,
+            tuple,
+            "proof session model transitions must be a tuple",
+            error_type=SessionError,
+        )
+        require_texts(
+            self.artifacts,
+            "proof session artifacts must contain unique text",
+            allow_empty=True,
+            unique=True,
+            error_type=SessionError,
+        )
+        paths = (self.target_file, *self.artifacts)
+        if any(
+            path and (PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts)
+            for path in paths
+        ):
+            raise SessionError("proof session paths must be project-relative")
+        require_texts(
+            self.guidance,
+            "proof session guidance must be text",
+            allow_empty=True,
+            error_type=SessionError,
+        )
+        if not all(isinstance(item, ModelTransition) for item in self.model_transitions):
+            raise SessionError("proof session model transitions are invalid")
 
     def as_dict(self) -> dict[str, Any]:
         """Return the canonical JSON-compatible record."""
@@ -109,35 +227,72 @@ class ProofSession:
     def from_dict(cls, record: dict[str, Any]) -> ProofSession:
         """Validate and decode one persisted record."""
         try:
+            string_fields = (
+                "id",
+                "kind",
+                "title",
+                "status",
+                "created_at",
+                "updated_at",
+                "model",
+                "backend",
+            )
+            if any(not isinstance(record.get(name), str) for name in string_fields):
+                raise TypeError("required session text fields must be strings")
+            optional_strings = (
+                "escalation_model",
+                "target_file",
+                "target_filter",
+                "message",
+                "schema",
+            )
+            if any(name in record and not isinstance(record[name], str) for name in optional_strings):
+                raise TypeError("optional session text fields must be strings")
+            max_cycles = record["max_cycles"]
+            if isinstance(max_cycles, bool) or not isinstance(max_cycles, int):
+                raise TypeError("max_cycles must be an integer")
+            artifacts = record.get("artifacts", [])
+            guidance = record.get("guidance", [])
+            transitions = record.get("model_transitions", [])
+            if not isinstance(artifacts, list) or not all(isinstance(item, str) for item in artifacts):
+                raise TypeError("artifacts must be a list of strings")
+            if not isinstance(guidance, list) or not all(isinstance(item, str) for item in guidance):
+                raise TypeError("guidance must be a list of strings")
+            if not isinstance(transitions, list):
+                raise TypeError("model_transitions must be a list")
+            threshold = record.get(
+                "escalation_after_failures",
+                DEFAULT_ESCALATION_AFTER,
+            )
+            if isinstance(threshold, bool) or not isinstance(threshold, int):
+                raise TypeError("escalation_after_failures must be an integer")
+            remaining = record.get("remaining_targets")
+            if remaining is not None and (isinstance(remaining, bool) or not isinstance(remaining, int)):
+                raise TypeError("remaining_targets must be an integer or null")
             return cls(
-                id=str(record["id"]),
-                kind=SessionKind(str(record["kind"])),
-                title=str(record["title"]),
-                status=SessionStatus(str(record["status"])),
-                created_at=str(record["created_at"]),
-                updated_at=str(record["updated_at"]),
-                model=str(record["model"]),
-                backend=str(record["backend"]),
-                max_cycles=int(record["max_cycles"]),
+                id=record["id"],
+                kind=SessionKind(record["kind"]),
+                title=record["title"],
+                status=SessionStatus(record["status"]),
+                created_at=record["created_at"],
+                updated_at=record["updated_at"],
+                model=record["model"],
+                backend=record["backend"],
+                max_cycles=max_cycles,
+                effort=record.get("effort"),
                 escalation_policy=EscalationPolicy(
-                    str(record.get("escalation_policy", EscalationPolicy.ASK.value))
+                    record.get("escalation_policy", EscalationPolicy.ASK.value)
                 ),
-                escalation_model=str(record.get("escalation_model", "")),
-                escalation_after_failures=int(
-                    record.get("escalation_after_failures", DEFAULT_ESCALATION_AFTER)
-                ),
-                target_file=str(record.get("target_file", "")),
-                target_filter=str(record.get("target_filter", "")),
-                artifacts=tuple(str(item) for item in record.get("artifacts", [])),
-                guidance=tuple(str(item) for item in record.get("guidance", [])),
-                model_transitions=tuple(
-                    ModelTransition.from_dict(item) for item in record.get("model_transitions", [])
-                ),
-                remaining_targets=(
-                    None if record.get("remaining_targets") is None else int(record["remaining_targets"])
-                ),
-                message=str(record.get("message", "")),
-                schema=str(record.get("schema", "")),
+                escalation_model=record.get("escalation_model", ""),
+                escalation_after_failures=threshold,
+                target_file=record.get("target_file", ""),
+                target_filter=record.get("target_filter", ""),
+                artifacts=tuple(artifacts),
+                guidance=tuple(guidance),
+                model_transitions=tuple(ModelTransition.from_dict(item) for item in transitions),
+                remaining_targets=remaining,
+                message=record.get("message", ""),
+                schema=record.get("schema", ""),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise SessionError(f"malformed proof session: {error}") from error
@@ -215,6 +370,7 @@ class SessionStore:
         model: str,
         backend: str,
         max_cycles: int,
+        effort: str | None = None,
         escalation_policy: EscalationPolicy = EscalationPolicy.ASK,
         escalation_model: str = "",
         escalation_after_failures: int = DEFAULT_ESCALATION_AFTER,
@@ -239,6 +395,7 @@ class SessionStore:
             model=model,
             backend=backend,
             max_cycles=max_cycles,
+            effort=effort,
             escalation_policy=escalation_policy,
             escalation_model=escalation_model,
             escalation_after_failures=escalation_after_failures,
@@ -290,7 +447,11 @@ class SessionStore:
         if not self.directory.exists():
             return []
         sessions = [self.load(path.stem) for path in self.directory.glob("*.json")]
-        return sorted(sessions, key=lambda item: (item.updated_at, item.id), reverse=True)
+        return sorted(
+            sessions,
+            key=lambda item: (datetime.fromisoformat(item.updated_at), item.id),
+            reverse=True,
+        )
 
     def latest(self, *, include_completed: bool = False) -> ProofSession:
         """Return the latest resumable session."""

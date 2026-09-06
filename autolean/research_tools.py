@@ -18,6 +18,12 @@ class ResearchTool:
     available: bool
     required: bool = False
 
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value.strip() for value in (self.name, self.identity)):
+            raise ValueError("research tool identity must be complete")
+        if not isinstance(self.available, bool) or not isinstance(self.required, bool):
+            raise ValueError("research tool readiness flags must be booleans")
+
 
 def research_tools() -> tuple[ResearchTool, ...]:
     """Inspect the tools that supply paper and code context."""

@@ -375,7 +375,6 @@
             (with pythonPackages; [
               beautifulsoup4
               httpx
-              pyyaml
               rich
               textual
             ])
@@ -390,7 +389,7 @@
           doCheck = false;
           pythonImportsCheck = [
             "autolean.agent"
-            "autolean.finetune"
+            "autolean.paper"
           ];
           postFixup = ''
             wrapProgram "$out/bin/autolean" \
@@ -482,23 +481,26 @@
               (with pkgs; [
                 actionlint
                 cffconvert
-                cvc5
                 curl
+                ffmpeg-headless
                 jq
                 lychee
                 ollama
-                ripgrep
-                tmux
+                # PyMuPDF's selective OCR resolves its tessdata through the
+                # tesseract binary on PATH.
                 tesseract
                 uv
                 vhs
-                z3
                 zstd
               ])
               ++ runtimeTools
               ++ [autolean sandboxTestPython];
 
             shellHook = ''
+              # The live checkout owns Python imports inside the development
+              # shell while the packaged CLI supplies its executable.
+              export PYTHONPATH="$PWD''${PYTHONPATH:+:$PYTHONPATH}"
+
               first_line() {
                 "$@" 2>/dev/null | head -n 1
               }
@@ -506,8 +508,6 @@
               printf '  %-9s %s\n' autolean "$(first_line autolean --version)"
               printf '  %-9s %s\n' lean "$(first_line lean --version)"
               printf '  %-9s %s\n' uv "$(first_line uv --version)"
-              printf '  %-9s %s\n' z3 "$(first_line z3 --version)"
-              printf '  %-9s %s\n' cvc5 "$(first_line cvc5 --version)"
               printf '  %-9s %s\n' ollama "$(first_line ollama --version)"
               echo
               echo "Commands:"

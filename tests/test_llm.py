@@ -10,12 +10,17 @@ import respx
 
 from autolean.llm import (
     BACKENDS,
+    PROVIDER_NAMES,
     Capabilities,
+    InferenceLocation,
     LLMBackend,
     LLMConfig,
     LLMError,
     LLMResponse,
     create_llm_client,
+    inference_location,
+    provider_name,
+    resolve_backend_name,
 )
 from autolean.llm.muse_glimmer import DEFAULT_MUSE_GLIMMER_URL, MuseGlimmerClient
 from autolean.llm.ollama import DEFAULT_OLLAMA_URL, OllamaClient, probe_installed_models
@@ -36,6 +41,23 @@ class TestLLMResponse:
         r = LLMResponse(text="x", model="m", output_tokens=120)
         assert r.tokens_per_second == 0.0
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"text": "", "model": "m"},
+            {"text": "x", "model": ""},
+            {"text": "x", "model": "m", "input_tokens": -1},
+            {"text": "x", "model": "m", "output_tokens": True},
+            {"text": "x", "model": "m", "duration_seconds": float("nan")},
+        ],
+    )
+    def test_invalid_response_accounting_is_rejected(
+        self,
+        kwargs: dict[str, object],
+    ) -> None:
+        with pytest.raises(ValueError):
+            LLMResponse(**kwargs)  # type: ignore[arg-type]
+
 
 class TestLLMConfig:
     def test_override_wins_over_configured_temperature(self) -> None:
@@ -55,10 +77,14 @@ class TestLLMConfig:
         [
             ({"model": ""}, "model"),
             ({"model": "m", "max_output_tokens": 0}, "max_output_tokens"),
+            ({"model": "m", "max_output_tokens": True}, "max_output_tokens"),
             ({"model": "m", "timeout": 0}, "timeout"),
+            ({"model": "m", "timeout": True}, "timeout"),
             ({"model": "m", "temperature": -0.1}, "temperature"),
+            ({"model": "m", "temperature": False}, "temperature"),
             ({"model": "m", "base_url": "http://user:secret@localhost:8000"}, "credentials"),
             ({"model": "m", "seed": -1}, "seed"),
+            ({"model": "m", "seed": True}, "seed"),
             ({"model": "m", "model_revision": ""}, "model_revision"),
             ({"model": "m", "model_artifact_sha256": "bad"}, "model_artifact_sha256"),
         ],
@@ -74,6 +100,13 @@ class TestLLMConfig:
 
 
 class TestRegistry:
+    def test_every_backend_has_one_unique_provider_name(self) -> None:
+        assert len(PROVIDER_NAMES) == len(set(PROVIDER_NAMES)) == len(BACKENDS)
+        for backend in BACKENDS:
+            provider = provider_name(backend)
+            assert resolve_backend_name(provider) == backend
+            assert resolve_backend_name(backend) == backend
+
     @pytest.mark.parametrize("name", sorted(BACKENDS))
     def test_every_registered_backend_constructs(self, name: str) -> None:
         client = create_llm_client(LLMConfig(model="test-model", backend=name))
@@ -94,6 +127,35 @@ class TestRegistry:
 
         assert all(callable(spec.loader) for spec in BACKENDS.values())
 
+    def test_hosted_and_subscription_providers_are_remote(self) -> None:
+        for backend in ("claude_cli", "codex_cli", "grok_cli", "anthropic", "openai"):
+            config = LLMConfig(model="m", backend=backend)
+            assert inference_location(config) is InferenceLocation.REMOTE
+
+    def test_explicit_endpoints_determine_inference_location(self) -> None:
+        local = LLMConfig(
+            model="m",
+            backend="openai_compat",
+            base_url="http://127.0.0.1:8080",
+        )
+        remote = LLMConfig(
+            model="m",
+            backend="openai_compat",
+            base_url="https://models.example.test/v1",
+        )
+
+        assert inference_location(local) is InferenceLocation.LOCAL
+        assert inference_location(remote) is InferenceLocation.REMOTE
+
+    def test_localhost_endpoint_identity_is_case_and_dot_insensitive(self) -> None:
+        config = LLMConfig(
+            model="m",
+            backend="openai_compat",
+            base_url="http://LOCALHOST.:8080",
+        )
+
+        assert inference_location(config) is InferenceLocation.LOCAL
+
     @pytest.mark.parametrize(
         ("backend", "effort"),
         [
@@ -101,6 +163,7 @@ class TestRegistry:
             ("claude_cli", "xhigh"),
             ("openai", "none"),
             ("codex_cli", "max"),
+            ("grok_cli", "xhigh"),
             ("muse_glimmer", "low"),
         ],
     )
@@ -114,7 +177,7 @@ class TestRegistry:
 
     @pytest.mark.parametrize(
         ("backend", "effort"),
-        [("ollama", "high"), ("anthropic", "none"), ("muse_glimmer", "max")],
+        [("ollama", "high"), ("anthropic", "none"), ("muse_glimmer", "max"), ("grok_cli", "max")],
     )
     def test_backend_rejects_unsupported_reasoning_effort(
         self,

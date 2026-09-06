@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -27,18 +29,18 @@ log = logging.getLogger("autolean")
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProofExample:
     """A single (goal_state, proof) training example."""
 
-    #: The placeholder these attempts address. Goal state and context are
-    #: recorded against it, so preference pairs are formed against it too.
+    #: The source position these attempts address. A preference pair also
+    #: requires the same goal, context, and proof environment.
     target_id: str
     theorem_name: str
     file: str
-    goal_state: str  # Lean goal state (from hole-punch)
-    context: str  # surrounding code context
-    proof: str  # the tactic proof
+    goal_state: str
+    context: str
+    proof: str
     success: bool  # whether Lean accepted it
     attempt: int
     tokens: int
@@ -50,18 +52,94 @@ class ProofExample:
     axioms: str = ""
     model: str = ""
     backend: str = ""
+    inference_location: str = ""
+    search_context_sha256: str = ""
+    remote_search: bool | None = None
+
+    def __post_init__(self) -> None:
+        text_values = (
+            self.target_id,
+            self.theorem_name,
+            self.file,
+            self.goal_state,
+            self.context,
+            self.proof,
+            self.error_category,
+            self.error_message,
+            self.environment_sha256,
+            self.proof_sha256,
+            self.axioms,
+            self.model,
+            self.backend,
+            self.inference_location,
+            self.search_context_sha256,
+        )
+        if any(not isinstance(value, str) for value in text_values):
+            raise ValueError("proof example text fields must be strings")
+        if not self.target_id or not self.theorem_name or not self.file:
+            raise ValueError("proof example target identity must be complete")
+        if not isinstance(self.success, bool):
+            raise ValueError("proof example verdict must be a boolean")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.attempt, self.tokens)
+        ):
+            raise ValueError("proof example counts must be non-negative integers")
+        if (
+            isinstance(self.duration, bool)
+            or not isinstance(self.duration, (int, float))
+            or not math.isfinite(self.duration)
+            or self.duration < 0
+        ):
+            raise ValueError("proof example duration must be finite and non-negative")
+        digests = (
+            self.environment_sha256,
+            self.proof_sha256,
+            self.search_context_sha256,
+        )
+        if any(digest and re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in digests):
+            raise ValueError("proof example digests must be lowercase SHA-256 values")
+        if self.inference_location not in {"", "local", "remote"}:
+            raise ValueError("proof example inference location is invalid")
+        if self.remote_search is not None and not isinstance(self.remote_search, bool):
+            raise ValueError("proof example search placement must be a boolean")
 
 
-@dataclass
+@dataclass(frozen=True)
 class DPOPair:
     """A preference pair: positive proof (compiled) vs negative (failed)."""
 
     theorem_name: str
     goal_state: str
     context: str
-    chosen: str  # proof that worked
-    rejected: str  # proof that failed
-    rejected_error: str  # why it failed
+    chosen: str
+    rejected: str
+    rejected_error: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.theorem_name,
+            self.goal_state,
+            self.context,
+            self.chosen,
+            self.rejected,
+            self.rejected_error,
+        )
+        if any(not isinstance(value, str) for value in values):
+            raise ValueError("preference pair fields must be text")
+        if any(
+            not value.strip()
+            for value in (
+                self.theorem_name,
+                self.goal_state,
+                self.chosen,
+                self.rejected,
+                self.rejected_error,
+            )
+        ):
+            raise ValueError("preference pair evidence must be complete")
+        if self.chosen == self.rejected:
+            raise ValueError("preference pair proofs must differ")
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +160,20 @@ class TrainingDataCollector:
     _goal_states: dict[str, str] = field(default_factory=dict)  # target_id -> goal
     _contexts: dict[str, str] = field(default_factory=dict)  # target_id -> context
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.output_dir, Path):
+            raise ValueError("collector output directory must be a path")
+        if not isinstance(self.examples, list) or any(
+            not isinstance(example, ProofExample) for example in self.examples
+        ):
+            raise ValueError("collector examples must contain ProofExample values")
+
     def set_context(self, target_id: str, goal_state: str, context: str) -> None:
         """Store goal state and context for a target (before attempts)."""
+        if not isinstance(target_id, str) or not target_id:
+            raise ValueError("collector target ID must not be empty")
+        if not isinstance(goal_state, str) or not isinstance(context, str):
+            raise ValueError("collector goal and context must be text")
         self._goal_states[target_id] = goal_state or ""
         self._contexts[target_id] = context or ""
 
@@ -93,6 +183,8 @@ class TrainingDataCollector:
         proof: str,
     ) -> None:
         """Record a proof attempt (successful or not)."""
+        if not isinstance(record, ExperimentRecord) or not isinstance(proof, str):
+            raise ValueError("collector attempts require a record and proof text")
         example = ProofExample(
             target_id=record.target_id,
             theorem_name=record.decl_name,
@@ -111,6 +203,11 @@ class TrainingDataCollector:
             axioms=record.axioms,
             model=record.model,
             backend=record.backend,
+            inference_location=(
+                record.inference_location.value if record.inference_location is not None else ""
+            ),
+            search_context_sha256=record.search_context_sha256,
+            remote_search=record.remote_search,
         )
         self.examples.append(example)
         log.debug(
@@ -234,6 +331,9 @@ class TrainingDataCollector:
                         "axioms": ex.axioms,
                         "model": ex.model,
                         "backend": ex.backend,
+                        "inference_location": ex.inference_location,
+                        "search_context_sha256": ex.search_context_sha256,
+                        "remote_search": ex.remote_search,
                     },
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -250,12 +350,10 @@ class TrainingDataCollector:
         Format:
         {"prompt": "...", "chosen": "...", "rejected": "..."}
         """
-        # One declaration can hold several `sorry`s, and a short declaration
-        # name repeats across files, so grouping by name offers the proof of
-        # one goal as the better answer to a different one.
-        by_target: dict[str, list[ProofExample]] = {}
+        by_target: dict[tuple[str, str, str, str], list[ProofExample]] = {}
         for ex in self.examples:
-            by_target.setdefault(ex.target_id, []).append(ex)
+            identity = (ex.target_id, ex.goal_state, ex.context, ex.environment_sha256)
+            by_target.setdefault(identity, []).append(ex)
 
         pairs: list[DPOPair] = []
         for attempts in by_target.values():
@@ -263,11 +361,10 @@ class TrainingDataCollector:
             negatives = [a for a in attempts if not a.success and a.proof]
             if not positives or not negatives:
                 continue
-            # Use the first success and each distinct failure
             chosen = positives[0]
             seen_proofs: set[str] = set()
             for neg in negatives:
-                if neg.proof in seen_proofs:
+                if neg.proof == chosen.proof or neg.proof in seen_proofs:
                     continue
                 seen_proofs.add(neg.proof)
                 pairs.append(
@@ -287,7 +384,7 @@ class TrainingDataCollector:
         with open(path, "w", encoding="utf-8") as f:
             for pair in pairs:
                 record = {
-                    "prompt": self._format_user_prompt_from_pair(pair),
+                    "prompt": self._format_user_prompt(pair),
                     "chosen": pair.chosen,
                     "rejected": pair.rejected,
                     "metadata": {
@@ -302,22 +399,13 @@ class TrainingDataCollector:
 
     # -- Helpers ---------------------------------------------------------------
 
-    def _format_user_prompt(self, ex: ProofExample) -> str:
+    def _format_user_prompt(self, item: ProofExample | DPOPair) -> str:
         parts = []
-        if ex.context:
-            parts.append(f"## Context\n```lean\n{ex.context[:2000]}\n```")
-        if ex.goal_state:
-            parts.append(f"## Goal State\n```\n{ex.goal_state}\n```")
-        parts.append(f"## Task\nProvide the tactic proof for `{ex.theorem_name}`.")
-        return "\n\n".join(parts)
-
-    def _format_user_prompt_from_pair(self, pair: DPOPair) -> str:
-        parts = []
-        if pair.context:
-            parts.append(f"## Context\n```lean\n{pair.context[:2000]}\n```")
-        if pair.goal_state:
-            parts.append(f"## Goal State\n```\n{pair.goal_state}\n```")
-        parts.append(f"## Task\nProvide the tactic proof for `{pair.theorem_name}`.")
+        if item.context:
+            parts.append(f"## Context\n```lean\n{item.context[:2000]}\n```")
+        if item.goal_state:
+            parts.append(f"## Goal State\n```\n{item.goal_state}\n```")
+        parts.append(f"## Task\nProvide the tactic proof for `{item.theorem_name}`.")
         return "\n\n".join(parts)
 
     # -- Stats ----------------------------------------------------------------
@@ -331,7 +419,3 @@ class TrainingDataCollector:
             "negative": total - pos,
             "unique_theorems": len(set(e.theorem_name for e in self.examples)),
         }
-
-    def should_finetune(self, threshold: int = 50) -> bool:
-        """Report whether enough positive examples enable fine-tuning."""
-        return sum(1 for e in self.examples if e.success) >= threshold

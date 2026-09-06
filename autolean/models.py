@@ -8,14 +8,27 @@ that does not resolve is passed through as a raw model string.
 from __future__ import annotations
 
 import os
-import shutil
+import re
 from dataclasses import dataclass, replace
 
 from rich.table import Table
+from rich.text import Text
 
-from autolean.llm import BACKENDS, DEFAULT_MAX_OUTPUT_TOKENS, LLMConfig
+from autolean.llm import (
+    BACKENDS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_TEMPERATURE,
+    PROVIDER_NAMES,
+    LLMConfig,
+    inference_location,
+    provider_name,
+    resolve_backend_name,
+    validate_backend_config,
+)
 from autolean.llm.ollama import DEFAULT_OLLAMA_URL, probe_installed_models
 from autolean.ui import console
+
+_PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 @dataclass(frozen=True)
@@ -40,6 +53,33 @@ class ModelProfile:
     aliases: tuple[str, ...] = ()
     escalates_to: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.aliases, tuple):
+            raise ValueError("model profile aliases must be a tuple")
+        identifiers = (self.name, *self.aliases)
+        if any(
+            not isinstance(value, str) or _PROFILE_NAME.fullmatch(value) is None for value in identifiers
+        ) or len(set(identifiers)) != len(identifiers):
+            raise ValueError("model profile names and aliases must be unique slugs")
+        if any(not isinstance(value, str) for value in (self.description, self.setup_command)):
+            raise ValueError("model profile help must be text")
+        if self.escalates_to is not None and (
+            not isinstance(self.escalates_to, str) or _PROFILE_NAME.fullmatch(self.escalates_to) is None
+        ):
+            raise ValueError("model escalation target must be a profile slug")
+        config = LLMConfig(
+            model=self.model,
+            backend=self.backend,
+            base_url=self.base_url,
+            temperature=self.temperature,
+            max_output_tokens=self.max_output_tokens,
+            effort=self.effort,
+            seed=self.seed,
+            model_revision=self.revision,
+            model_artifact_sha256=self.artifact_sha256,
+        )
+        validate_backend_config(config)
+
     def to_config(self, *, timeout: float | None = None) -> LLMConfig:
         """Build the `LLMConfig` this profile describes."""
         config = LLMConfig(
@@ -57,7 +97,7 @@ class ModelProfile:
 
 
 # ---------------------------------------------------------------------------
-# Subscription-backed profiles use Claude Code or Codex authentication.
+# Subscription-backed profiles use Claude, Codex, or Grok authentication.
 # ---------------------------------------------------------------------------
 
 _SUBSCRIPTION: tuple[ModelProfile, ...] = (
@@ -95,13 +135,13 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
     ),
     ModelProfile(
         name="codex",
-        model="gpt-5.6-sol",
+        model="gpt-6-astra",
         backend="codex_cli",
         temperature=None,
         effort="max",
-        description="GPT-5.6 Sol — OpenAI frontier reasoning (ChatGPT subscription)",
+        description="GPT-6 Astra — OpenAI frontier reasoning (ChatGPT subscription)",
         setup_command="codex login",
-        aliases=("gpt", "openai", "gpt-5"),
+        aliases=("gpt", "gpt-5", "astra", "codex-astra"),
     ),
     ModelProfile(
         name="codex-terra",
@@ -124,6 +164,27 @@ _SUBSCRIPTION: tuple[ModelProfile, ...] = (
         setup_command="codex login",
         aliases=("luna", "gpt-luna"),
         escalates_to="codex-terra",
+    ),
+    ModelProfile(
+        name="grok",
+        model="grok-4.6",
+        backend="grok_cli",
+        temperature=None,
+        effort="xhigh",
+        description="Grok 4.6 — strongest SuperGrok / X Premium+ reasoning",
+        setup_command="grok login",
+        aliases=("grok-4", "grok-4-6"),
+    ),
+    ModelProfile(
+        name="grok-4-5",
+        model="grok-4.5",
+        backend="grok_cli",
+        temperature=None,
+        effort="high",
+        description="Grok 4.5 — previous SuperGrok / X Premium+ reasoning",
+        setup_command="grok login",
+        aliases=("grok-45",),
+        escalates_to="grok",
     ),
 )
 
@@ -166,13 +227,13 @@ _HOSTED_API: tuple[ModelProfile, ...] = (
     ),
     ModelProfile(
         name="gpt-api",
-        model="gpt-5.6-sol",
+        model="gpt-6-astra",
         backend="openai",
         temperature=None,
         effort="max",
-        description="GPT-5.6 Sol over the Responses API (OPENAI_API_KEY)",
+        description="GPT-6 Astra over the Responses API (OPENAI_API_KEY)",
         setup_command="export OPENAI_API_KEY=... && uv sync --extra openai",
-        aliases=("openai-api",),
+        aliases=("openai", "openai-api"),
     ),
     ModelProfile(
         name="gpt-terra-api",
@@ -311,7 +372,34 @@ _LOCAL: tuple[ModelProfile, ...] = (
     ),
 )
 
-PROFILES: dict[str, ModelProfile] = {p.name: p for p in (*_SUBSCRIPTION, *_HOSTED_API, *_LOCAL)}
+
+def _profile_registry(profiles: tuple[ModelProfile, ...]) -> dict[str, ModelProfile]:
+    """Build one collision-free profile and alias vocabulary."""
+    registry: dict[str, ModelProfile] = {}
+    owners: dict[str, str] = {}
+    for profile in profiles:
+        if profile.name in registry:
+            raise ValueError(f"duplicate model profile: {profile.name}")
+        registry[profile.name] = profile
+        for identifier in (profile.name, *profile.aliases):
+            owner = owners.get(identifier)
+            if owner is not None:
+                raise ValueError(f"model name {identifier!r} belongs to both {owner!r} and {profile.name!r}")
+            owners[identifier] = profile.name
+    for profile in profiles:
+        target = profile.escalates_to
+        if target is not None and target not in registry:
+            raise ValueError(f"model profile {profile.name!r} escalates to unknown {target!r}")
+        seen = {profile.name}
+        while target is not None:
+            if target in seen:
+                raise ValueError(f"model escalation cycle starts at {profile.name!r}")
+            seen.add(target)
+            target = registry[target].escalates_to
+    return registry
+
+
+PROFILES = _profile_registry((*_SUBSCRIPTION, *_HOSTED_API, *_LOCAL))
 
 AUTO_PROFILE = "auto"
 
@@ -319,13 +407,14 @@ AUTO_PROFILE = "auto"
 MAX_PROFILE_BY_BACKEND = {
     "claude_cli": "fable",
     "codex_cli": "codex",
+    "grok_cli": "grok",
     "anthropic": "fable-api",
     "openai": "gpt-api",
 }
 
 #: Subscription transports are preferred because they use the user's account.
-_AUTO_SUBSCRIPTION_BACKENDS = ("claude_cli", "codex_cli")
-_AUTO_API_BACKENDS = ("anthropic", "openai")
+_AUTO_SUBSCRIPTION_BACKENDS = ("codex_cli", "claude_cli", "grok_cli")
+_AUTO_API_BACKENDS = ("openai", "anthropic")
 _API_CREDENTIAL_ENV = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "openai": ("OPENAI_API_KEY",),
@@ -341,11 +430,12 @@ class ModelSelectionError(ValueError):
 
 def maximum_profile_for_backend(backend: str) -> ModelProfile:
     """Return the strongest tuned profile for one selectable provider."""
-    profile_name = MAX_PROFILE_BY_BACKEND.get(backend)
+    canonical = resolve_backend_name(backend) or backend
+    profile_name = MAX_PROFILE_BY_BACKEND.get(canonical)
     if profile_name is None:
         raise ModelSelectionError(
-            f"backend {backend!r} requires an explicit model; "
-            "automatic selection supports Claude, Codex, Anthropic, and OpenAI"
+            f"provider {backend!r} requires an explicit model; "
+            "automatic selection supports Claude, Codex, Grok, Anthropic, and OpenAI"
         )
     return PROFILES[profile_name]
 
@@ -367,8 +457,8 @@ def detect_default_profile(backend: str | None = None) -> ModelProfile:
 
     raise ModelSelectionError(
         "automatic model selection found no authenticated provider; run "
-        "`claude` and /login, run `codex login`, configure a hosted API key, "
-        "or pass `--model`"
+        "`claude` and /login, run `codex login`, run `grok login`, configure "
+        "a hosted API key, or pass `--model`"
     )
 
 
@@ -386,6 +476,7 @@ _MODEL_PREFIX_BACKEND = (
     ("gpt-", "openai"),
     ("o3", "openai"),
     ("o4", "openai"),
+    ("grok-", "grok_cli"),
 )
 
 
@@ -419,23 +510,49 @@ def resolve_llm_config(
     `backend` or inferred from the string. Reasoning profiles retain their
     required default sampling configuration.
     """
-    profile = detect_default_profile(backend) if model == AUTO_PROFILE else resolve_profile(model)
+    canonical_backend = resolve_backend_name(backend) if backend is not None else None
+    selected_backend = canonical_backend or backend
+    if selected_backend is not None and selected_backend not in BACKENDS:
+        raise ModelSelectionError(f"unknown provider: {selected_backend!r}")
+    profile = detect_default_profile(selected_backend) if model == AUTO_PROFILE else resolve_profile(model)
     if profile is not None:
+        if selected_backend is not None and selected_backend != profile.backend:
+            chosen = provider_name(profile.backend)
+            requested = provider_name(selected_backend)
+            raise ModelSelectionError(
+                f"model profile {profile.name!r} belongs to provider {chosen!r}; "
+                f"choose a {requested!r} profile or pass its provider model ID"
+            )
         config = profile.to_config()
     else:
-        config = LLMConfig(model=model, backend=backend or infer_backend(model))
+        raw_backend = selected_backend or infer_backend(model)
+        config = LLMConfig(
+            model=model,
+            backend=raw_backend,
+            temperature=(DEFAULT_TEMPERATURE if BACKENDS[raw_backend].capabilities.temperature else None),
+        )
 
     resolved_temperature = config.temperature
-    if temperature is not None and not (profile is not None and profile.temperature is None):
+    if temperature is not None:
+        if not BACKENDS[config.backend].capabilities.temperature:
+            raise ModelSelectionError(
+                f"provider {provider_name(config.backend)!r} does not accept temperature"
+            )
         resolved_temperature = temperature
+    if max_output_tokens is not None and not BACKENDS[config.backend].capabilities.output_limit:
+        raise ModelSelectionError(
+            f"provider {provider_name(config.backend)!r} does not accept an output limit"
+        )
+    if base_url is not None and not BACKENDS[config.backend].custom_endpoint:
+        raise ModelSelectionError(
+            f"provider {provider_name(config.backend)!r} does not accept a custom endpoint"
+        )
     resolved_effort = config.effort
-    if backend is not None and backend != config.backend and effort is None:
-        resolved_effort = None
-    elif effort is not None:
+    if effort is not None:
         resolved_effort = effort
-    return LLMConfig(
+    resolved = LLMConfig(
         model=config.model,
-        backend=backend or config.backend,
+        backend=selected_backend or config.backend,
         base_url=base_url or config.base_url,
         temperature=resolved_temperature,
         max_output_tokens=(max_output_tokens if max_output_tokens is not None else config.max_output_tokens),
@@ -446,6 +563,8 @@ def resolve_llm_config(
         model_artifact_sha256=config.model_artifact_sha256,
         fallbacks=config.fallbacks,
     )
+    validate_backend_config(resolved)
+    return resolved
 
 
 def profile_groups() -> list[tuple[str, tuple[ModelProfile, ...]]]:
@@ -457,21 +576,34 @@ def profile_groups() -> list[tuple[str, tuple[ModelProfile, ...]]]:
     ]
 
 
+def profiles_for_backend(backend: str) -> tuple[ModelProfile, ...]:
+    """Return profiles belonging to one provider or canonical backend ID."""
+    canonical = resolve_backend_name(backend)
+    if canonical is None:
+        raise ModelSelectionError(f"unknown provider {backend!r}")
+    return tuple(profile for profile in PROFILES.values() if profile.backend == canonical)
+
+
 # ---------------------------------------------------------------------------
 # Availability
 # ---------------------------------------------------------------------------
-
-_CLI_BINARY = {"claude_cli": "claude", "codex_cli": "codex"}
 
 
 def profile_status(profile: ModelProfile, installed_ollama: set[str]) -> str:
     """Report locally observable setup state for `autolean models`."""
     backend = profile.backend
 
-    if backend in _CLI_BINARY:
-        binary = _CLI_BINARY[backend]
-        found = shutil.which(os.environ.get(f"AUTOLEAN_{binary.upper()}_BIN", binary))
-        return "[green]installed[/]" if found else f"[red]no `{binary}`[/]"
+    if backend in ("claude_cli", "codex_cli", "grok_cli"):
+        from autolean.llm.subscription import probe_subscription_backend
+
+        status = probe_subscription_backend(backend)
+        if status.ready:
+            return "[green]ready[/]"
+        detail = status.detail.casefold()
+        if "not found" in detail:
+            binary = {"claude_cli": "claude", "codex_cli": "codex", "grok_cli": "grok"}[backend]
+            return f"[red]no `{binary}`[/]"
+        return "[yellow]sign-in required[/]"
 
     if backend in _API_CREDENTIAL_ENV:
         observed = next(
@@ -495,10 +627,8 @@ def profile_status(profile: ModelProfile, installed_ollama: set[str]) -> str:
     return "[dim]self-hosted[/]"
 
 
-def print_models_table() -> None:
-    """Print every profile with its backend, readiness, and description."""
-    installed = probe_installed_models(DEFAULT_OLLAMA_URL)
-
+def _print_automatic_default() -> None:
+    """Print the provider selected by automatic detection."""
     try:
         automatic = detect_default_profile()
     except ModelSelectionError as error:
@@ -506,37 +636,229 @@ def print_models_table() -> None:
     else:
         console.print(
             f"[bold]Automatic default:[/] {automatic.name} "
-            f"[dim]({automatic.model} via {automatic.backend}, effort {automatic.effort})[/]"
+            f"[dim]({automatic.model} via {provider_name(automatic.backend)}, "
+            f"effort {automatic.effort})[/]"
         )
 
+
+def _installed_models(profiles: tuple[ModelProfile, ...]) -> set[str]:
+    """Probe Ollama only when the requested view contains Ollama profiles."""
+    if any(profile.backend == "ollama" for profile in profiles):
+        return probe_installed_models(DEFAULT_OLLAMA_URL)
+    return set()
+
+
+def _profiles_table(
+    title: str,
+    profiles: tuple[ModelProfile, ...],
+    installed: set[str],
+) -> Table:
+    """Build one concise model table."""
+    table = Table(title=title, title_justify="left", header_style="bold")
+    table.add_column("Model", style="bold cyan")
+    table.add_column("Provider", style="magenta")
+    table.add_column("Status")
+    table.add_column("Description")
+    for profile in profiles:
+        table.add_row(
+            profile.name,
+            provider_name(profile.backend),
+            profile_status(profile, installed),
+            profile.description,
+        )
+    return table
+
+
+def _print_setup(profiles: tuple[ModelProfile, ...], installed: set[str]) -> None:
+    """Print each setup command needed by the selected profiles once."""
+    commands = dict.fromkeys(
+        profile.setup_command
+        for profile in profiles
+        if profile.setup_command and not profile_status(profile, installed).startswith("[green]")
+    )
+    if not commands:
+        return
+    console.print("\n[bold]Setup:[/]")
+    for command in commands:
+        console.print(f"  {command}")
+
+
+def _print_provider(backend: str) -> None:
+    """Print models and selection guidance for one provider."""
+    spec = BACKENDS[backend]
+    profiles = profiles_for_backend(backend)
+    installed = _installed_models(profiles)
+    console.print(f"[bold]{spec.provider}[/] — {spec.summary}")
+    console.print(f"Authentication: {spec.auth}")
+    console.print(f"Default inference: {spec.location.value}")
+    default = MAX_PROFILE_BY_BACKEND.get(backend)
+    if default is not None:
+        console.print(f"Choose it: [cyan]autolean solve --provider {spec.provider}[/]")
+    elif profiles:
+        console.print(f"Choose one: [cyan]autolean solve --model {profiles[0].name}[/]")
+    console.print(_profiles_table("Models", profiles, installed))
+    _print_setup(profiles, installed)
+
+
+def _print_profile(profile: ModelProfile) -> None:
+    """Print the exact configuration and usage for one profile."""
+    installed = _installed_models((profile,))
+    console.print(f"[bold cyan]{profile.name}[/] — {profile.description}")
+    details = Table.grid(padding=(0, 2))
+    details.add_column(style="bold")
+    details.add_column()
+    details.add_row("Provider", provider_name(profile.backend))
+    details.add_row("Provider model", profile.model)
+    details.add_row("Inference", inference_location(profile.to_config()).value)
+    details.add_row("Status", profile_status(profile, installed))
+    if profile.effort is not None:
+        details.add_row("Reasoning", profile.effort)
+    if profile.escalates_to is not None:
+        details.add_row("Stronger model", profile.escalates_to)
+    if profile.aliases:
+        details.add_row("Also called", ", ".join(profile.aliases))
+    console.print(details)
+    console.print(f"\nChoose it: [cyan]autolean solve --model {profile.name}[/]")
+    _print_setup((profile,), installed)
+
+
+def _selection(selection: str) -> tuple[str, str | ModelProfile]:
+    """Resolve a models-command selector with exact names taking priority."""
+    name = selection.lower()
+    if name in PROVIDER_NAMES or name in BACKENDS:
+        backend = resolve_backend_name(name)
+        assert backend is not None
+        return "provider", backend
+    if name in PROFILES:
+        return "profile", PROFILES[name]
+    backend = resolve_backend_name(name)
+    if backend is not None:
+        return "provider", backend
+    profile = resolve_profile(name)
+    if profile is not None:
+        return "profile", profile
+    providers = ", ".join(PROVIDER_NAMES)
+    raise ModelSelectionError(f"unknown model or provider {selection!r}; providers: {providers}")
+
+
+def _profile_record(profile: ModelProfile, installed: set[str]) -> dict[str, object]:
+    """Return one JSON-compatible model profile and its observed readiness."""
+    config = profile.to_config()
+    return {
+        "name": profile.name,
+        "provider": provider_name(profile.backend),
+        "provider_model": profile.model,
+        "inference": inference_location(config).value,
+        "status": Text.from_markup(profile_status(profile, installed)).plain,
+        "description": profile.description,
+        "reasoning_effort": profile.effort,
+        "temperature": profile.temperature,
+        "max_output_tokens": profile.max_output_tokens,
+        "seed": profile.seed,
+        "endpoint": profile.base_url,
+        "model_revision": profile.revision,
+        "model_artifact_sha256": profile.artifact_sha256,
+        "stronger_model": profile.escalates_to,
+        "aliases": list(profile.aliases),
+        "setup": profile.setup_command or None,
+        "choose": f"autolean solve --model {profile.name}",
+    }
+
+
+def _provider_record(backend: str, profiles: tuple[ModelProfile, ...]) -> dict[str, object]:
+    """Return one JSON-compatible provider and its request surface."""
+    spec = BACKENDS[backend]
+    maximum = MAX_PROFILE_BY_BACKEND.get(backend)
+    choose = (
+        f"autolean solve --provider {spec.provider}"
+        if maximum is not None
+        else (f"autolean solve --model {profiles[0].name}" if profiles else None)
+    )
+    return {
+        "name": spec.provider,
+        "summary": spec.summary,
+        "authentication": spec.auth,
+        "default_inference": spec.location.value,
+        "default_model": maximum,
+        "models": [profile.name for profile in profiles],
+        "choose": choose,
+        "controls": {
+            "temperature": spec.capabilities.temperature,
+            "reasoning_effort": sorted(spec.capabilities.effort_values),
+            "stop_sequences": spec.capabilities.stop_sequences,
+            "token_counts": spec.capabilities.token_counts,
+            "output_limit": spec.capabilities.output_limit,
+            "document_inputs": spec.capabilities.document_inputs,
+            "custom_endpoint": spec.custom_endpoint,
+        },
+    }
+
+
+def _automatic_default_record() -> dict[str, object]:
+    """Return the automatic selection or its actionable setup boundary."""
+    try:
+        profile = detect_default_profile()
+    except ModelSelectionError as error:
+        return {"profile": None, "detail": str(error)}
+    return {
+        "profile": profile.name,
+        "provider": provider_name(profile.backend),
+        "provider_model": profile.model,
+        "reasoning_effort": profile.effort,
+    }
+
+
+def model_catalog(selection: str | None = None) -> dict[str, object]:
+    """Return the selected provider/profile catalog as stable JSON data."""
+    if selection is None:
+        profiles = tuple(PROFILES.values())
+        backends = tuple(BACKENDS)
+        selected = {"kind": "catalog", "name": "all"}
+        automatic: dict[str, object] | None = _automatic_default_record()
+    else:
+        kind, value = _selection(selection)
+        automatic = None
+        if kind == "provider":
+            assert isinstance(value, str)
+            profiles = profiles_for_backend(value)
+            backends = (value,)
+            selected = {"kind": kind, "name": provider_name(value)}
+        else:
+            assert isinstance(value, ModelProfile)
+            profiles = (value,)
+            backends = (value.backend,)
+            selected = {"kind": kind, "name": value.name}
+    installed = _installed_models(profiles)
+    return {
+        "schema": "autolean-model-catalog-v1",
+        "selection": selected,
+        "automatic_default": automatic,
+        "providers": [_provider_record(backend, profiles_for_backend(backend)) for backend in backends],
+        "models": [_profile_record(profile, installed) for profile in profiles],
+    }
+
+
+def print_models_table(selection: str | None = None) -> None:
+    """Print the model catalog or one selected provider or profile."""
+    if selection is not None:
+        kind, selected = _selection(selection)
+        if kind == "provider":
+            assert isinstance(selected, str)
+            _print_provider(selected)
+        else:
+            assert isinstance(selected, ModelProfile)
+            _print_profile(selected)
+        return
+
+    _print_automatic_default()
+    all_profiles = tuple(PROFILES.values())
+    installed = _installed_models(all_profiles)
     for group, profiles in profile_groups():
-        table = Table(title=f"{group} models", title_justify="left", header_style="bold")
-        table.add_column("Profile", style="bold cyan")
-        table.add_column("Status")
-        table.add_column("Backend", style="dim")
-        table.add_column("Stronger sibling", style="dim")
-        table.add_column("Description")
+        console.print(_profiles_table(group, profiles, installed))
 
-        for profile in profiles:
-            table.add_row(
-                profile.name,
-                profile_status(profile, installed),
-                profile.backend,
-                profile.escalates_to or "—",
-                profile.description,
-            )
-        console.print(table)
-
-    missing = [
-        p
-        for p in PROFILES.values()
-        if p.setup_command and not profile_status(p, installed).startswith("[green]")
-    ]
-    if missing:
-        console.print("\n[bold]Setup for the profiles above that need it:[/]")
-        for profile in missing:
-            console.print(f"  [dim]{profile.name:16}[/] {profile.setup_command}")
-
-    console.print("\n[bold]Backends:[/]")
-    for name, spec in BACKENDS.items():
-        console.print(f"  [dim]{name:16}[/] {spec.summary} — auth: {spec.auth}")
+    providers = " | ".join(PROVIDER_NAMES)
+    console.print("\n[bold]Choose:[/]")
+    console.print("  [cyan]autolean models codex[/]         inspect one provider")
+    console.print("  [cyan]autolean solve --model opus[/]  choose one model")
+    console.print("  [cyan]autolean solve --provider codex[/]  choose a provider")
+    console.print(f"\n[dim]Providers: {providers}[/]")

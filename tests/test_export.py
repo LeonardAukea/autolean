@@ -86,6 +86,7 @@ def _write_plan(
                 "accepted_response_model": "opus",
                 "accepted_response_sha256": response["response_sha256"],
                 "backend": "claude_cli",
+                "inference_location": "remote",
                 "model": "opus",
                 "pdf_sha256": pdf_sha256,
                 "plan": plan.as_dict(),
@@ -151,6 +152,33 @@ def test_export_refuses_source_symlinks(tmp_path: Path) -> None:
 
     with pytest.raises(ExportError, match="symbolic links"):
         export_project(root, tmp_path / "artifact", title="Proof")
+
+
+@pytest.mark.parametrize("link_kind", ["source", "directory", "configuration"])
+def test_session_export_rejects_symbolic_source_paths(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    root = _project(tmp_path)
+    target = "AutoLean/Proof.lean"
+    if link_kind == "source":
+        (root / "Linked.lean").symlink_to(root / target)
+        target = "Linked.lean"
+    elif link_kind == "directory":
+        (root / "Linked").symlink_to(root / "AutoLean", target_is_directory=True)
+        target = "Linked/Proof.lean"
+    else:
+        configuration = root / "lakefile.lean"
+        configuration.rename(root / "config.lean")
+        configuration.symlink_to(root / "config.lean")
+
+    with pytest.raises(ExportError, match="symbolic links"):
+        export_project(
+            root,
+            tmp_path / "artifact",
+            title="Proof",
+            session={"target_file": target},
+        )
 
 
 def test_session_export_contains_only_the_target_import_closure(tmp_path: Path) -> None:

@@ -26,11 +26,12 @@ a bad quantifier; an explicit formalization field cannot.
 
 ## One experiment
 
-Before any model is asked, a fixed list of tactics is tried against the
+Before asking any model, AutoLean tries a fixed list of tactics against the
 target. A tactic that closes the goal is written, validated, and committed
 through the same sandbox, declaration, and axiom audit as any other
-candidate, recorded against a `deterministic-tactic-search` identity. Cheap
-goals never reach a provider.
+candidate, recorded against a `deterministic-tactic-search` identity. A trial
+that exhausts its compiler time budget ends this optional pass. Remaining
+targets proceed to model attempts.
 
 Every cycle then performs the same steps:
 

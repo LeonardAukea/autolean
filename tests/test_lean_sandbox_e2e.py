@@ -270,7 +270,7 @@ def test_pythagorean_formalization_and_proof_reach_isolated_lean(
     if not (project.root / ".lake" / "packages" / "mathlib").exists():
         pytest.skip("the sandbox fixture has no Mathlib closure")
 
-    from autolean.llm import LLMResponse
+    from autolean.llm import LLMConfig, LLMResponse
     from autolean.strategy import ProofPlan, parse_proof_plan
     from autolean.theorem import formalize_theorem
 
@@ -304,6 +304,7 @@ theorem pythagorean_theorem
         plan,
         lambda _system, _user: LLMResponse(text=scaffold, model="fixture"),
         project,
+        llm_config=LLMConfig(model="fixture", backend="ollama"),
         max_repairs=0,
         timeout=_MATHLIB_E2E_TIMEOUT_SECONDS,
     )
@@ -399,6 +400,8 @@ def test_the_sandbox_rejects_an_auto_bound_identifier(tmp_path: Path) -> None:
         pytest.skip("set AUTOLEAN_RUN_SANDBOX_E2E=1 to run host containment tests")
 
     (tmp_path / "lakefile.lean").write_text("-- lakefile\n", encoding="utf-8")
+    pinned_toolchain = Path(__file__).resolve().parents[1] / "workspace" / "lean-toolchain"
+    (tmp_path / "lean-toolchain").write_bytes(pinned_toolchain.read_bytes())
     project = LeanProject(tmp_path)
     source = tmp_path / "T.lean"
     source.write_text("theorem placeholder : True := by\n  sorry\n", encoding="utf-8")

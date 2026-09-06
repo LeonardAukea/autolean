@@ -381,6 +381,61 @@ class TestReplaceSorryAt:
 
         assert source.read_text(encoding="utf-8") == "editor save"
 
+    def test_source_change_during_staging_preserves_the_editor_save(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "T.lean"
+        source.write_text("validation snapshot")
+        sync = lean_interface.os.fsync
+
+        def save_during_sync(descriptor: int) -> None:
+            sync(descriptor)
+            source.write_text("editor save")
+
+        monkeypatch.setattr(lean_interface.os, "fsync", save_during_sync)
+        with pytest.raises(OSError, match="source changed"):
+            project.write_file(source, "candidate", expected_content="validation snapshot")
+        assert source.read_text() == "editor save"
+        assert list(tmp_path.glob(".T.lean.*.tmp")) == []
+
+    def test_staging_failure_removes_its_partial_file(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = tmp_path / "T.lean"
+        source.write_text("original")
+
+        def unavailable(_descriptor: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(lean_interface.os, "fsync", unavailable)
+        with pytest.raises(OSError, match="disk full"):
+            project.write_file(source, "candidate", expected_content="original")
+        assert source.read_text() == "original"
+        assert list(tmp_path.glob(".T.lean.*.tmp")) == []
+
+    def test_source_read_and_install_preserve_bytes_and_permissions(
+        self,
+        project: LeanProject,
+        tmp_path: Path,
+    ) -> None:
+        import stat
+
+        source = tmp_path / "T.lean"
+        source.write_bytes(b"theorem target : True := by\r\n  sorry\r\n")
+        source.chmod(0o640)
+        original = project.read_file(source)
+        assert original.encode() == source.read_bytes()
+        candidate = original.replace("sorry", "trivial")
+        project.write_file(source, candidate, expected_content=original)
+        assert source.read_bytes() == candidate.encode()
+        assert stat.S_IMODE(source.stat().st_mode) == 0o640
+
     def test_linux_sandbox_needs_no_project_lake_directory(
         self,
         project: LeanProject,
@@ -797,6 +852,31 @@ class TestAxiomPolicy:
 
         assert not failed.success
         assert not failed.diagnostics
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_tactic_search_yields_after_a_timeout_and_preserves_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timed_out: bool
+) -> None:
+    (tmp_path / "lakefile.lean").write_text("import Lake\n")
+    source = tmp_path / "Target.lean"
+    original = "theorem target : True := by\n  sorry\n"
+    source.write_text(original)
+    project = LeanProject(tmp_path)
+    candidates: list[str] = []
+
+    def validate(_path: Path, content: str, **_options: object) -> BuildResult:
+        candidates.append(content)
+        if len(candidates) == 1:
+            return BuildResult(success=False, timed_out=timed_out)
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(project, "validate_candidate", validate)
+    result = project.try_tactics_fast(source, 2, 2, ["rfl", "trivial"])
+
+    assert source.read_text() == original
+    assert result == (None if timed_out else "trivial")
+    assert len(candidates) == (1 if timed_out else 2)
 
 
 class TestStatementPolicy:

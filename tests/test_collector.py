@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from autolean.collector import TrainingDataCollector
 from autolean.tracker import ExperimentRecord, Outcome
 
@@ -98,12 +100,10 @@ class TestTrainingDataCollector:
     def test_export_dpo_pairs(self, tmp_path: Path) -> None:
         c = TrainingDataCollector(output_dir=tmp_path)
         c.set_context(_TARGET, "goal", "ctx")
-        # First attempt fails
         c.record_attempt(
             _make_record(decl="foo", outcome=Outcome.FAIL_BUILD, attempt=1),
             "bad_proof",
         )
-        # Second attempt succeeds
         c.record_attempt(
             _make_record(decl="foo", outcome=Outcome.SUCCESS, attempt=2),
             "good_proof",
@@ -117,7 +117,6 @@ class TestTrainingDataCollector:
 
     def test_export_dpo_needs_both_pos_and_neg(self, tmp_path: Path) -> None:
         c = TrainingDataCollector(output_dir=tmp_path)
-        # Only successes -> no DPO pairs
         c.record_attempt(_make_record(outcome=Outcome.SUCCESS), "rfl")
         path = c.export_dpo_jsonl(tmp_path / "dpo.jsonl")
         assert path is None
@@ -177,3 +176,25 @@ class TestGoalStateIsRequired:
         collector.record_attempt(_make_record(outcome=Outcome.FAIL_BUILD), "bad")
 
         assert collector.export_dpo_jsonl(tmp_path / "dpo.jsonl") is None
+
+
+@pytest.mark.parametrize("changed", ["goal", "context", "environment"])
+def test_preference_pairs_require_the_same_proof_problem(tmp_path: Path, changed: str) -> None:
+    from dataclasses import replace
+
+    collector = TrainingDataCollector(tmp_path)
+    collector.set_context(_TARGET, "first goal", "first context")
+    failed = replace(_make_record(outcome=Outcome.FAIL_BUILD), environment_sha256="a" * 64)
+    collector.record_attempt(failed, "failed proof")
+    collector.set_context(
+        _TARGET,
+        "second goal" if changed == "goal" else "first goal",
+        "second context" if changed == "context" else "first context",
+    )
+    accepted = replace(
+        _make_record(outcome=Outcome.SUCCESS),
+        environment_sha256=("b" if changed == "environment" else "a") * 64,
+    )
+    collector.record_attempt(accepted, "accepted proof")
+
+    assert collector.export_dpo_jsonl(tmp_path / "dpo.jsonl") is None

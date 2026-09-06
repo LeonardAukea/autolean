@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -181,13 +181,13 @@ def _symbols(text: str) -> set[str]:
     return {symbol for symbol in _SIGNAL_SYMBOLS if symbol in text}
 
 
-@dataclass
+@dataclass(frozen=True)
 class Skill:
     """A reusable proof pattern learned from a successful proof."""
 
     name: str  # e.g., "reflexivity_proof"
     description: str  # e.g., "Proves equalities that hold by computation"
-    tactics: list[str]  # e.g., ["rfl"]
+    tactics: tuple[str, ...]  # e.g., ("rfl",)
     applicable_when: str  # e.g., "Goal is an equality where both sides reduce"
     example_theorem: str  # e.g., "trivial_rfl : 1 + 1 = 2"
     #: Accepted proofs whose tactic sequence instantiated this pattern. Only
@@ -195,6 +195,30 @@ class Skill:
     #: at once, so a rejection cannot be charged to one of them. The count
     #: states observed reuse and claims nothing about a success rate.
     times_observed: int = 1
+
+    def __post_init__(self) -> None:
+        text_values = (
+            self.name,
+            self.description,
+            self.applicable_when,
+            self.example_theorem,
+        )
+        if any(not isinstance(value, str) or not value.strip() for value in text_values):
+            raise ValueError("skill identity must be complete text")
+        if re.fullmatch(r"[a-z][a-z0-9_]*", self.name) is None:
+            raise ValueError("skill name must be a lower-case identifier")
+        if (
+            not isinstance(self.tactics, tuple)
+            or not self.tactics
+            or any(not isinstance(tactic, str) or tactic not in LEAN_TACTICS for tactic in self.tactics)
+        ):
+            raise ValueError("skill tactics must use the known tactic vocabulary")
+        if (
+            isinstance(self.times_observed, bool)
+            or not isinstance(self.times_observed, int)
+            or self.times_observed < 1
+        ):
+            raise ValueError("skill observation count must be positive")
 
 
 def _skill_fields(record: dict[str, Any]) -> dict[str, Any]:
@@ -207,7 +231,10 @@ def _skill_fields(record: dict[str, Any]) -> dict[str, Any]:
     succeeded = fields.pop("times_succeeded", None)
     fields.pop("times_used", None)
     if "times_observed" not in fields and succeeded is not None:
-        fields["times_observed"] = max(int(succeeded), 1)
+        fields["times_observed"] = succeeded
+    tactics = fields.get("tactics")
+    if isinstance(tactics, list):
+        fields["tactics"] = tuple(tactics)
     return fields
 
 
@@ -220,6 +247,15 @@ class SkillMemory:
     persist: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.skills_dir, Path):
+            raise ValueError("skill directory must be a path")
+        if not isinstance(self.persist, bool):
+            raise ValueError("skill persistence flag must be a boolean")
+        if not isinstance(self.skills, dict) or any(
+            not isinstance(name, str) or not isinstance(skill, Skill) or name != skill.name
+            for name, skill in self.skills.items()
+        ):
+            raise ValueError("skill memory must map names to Skill values")
         self._load_skills()
 
     def _load_skills(self) -> None:
@@ -229,7 +265,13 @@ class SkillMemory:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 skill = Skill(**_skill_fields(data))
                 self.skills[skill.name] = skill
-            except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as e:
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+            ) as e:
                 log.warning("Failed to load skill %s: %s", path, e)
 
     def _save_skill(self, skill: Skill) -> None:
@@ -269,19 +311,20 @@ class SkillMemory:
 
         if pattern_name in self.skills:
             existing = self.skills[pattern_name]
-            existing.times_observed += 1
-            self._save_skill(existing)
+            updated = replace(existing, times_observed=existing.times_observed + 1)
+            self.skills[pattern_name] = updated
+            self._save_skill(updated)
             log.debug(
                 "Skill '%s' observed again (%d accepted proofs)",
                 pattern_name,
-                existing.times_observed,
+                updated.times_observed,
             )
-            return existing
+            return updated
 
         skill = Skill(
             name=pattern_name,
             description=description,
-            tactics=tactics,
+            tactics=tuple(tactics),
             applicable_when=applicable,
             example_theorem=f"{theorem_name} : {theorem_statement[:100]}",
         )

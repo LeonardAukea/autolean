@@ -14,6 +14,7 @@ import pytest
 from click.testing import CliRunner
 
 from autolean.__main__ import AUTOLEAN_BANNER, _run_agent, main
+from autolean.llm import LLMConfig
 from autolean.routing import EscalationPolicy
 
 PYTHAGOREAN_FORMALIZATION = (
@@ -77,6 +78,39 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.mark.parametrize("completed", [False, True])
+def test_session_listing_preserves_status_in_a_narrow_terminal(
+    runner: CliRunner, project_dir: Path, monkeypatch: pytest.MonkeyPatch, completed: bool
+) -> None:
+    import io
+
+    from rich.console import Console
+
+    from autolean.session import SessionKind, SessionStatus, SessionStore
+
+    output = io.StringIO()
+    monkeypatch.setattr("autolean.cli_sessions.console", Console(file=output, width=88))
+    store = SessionStore(project_dir / "workspace")
+    session = store.create(
+        kind=SessionKind.PAPER,
+        title="A formalization of the Ionescu-Tulcea theorem in Mathlib",
+        model="gpt-6-astra",
+        backend="codex_cli",
+        max_cycles=1,
+    )
+    status = SessionStatus.COMPLETED if completed else SessionStatus.PAUSED
+    store.save(session.update(status=status, remaining_targets=0 if completed else 1))
+
+    result = runner.invoke(main, ["sessions", "--program", str(project_dir / "program.md")])
+
+    assert result.exit_code == 0, result.output
+    rendered = output.getvalue()
+    assert status.value in rendered
+    assert "gpt-6-astra" in rendered
+    assert "paper" in rendered
+    assert ("autolean resume" in rendered) is not completed
+
+
 @pytest.fixture
 def project_dir(tmp_path: Path) -> Path:
     """Create a minimal AutoLean project for testing."""
@@ -85,7 +119,6 @@ def project_dir(tmp_path: Path) -> Path:
     al = ws / "AutoLean"
     al.mkdir()
 
-    # lakefile.lean
     (ws / "lakefile.lean").write_text(
         "import Lake\nopen Lake DSL\n"
         "package test_ws\n"
@@ -93,14 +126,12 @@ def project_dir(tmp_path: Path) -> Path:
     )
     (ws / "lean-toolchain").write_text("leanprover/lean4:v4.33.0\n")
 
-    # A lean file with sorrys
     (al / "Test.lean").write_text(
         "theorem test_rfl : 1 + 1 = 2 := by\n  sorry\n\n"
         "theorem test_impl (P Q : Prop) (h : P) (f : P -> Q) : Q := by\n  sorry\n"
     )
     (ws / "AutoLean.lean").write_text("import AutoLean.Test\n")
 
-    # program.md
     (tmp_path / "program.md").write_text(
         "# Test\n\n## Mode\nsorry-elimination\n\n"
         "## Lean Project Path\nworkspace\n\n"
@@ -152,6 +183,25 @@ class TestCLIBasics:
         assert "--model" in result.output
         assert "--resume" in result.output
 
+    def test_models_json_is_machine_readable(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from autolean.llm.subscription import SubscriptionStatus
+
+        monkeypatch.setattr(
+            "autolean.llm.subscription.probe_subscription_backend",
+            lambda _: SubscriptionStatus(ready=True),
+        )
+
+        result = runner.invoke(main, ["models", "codex", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["schema"] == "autolean-model-catalog-v1"
+        assert payload["selection"] == {"kind": "provider", "name": "codex"}
+
     @pytest.mark.parametrize(
         ("alias", "canonical"),
         [
@@ -159,6 +209,7 @@ class TestCLIBasics:
             ("scan", "targets"),
             ("check", "doctor"),
             ("diff", "changes"),
+            ("model", "models"),
             ("ui", "workbench"),
         ],
     )
@@ -174,6 +225,42 @@ class TestCLIBasics:
         assert alias_help.exit_code == 0
         assert canonical_help.exit_code == 0
         assert alias_help.output.splitlines()[1:] == canonical_help.output.splitlines()[1:]
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            (["prove", "--provider", "grok"], ["prove", "--provider", "grok"]),
+            (
+                ["--provider", "grok", "prove", "1 + 1 = 2"],
+                ["prove", "--provider", "grok", "1 + 1 = 2"],
+            ),
+            (["--provider=grok", "prove"], ["prove", "--provider=grok"]),
+            (["-m", "opus", "doctor"], ["doctor", "-m", "opus"]),
+            (
+                ["--model", "grok", "--provider", "grok", "prove", "x"],
+                ["prove", "--model", "grok", "--provider", "grok", "x"],
+            ),
+            (["--help"], ["--help"]),
+            (["--provider", "grok"], ["--provider", "grok"]),
+        ],
+    )
+    def test_model_flags_before_the_command_are_hoisted(
+        self,
+        args: list[str],
+        expected: list[str],
+    ) -> None:
+        from autolean.__main__ import _hoist_model_flags
+
+        sample = list(args)
+        _hoist_model_flags(sample)
+        assert sample == expected
+
+    def test_provider_before_the_command_reaches_prove_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--provider", "grok", "prove", "--help"])
+
+        assert result.exit_code == 0
+        assert "STATEMENT" in result.output
+        assert "--provider" in result.output
 
     def test_prove_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["prove", "--help"])
@@ -213,7 +300,7 @@ class TestCLIBasics:
         lean_code: str,
         declaration: str,
     ) -> None:
-        from autolean.llm import LLMResponse
+        from autolean.llm import LLMConfig, LLMResponse
 
         workspace = project_dir / "workspace"
         shared = workspace / "AutoLean" / "UserTheorems.lean"
@@ -243,7 +330,7 @@ class TestCLIBasics:
         )
 
         class Backend:
-            config = SimpleNamespace(model="fixture", backend="fixture")
+            config = LLMConfig(model="fixture", backend="ollama")
 
             def __enter__(self) -> Backend:
                 return self
@@ -293,7 +380,7 @@ class TestCLIBasics:
             model_transitions: tuple[object, ...] = ()
             project = SimpleNamespace(root=workspace)
             llm = SimpleNamespace(
-                config=SimpleNamespace(model="fixture", backend="fixture"),
+                config=LLMConfig(model="fixture", backend="fixture"),
             )
 
             def run(self) -> SimpleNamespace:
@@ -364,12 +451,6 @@ class TestCLIBasics:
         assert result.exit_code == 0
         assert "--mathlib" in result.output
         assert "--cslib" in result.output
-
-    def test_finetune_config_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["finetune-config", "--help"])
-        assert result.exit_code == 0
-        assert "--framework" in result.output
-        assert "axolotl" in result.output
 
     def test_export_training_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["export-training", "--help"])
@@ -561,12 +642,109 @@ def test_doctor_validates_an_inline_markdown_proof(
     assert "  trivial" in Project.checked_source
 
 
+def test_doctor_rate_limit_points_at_another_ready_provider(
+    runner: CliRunner,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from autolean.llm import BaseBackend, LLMConfig, LLMRateLimitError
+
+    class Backend(BaseBackend):
+        def ping(self) -> bool:
+            return True
+
+        def generate(
+            self,
+            system: str,
+            user: str,
+            *,
+            temperature: float | None = None,
+            stop: list[str] | None = None,
+        ) -> object:
+            del system, user, temperature, stop
+            raise LLMRateLimitError("You've reached your Fable 5 limit")
+
+    backend = Backend(LLMConfig(model="fable", backend="claude_cli"))
+    monkeypatch.setattr("autolean.__main__._llm_for", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(
+        "autolean.llm.subscription.probe_subscription_backend",
+        lambda name: SimpleNamespace(ready=name == "grok_cli"),
+    )
+    monkeypatch.setattr("autolean.__main__._doctor_research_tools", lambda: [])
+    monkeypatch.setattr("autolean.__main__._doctor_lean", lambda *args, **kwargs: [])
+
+    result = runner.invoke(main, ["doctor", "--program", str(project_dir / "program.md")])
+
+    assert result.exit_code != 0
+    assert "You've reached your Fable 5 limit" in result.output
+    assert "usage limit" in result.output
+    assert "doctor --provider grok" in result.output
+
+
+def test_prove_refuses_a_gitignored_generated_path(
+    runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    git = ["git", "-c", "core.fsmonitor=false"]
+    subprocess.run([*git, "init", "-q"], cwd=project_dir, check=True)
+    (project_dir / ".gitignore").write_text("workspace/AutoLean/Generated/\n")
+    subprocess.run([*git, "add", "--", "."], cwd=project_dir, check=True)
+
+    result = runner.invoke(
+        main,
+        [
+            "--provider",
+            "grok",
+            "prove",
+            "the pythagorean theorem",
+            "--program",
+            str(project_dir / "program.md"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Accepted proofs cannot be committed" in result.output
+    assert "ignore rules" in result.output
+    assert "init lean" in result.output
+    assert "--provider grok" in result.output
+
+
 # ---------------------------------------------------------------------------
 # Init command
 # ---------------------------------------------------------------------------
 
 
 class TestInitCommand:
+    @pytest.mark.parametrize("libraries", [True, False])
+    def test_init_commands_keep_the_program_working_directory(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libraries: bool
+    ) -> None:
+        import shlex
+
+        monkeypatch.chdir(tmp_path)
+        target = tmp_path / "research [G]; ' quoted path"
+        arguments = ["init", str(target)]
+        if not libraries:
+            arguments.extend(("--no-mathlib", "--no-cslib"))
+        result = runner.invoke(main, arguments)
+        assert result.exit_code == 0, result.output
+        commands = result.output.split("  Next:\n", 1)[1].splitlines()
+        build = commands[0].strip()
+        assert build.endswith("lake build)")
+        assert ("lake exe cache get" in build) is libraries
+        assert shlex.split(commands[1])[-1] == str(target.resolve())
+        executed = subprocess.run(
+            ["sh", "-c", "lake() { pwd; }\n" + build + "\npwd\n"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        directories = executed.stdout.splitlines()
+        assert directories[:-1] == [str(target.resolve())] * (3 if libraries else 1)
+        assert directories[-1] == str(tmp_path.resolve())
+        assert (tmp_path / "program.md").is_file()
+
     def test_init_creates_project(self, runner: CliRunner, tmp_path: Path) -> None:
         target = tmp_path / "my_project"
         result = runner.invoke(main, ["init", str(target)])
@@ -574,7 +752,6 @@ class TestInitCommand:
         assert (target / "lakefile.lean").exists()
         assert (target / "lean-toolchain").exists()
         assert (target / "my_project.lean").exists()
-        # Check lakefile content
         lakefile = (target / "lakefile.lean").read_text()
         assert "my_project" in lakefile
         assert "mathlib4" in lakefile
@@ -582,6 +759,8 @@ class TestInitCommand:
         source = (target / "my_project.lean").read_text()
         assert "import Mathlib" in source
         assert "import Cslib" in source
+        assert (target / ".gitignore").read_text(encoding="utf-8") == "/.lake/\n/build/\n"
+        assert not (target / ".git").exists()
 
     def test_init_with_mathlib(self, runner: CliRunner, tmp_path: Path) -> None:
         target = tmp_path / "math_proj"
@@ -628,6 +807,25 @@ class TestInitCommand:
         assert result.exit_code != 0
         assert "Refusing to overwrite" in result.output
         assert lakefile.read_text(encoding="utf-8") == "user configuration\n"
+
+    def test_init_nests_a_git_repository_when_the_parent_ignores_proofs(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        from autolean.tracker import git_toplevel, rejected_proof_path
+
+        git = ["git", "-c", "core.fsmonitor=false"]
+        subprocess.run([*git, "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / ".gitignore").write_text("/lean/\n")
+        target = tmp_path / "lean"
+
+        result = runner.invoke(main, ["init", str(target)])
+
+        assert result.exit_code == 0
+        assert git_toplevel(target) == target.resolve()
+        probe = target / "AutoLean" / "Generated" / "Probe.lean"
+        assert rejected_proof_path(target, probe) is None
 
 
 # ---------------------------------------------------------------------------
@@ -700,23 +898,63 @@ class TestModelsCommand:
         assert "Automatic default" in result.output
 
     def test_models_shows_setup_commands(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["models"])
+        result = runner.invoke(main, ["models", "deepseek-prover"])
         assert result.exit_code == 0
         assert "ollama pull" in result.output
 
     def test_models_lists_the_subscription_profiles(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["models"])
         assert result.exit_code == 0
-        for profile in ("opus", "sonnet", "codex"):
+        for profile in ("opus", "sonnet", "codex", "grok"):
             assert profile in result.output
 
-    def test_models_lists_every_backend(self, runner: CliRunner) -> None:
-        from autolean.llm import BACKENDS
+    def test_models_lists_every_provider(self, runner: CliRunner) -> None:
+        from autolean.llm import PROVIDER_NAMES
 
         result = runner.invoke(main, ["models"])
         assert result.exit_code == 0
-        for name in BACKENDS:
+        for name in PROVIDER_NAMES:
             assert name in result.output
+
+    def test_models_filters_by_provider(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["models", "codex"])
+
+        assert result.exit_code == 0
+        assert "codex-terra" in result.output
+        assert "codex-luna" in result.output
+        assert "--provider codex" in result.output
+        assert "opus" not in result.output
+
+    def test_models_filters_the_grok_provider(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["models", "grok"])
+
+        assert result.exit_code == 0
+        assert "grok-4-5" in result.output
+        assert "--provider grok" in result.output
+        assert "opus" not in result.output
+        assert "codex-terra" not in result.output
+
+    def test_models_inspects_one_profile(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["models", "codex-terra"])
+
+        assert result.exit_code == 0
+        assert "gpt-5.6-terra" in result.output
+        assert "--model codex-terra" in result.output
+        assert "codex-luna" not in result.output
+
+    def test_openai_provider_means_the_hosted_api(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["models", "openai"])
+
+        assert result.exit_code == 0
+        assert "gpt-api" in result.output
+        assert "OPENAI_API_KEY" in result.output
+        assert "codex-terra" not in result.output
+
+    def test_models_rejects_an_unknown_selection(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["models", "telepathy"])
+
+        assert result.exit_code != 0
+        assert "unknown model or provider 'telepathy'" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +963,7 @@ class TestModelsCommand:
 
 
 class TestBackendOption:
-    """`--model` and `--backend` behave the same on every command."""
+    """Model and provider selection behaves the same on every command."""
 
     MODEL_COMMANDS: ClassVar[list[str]] = [
         "run",
@@ -741,22 +979,57 @@ class TestBackendOption:
         result = runner.invoke(main, [command, "--help"])
         assert result.exit_code == 0
         assert "--model" in result.output
+        assert "--provider" in result.output
         assert "--backend" in result.output
 
-    def test_backend_choices_come_from_the_registry(self, runner: CliRunner) -> None:
-        from autolean.llm import BACKENDS
+    def test_provider_choices_come_from_the_registry(self, runner: CliRunner) -> None:
+        from autolean.llm import PROVIDER_NAMES
 
         result = runner.invoke(main, ["run", "--help"])
-        for name in BACKENDS:
+        for name in PROVIDER_NAMES:
             assert name in result.output
 
-    def test_unknown_backend_is_rejected(self, runner: CliRunner, project_dir: Path) -> None:
+    def test_unknown_provider_is_rejected(self, runner: CliRunner, project_dir: Path) -> None:
         result = runner.invoke(
             main,
-            ["check", "-p", str(project_dir / "program.md"), "--backend", "telepathy"],
+            ["check", "-p", str(project_dir / "program.md"), "--provider", "telepathy"],
         )
         assert result.exit_code != 0
         assert "telepathy" in result.output
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [("--provider", "codex"), ("--backend", "codex_cli")],
+    )
+    def test_provider_spelling_resolves_to_the_backend(
+        self,
+        runner: CliRunner,
+        project_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        option: str,
+        value: str,
+    ) -> None:
+        observed: list[str | None] = []
+
+        def doctor_model(
+            _config: object,
+            _model: str | None,
+            backend: str | None,
+        ) -> tuple[str, list[str]]:
+            observed.append(backend)
+            return "", []
+
+        monkeypatch.setattr("autolean.__main__._doctor_model", doctor_model)
+        monkeypatch.setattr("autolean.__main__._doctor_research_tools", lambda: [])
+        monkeypatch.setattr("autolean.__main__._doctor_lean", lambda *args: [])
+
+        result = runner.invoke(
+            main,
+            ["doctor", "-p", str(project_dir / "program.md"), option, value],
+        )
+
+        assert result.exit_code == 0
+        assert observed == ["codex_cli"]
 
     def test_run_help_documents_overnight(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["run", "--help"])
@@ -782,7 +1055,7 @@ class TestRunPolicy:
                 self.project = SimpleNamespace(root=program_path.parent / "workspace")
                 self.llm = SimpleNamespace(
                     close=lambda: None,
-                    config=SimpleNamespace(model="fixture", backend="fixture"),
+                    config=LLMConfig(model="fixture", backend="fixture"),
                 )
                 created.append(self)
 
@@ -938,7 +1211,7 @@ def test_challenge_reopens_owned_source_as_a_session(
         model_transitions: tuple[object, ...] = ()
         project = SimpleNamespace(root=workspace)
         llm = SimpleNamespace(
-            config=SimpleNamespace(model="fixture", backend="fixture"),
+            config=LLMConfig(model="fixture", backend="fixture"),
         )
 
         def run(self) -> SimpleNamespace:
@@ -975,10 +1248,12 @@ def test_challenge_reopens_owned_source_as_a_session(
     assert len(list((workspace / ".autolean" / "sessions").glob("*.json"))) == 1
 
 
-def test_resume_uses_persisted_scope_and_accepts_a_new_model(
+@pytest.mark.parametrize("override", [None, "sonnet"])
+def test_resume_preserves_effort_and_accepts_a_new_model(
     runner: CliRunner,
     project_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    override: str | None,
 ) -> None:
     from autolean.session import SessionKind, SessionStore
 
@@ -989,8 +1264,9 @@ def test_resume_uses_persisted_scope_and_accepts_a_new_model(
     session = store.create(
         kind=SessionKind.THEOREM,
         title="Target theorem",
-        model="opus",
-        backend="claude_cli",
+        model="gpt-6-astra",
+        backend="codex_cli",
+        effort="max",
         max_cycles=5,
         target_file=path,
         target_filter="target",
@@ -1009,7 +1285,11 @@ def test_resume_uses_persisted_scope_and_accepts_a_new_model(
         model_transitions: tuple[object, ...] = ()
         project = SimpleNamespace(root=workspace)
         llm = SimpleNamespace(
-            config=SimpleNamespace(model="sonnet", backend="claude_cli"),
+            config=LLMConfig(
+                model="sonnet" if override else "gpt-6-astra",
+                backend="claude_cli" if override else "codex_cli",
+                effort="high" if override else "max",
+            ),
         )
 
         def run(self) -> SimpleNamespace:
@@ -1031,8 +1311,7 @@ def test_resume_uses_persisted_scope_and_accepts_a_new_model(
         [
             "resume",
             session.id,
-            "--model",
-            "sonnet",
+            *(["--model", override] if override else []),
             "--max-cycles",
             "2",
             "--guide",
@@ -1043,12 +1322,14 @@ def test_resume_uses_persisted_scope_and_accepts_a_new_model(
     )
 
     assert result.exit_code == 0
-    assert captured["model"] == "sonnet"
+    assert captured["model"] == (override or "gpt-6-astra")
+    assert captured["effort"] == (None if override else "max")
     assert captured["resume"] is True
     assert captured["target_file"] == path
     completed = store.load(session.id)
     assert completed.status.value == "completed"
     assert completed.max_cycles == 2
+    assert completed.effort == ("high" if override else "max")
     assert completed.guidance == ("Try a direct proof.",)
 
 
@@ -1168,43 +1449,6 @@ class TestPaperWorkflow:
 
 
 # ---------------------------------------------------------------------------
-# Finetune config
-# ---------------------------------------------------------------------------
-
-
-class TestFinetuneConfigCommand:
-    def test_generates_axolotl_config(self, runner: CliRunner, project_dir: Path) -> None:
-        result = runner.invoke(
-            main,
-            [
-                "finetune-config",
-                "-d",
-                str(project_dir / "workspace"),
-                "--framework",
-                "axolotl",
-            ],
-        )
-        assert result.exit_code == 0
-        assert "axolotl" in result.output.lower()
-        config_file = project_dir / "workspace" / "training_data" / "axolotl_config.yaml"
-        assert config_file.exists()
-
-    def test_generates_trl_config(self, runner: CliRunner, project_dir: Path) -> None:
-        result = runner.invoke(
-            main,
-            [
-                "finetune-config",
-                "-d",
-                str(project_dir / "workspace"),
-                "--framework",
-                "trl",
-            ],
-        )
-        assert result.exit_code == 0
-        assert "dpo" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
 # Results command
 # ---------------------------------------------------------------------------
 
@@ -1253,7 +1497,7 @@ class TestOvernightSession:
             )
             model_transitions: tuple[object, ...] = ()
             project = SimpleNamespace(root=workspace)
-            llm = SimpleNamespace(config=SimpleNamespace(model="fixture", backend="fixture"))
+            llm = SimpleNamespace(config=LLMConfig(model="fixture", backend="fixture"))
             resume = False
 
             def run(self) -> SimpleNamespace:
@@ -1285,3 +1529,17 @@ def test_the_paper_commands_describe_shared_flags_identically() -> None:
     for name in shared:
         assert canonical[name].opts == legacy[name].opts, name
         assert getattr(canonical[name], "help", None) == getattr(legacy[name], "help", None), name
+
+
+def test_init_program_resolves_the_default_codex_controls(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autolean.program import parse_program
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main, ["init", "lean"])
+    assert result.exit_code == 0, result.output
+    program = parse_program(tmp_path / "program.md")
+    program.model = "codex"
+    config = program.llm_config()
+    assert (config.model, config.effort) == ("gpt-6-astra", "max")

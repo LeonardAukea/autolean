@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.lean_workspace import clear_runtime_state, copy_workspace, initialize_repository
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("AUTOLEAN_RUN_TUTORIAL_E2E") != "1",
     reason="set AUTOLEAN_RUN_TUTORIAL_E2E=1 for the scripted tutorial walkthrough",
@@ -109,12 +111,16 @@ class _ScriptedModelHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def project_root() -> Path:
+def project_root(tmp_path: Path) -> Path:
     configured = os.environ.get("AUTOLEAN_TUTORIAL_PROJECT")
     root = Path(configured) if configured is not None else Path(__file__).resolve().parents[1] / "workspace"
     if not (root / ".lake" / "packages" / "mathlib").exists():
-        pytest.skip("the tutorial walkthrough needs a Mathlib-provisioned workspace")
-    return root
+        pytest.fail("the tutorial walkthrough needs a Mathlib-provisioned workspace")
+    isolated = tmp_path / "workspace"
+    copy_workspace(root, isolated)
+    clear_runtime_state(isolated)
+    initialize_repository(isolated)
+    return isolated
 
 
 @pytest.fixture()
@@ -147,7 +153,7 @@ def program_file(tmp_path: Path, project_root: Path, scripted_model: int) -> Pat
         "## LLM Configuration\n"
         "\n"
         f"model: {_MODEL}\n"
-        "backend: openai_compat\n"
+        "provider: compatible\n"
         f"endpoint: http://127.0.0.1:{scripted_model}\n"
         "temperature: 0.0\n"
         "max_retries_per_sorry: 2\n"
@@ -158,57 +164,6 @@ def program_file(tmp_path: Path, project_root: Path, scripted_model: int) -> Pat
     return program
 
 
-@pytest.fixture()
-def committable_generated(project_root: Path) -> Iterator[None]:
-    """Let the enclosing repository accept the agent's proof commit.
-
-    The agent commits an accepted proof into the repository enclosing
-    the Lean project, and `git add --intent-to-add` refuses ignored
-    paths. The AutoLean checkout ignores `workspace/AutoLean/Generated/`
-    as runtime state, so the walkthrough un-ignores it for the duration
-    of the run through a deeper, higher-precedence ignore file.
-    """
-    marker = project_root / "AutoLean" / ".gitignore"
-    if marker.exists():
-        yield
-        return
-    marker.write_text("!Generated/\n", encoding="utf-8")
-    try:
-        yield
-    finally:
-        marker.unlink(missing_ok=True)
-
-
-@pytest.fixture()
-def restored_branch(project_root: Path) -> Iterator[None]:
-    """Leave the repository on the branch the walkthrough started from.
-
-    The agent commits an accepted proof to the repository enclosing the
-    Lean project, which here is the AutoLean checkout itself. CI throws
-    its checkout away; a developer would be left on a dated proof branch
-    holding a commit the walkthrough only made to prove it can.
-    """
-
-    def branch() -> str:
-        return subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-
-    original = branch()
-    try:
-        yield
-    finally:
-        working = branch()
-        if original and working and working != original:
-            for command in (["checkout", original], ["branch", "-D", working]):
-                subprocess.run(["git", *command], cwd=project_root, capture_output=True, check=False)
-
-
-@pytest.mark.usefixtures("committable_generated", "restored_branch")
 def test_tutorial_first_proof_end_to_end(
     tmp_path: Path,
     project_root: Path,
@@ -324,13 +279,15 @@ def test_tutorial_first_proof_end_to_end(
     )
     assert not (whole / "project" / "workspace").exists()
 
-    # 8. The exported source elaborates under the pinned toolchain, which is
-    #    what continuing outside this tool has to mean.
+    # The export owns its source and configuration; dependency artifacts are
+    # copied into that project before an independent compile.
     lake = shutil.which("lake")
     assert lake is not None, "the tutorial walkthrough needs lake on PATH"
+    exported_project = whole / "project"
+    copy_workspace(project_root / ".lake", exported_project / ".lake")
     elaboration = subprocess.run(
         [lake, "env", "lean", str(Path("AutoLean") / "Generated" / generated.name)],
-        cwd=project_root,
+        cwd=exported_project,
         capture_output=True,
         text=True,
         timeout=_STEP_TIMEOUT_SECONDS,

@@ -41,8 +41,10 @@ Location: `PROJECT/AutoLean/Papers/*_coverage_*.json`
 
 Coverage binds the acquired source, PDF, extracted text, plan, response trace,
 reviewed paper profile, numbered-item inventory, Lean evidence module, and
-proof environment. A reviewed profile passes only when every expected item and
-mapping edge appears and the complete evidence module elaborates.
+proof environment. Model extraction and PDF extraction each record content,
+page, and placement evidence. A reviewed profile passes only when every
+expected item and mapping edge appears and the complete evidence module
+elaborates.
 
 ## Project export
 

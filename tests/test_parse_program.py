@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from autolean.models import DEFAULT_PROFILE, PROFILES
-from autolean.program import parse_program
+from autolean.program import SearchScope, parse_program
 from autolean.routing import EscalationPolicy
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ class TestParseProgram:
         assert cfg.mode == "sorry-elimination"
         assert cfg.lean_project_path == "workspace"
         assert cfg.model == DEFAULT_PROFILE
-        assert cfg.temperature == pytest.approx(0.0)
+        assert cfg.temperature is None
         assert cfg.max_retries_per_sorry == 5
         assert cfg.max_proof_lines == 30
         assert cfg.escalation_policy is EscalationPolicy.ASK
@@ -80,8 +80,8 @@ class TestParseProgram:
 # ---------------------------------------------------------------------------
 
 
-class TestBackendSelection:
-    """program.md decides which backend the agent talks to."""
+class TestProviderSelection:
+    """program.md decides which provider serves the model."""
 
     def _write(self, tmp_path: Path, body: str) -> Path:
         p = tmp_path / "program.md"
@@ -92,23 +92,37 @@ class TestBackendSelection:
         cfg = parse_program(self._write(tmp_path, "model: opus\n"))
         assert cfg.llm_config().backend == "claude_cli"
 
-    def test_auto_with_provider_backend_uses_its_maximum(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "model: auto\nbackend: codex_cli\n"))
+    def test_auto_with_provider_uses_its_maximum(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: auto\nprovider: codex\n"))
         resolved = cfg.llm_config()
         assert (resolved.model, resolved.backend, resolved.effort) == (
-            "gpt-5.6-sol",
+            "gpt-6-astra",
             "codex_cli",
             "max",
         )
 
-    def test_explicit_backend_overrides_the_profile(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "model: opus\nbackend: ollama\n"))
-        assert cfg.llm_config().backend == "ollama"
-        assert cfg.llm_config().effort is None
+    def test_auto_with_grok_uses_its_maximum(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: auto\nprovider: grok\n"))
+        resolved = cfg.llm_config()
+        assert (resolved.model, resolved.backend, resolved.effort) == (
+            "grok-4.6",
+            "grok_cli",
+            "xhigh",
+        )
+
+    def test_short_provider_name_resolves_to_its_backend(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: auto\nprovider: codex\n"))
+        resolved = cfg.llm_config()
+        assert (resolved.model, resolved.backend) == ("gpt-6-astra", "codex_cli")
+
+    def test_profile_and_provider_conflict_is_rejected(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: opus\nprovider: ollama\n"))
+        with pytest.raises(ValueError, match="belongs to provider 'claude'"):
+            cfg.llm_config()
 
     def test_explicit_incompatible_backend_control_is_rejected(self, tmp_path: Path) -> None:
-        cfg = parse_program(self._write(tmp_path, "model: opus\nbackend: ollama\neffort: high\n"))
-        with pytest.raises(ValueError, match="reasoning effort"):
+        cfg = parse_program(self._write(tmp_path, "model: opus\nprovider: ollama\neffort: high\n"))
+        with pytest.raises(ValueError, match="belongs to provider 'claude'"):
             cfg.llm_config()
 
     def test_effort_is_passed_through(self, tmp_path: Path) -> None:
@@ -128,10 +142,23 @@ class TestBackendSelection:
         cfg = parse_program(
             self._write(
                 tmp_path,
-                "model: local\nbackend: openai_compat\nendpoint: http://127.0.0.1:8000\n",
+                "model: local\nprovider: compatible\nendpoint: http://127.0.0.1:8000\n",
             )
         )
         assert cfg.llm_config().base_url == "http://127.0.0.1:8000"
+
+    def test_provider_and_backend_keys_cannot_compete(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="choose one provider"):
+            parse_program(
+                self._write(
+                    tmp_path,
+                    "model: auto\nprovider: codex\nbackend: codex_cli\n",
+                )
+            )
+
+    def test_backend_key_accepts_a_canonical_transport_id(self, tmp_path: Path) -> None:
+        cfg = parse_program(self._write(tmp_path, "model: auto\nbackend: codex_cli\n"))
+        assert cfg.llm_config().backend == "codex_cli"
 
     def test_raw_ollama_tag_keeps_the_local_backend(self, tmp_path: Path) -> None:
         cfg = parse_program(self._write(tmp_path, "model: gemma4:26b\n"))
@@ -161,6 +188,34 @@ class TestBackendSelection:
         assert cfg.escalation_model == "fable"
         assert cfg.escalation_after_failures == 3
 
+    @pytest.mark.parametrize(
+        ("body", "scope", "enabled"),
+        [
+            ("model: gemma4:26b\nsearch_scope: auto\n", SearchScope.AUTO, False),
+            (
+                "model: gpt-custom\nprovider: openai\nsearch_scope: auto\n",
+                SearchScope.AUTO,
+                True,
+            ),
+            (
+                "model: gpt-custom\nprovider: openai\nsearch_scope: local\n",
+                SearchScope.LOCAL,
+                False,
+            ),
+            ("model: gemma4:26b\nsearch_scope: remote\n", SearchScope.REMOTE, True),
+        ],
+    )
+    def test_search_scope_resolves_against_model_placement(
+        self,
+        tmp_path: Path,
+        body: str,
+        scope: SearchScope,
+        enabled: bool,
+    ) -> None:
+        cfg = parse_program(self._write(tmp_path, body))
+        assert cfg.search_scope is scope
+        assert cfg.remote_search_enabled(cfg.llm_config()) is enabled
+
     def test_backend_is_unset_when_absent(self, tmp_path: Path) -> None:
         cfg = parse_program(self._write(tmp_path, "model: opus\n"))
         assert cfg.backend is None
@@ -182,6 +237,7 @@ class TestBackendSelection:
             "endpoint: file:///tmp/model\n",
             "escalation_policy: eager\n",
             "escalation_after_failures: 0\n",
+            "search_scope: global\n",
         ],
     )
     def test_invalid_program_policy_is_rejected(self, tmp_path: Path, body: str) -> None:
@@ -205,13 +261,14 @@ class TestParseProgramDefaults:
         assert cfg.mode == "sorry-elimination"
         assert cfg.lean_project_path == "workspace"
         assert cfg.model == DEFAULT_PROFILE
-        assert cfg.temperature == pytest.approx(0.4)
+        assert cfg.temperature is None
         assert cfg.max_retries_per_sorry == 5
         assert cfg.cycle_timeout_seconds == 120
         assert cfg.max_cycles == 5
         assert cfg.escalation_policy is EscalationPolicy.ASK
         assert cfg.escalation_model is None
         assert cfg.escalation_after_failures == 2
+        assert cfg.search_scope is SearchScope.AUTO
         assert cfg.goals == []
         assert cfg.constraints == []
         assert cfg.strategy_hints == []

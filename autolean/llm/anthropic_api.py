@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from autolean.llm.base import (
-    CLAUDE_EFFORTS,
     BaseBackend,
     Capabilities,
     DocumentInput,
@@ -23,20 +22,14 @@ from autolean.llm.base import (
     LLMRefusalError,
     LLMResponse,
     LLMTransientError,
+    token_count,
 )
+from autolean.llm.capabilities import ANTHROPIC_CAPABILITIES
 from autolean.ui import console
 
 #: Server-side refusal fallback: on a policy decline the API re-runs the
 #: request on Anthropic's recommended substitute inside the same call.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-
-# Current Claude models take reasoning depth from `effort` and accept their
-# default sampling configuration.
-_CAPABILITIES = Capabilities(
-    temperature=False,
-    effort_values=CLAUDE_EFFORTS,
-    document_inputs=True,
-)
 
 
 def _require_sdk() -> Any:
@@ -57,7 +50,7 @@ class AnthropicClient(BaseBackend):
     non-streaming requests it estimates will run past ten minutes.
     """
 
-    capabilities: Capabilities = _CAPABILITIES
+    capabilities: Capabilities = ANTHROPIC_CAPABILITIES
     _sdk_client: Any = field(default=None, repr=False)
     _fallbacks_enabled: bool = field(default=True, repr=False)
 
@@ -199,8 +192,8 @@ class AnthropicClient(BaseBackend):
         return LLMResponse(
             text=text,
             model=message.model,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            input_tokens=token_count(getattr(usage, "input_tokens", None)),
+            output_tokens=token_count(getattr(usage, "output_tokens", None)),
             duration_seconds=elapsed,
         )
 

@@ -5,9 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from autolean.llm import LLMResponse
+from autolean.llm import LLMConfig, LLMResponse
 from autolean.strategy import ProofPlan
 from autolean.theorem import FormalizationError, formalize_theorem, generated_theorem_path
+
+_CONFIG = LLMConfig(model="fixture", backend="ollama")
 
 
 class Project:
@@ -59,12 +61,22 @@ def test_formalization_repairs_exact_lean_diagnostics(tmp_path: Path) -> None:
     passed = SimpleNamespace(success=True, errors=[], stderr="")
     project = Project(tmp_path, [failed, passed])
 
-    theorem = formalize_theorem("Riemann hypothesis", _plan(), generate, project)
+    theorem = formalize_theorem(
+        "Riemann hypothesis",
+        _plan(),
+        generate,
+        project,
+        llm_config=_CONFIG,
+    )
 
     assert theorem.declaration_name == "rh"
     assert theorem.attempts == 2
     assert "type mismatch" in prompts[1]
     assert "s = (n : ℂ)" in theorem.source
+    assert len(theorem.receipts) == 2
+    assert theorem.receipts[-1].backend == "ollama"
+    assert theorem.receipts[-1].response_sha256 in theorem.source
+    assert "Formalization inference: local" in theorem.source
     assert len(project.sources) == 2
 
 
@@ -106,6 +118,7 @@ def test_formalization_repairs_an_incomplete_pythagorean_declaration(
         _plan(),
         generate,
         project,
+        llm_config=_CONFIG,
     )
 
     assert theorem.declaration_name == "pythagorean_theorem"
@@ -125,7 +138,64 @@ def test_formalization_requires_exactly_one_proof_target(tmp_path: Path) -> None
 
     project = Project(tmp_path, [])
     with pytest.raises(FormalizationError, match="exactly one"):
-        formalize_theorem("two theorems", _plan(), generate, project, max_repairs=0)
+        formalize_theorem(
+            "two theorems",
+            _plan(),
+            generate,
+            project,
+            llm_config=_CONFIG,
+            max_repairs=0,
+        )
+
+
+def test_formalization_extracts_a_lean_fence_after_prose(tmp_path: Path) -> None:
+    def generate(system: str, user: str) -> LLMResponse:
+        del system, user
+        return LLMResponse(
+            text=(
+                "I'll inspect the workspace and then write the theorem.\n"
+                "```lean\n"
+                "theorem prefixed : True := by\n  sorry\n"
+                "```\n"
+            ),
+            model="fixture",
+        )
+
+    theorem = formalize_theorem(
+        "True",
+        _plan(),
+        generate,
+        Project(tmp_path, [SimpleNamespace(success=True, errors=[], stderr="")]),
+        llm_config=_CONFIG,
+        max_repairs=0,
+    )
+
+    assert "I'll inspect" not in theorem.source
+    assert "theorem prefixed : True := by" in theorem.source
+
+
+def test_formalization_drops_prose_before_an_unfenced_theorem(tmp_path: Path) -> None:
+    def generate(system: str, user: str) -> LLMResponse:
+        del system, user
+        return LLMResponse(
+            text=(
+                "I'll inspect the workspace and then write the theorem.\n"
+                "theorem unfenced : True := by\n  sorry\n"
+            ),
+            model="fixture",
+        )
+
+    theorem = formalize_theorem(
+        "True",
+        _plan(),
+        generate,
+        Project(tmp_path, [SimpleNamespace(success=True, errors=[], stderr="")]),
+        llm_config=_CONFIG,
+        max_repairs=0,
+    )
+
+    assert "I'll inspect" not in theorem.source
+    assert theorem.declaration_name == "unfenced"
 
 
 def test_declaration_line_ignores_blank_lines_before_theorem(tmp_path: Path) -> None:
@@ -136,7 +206,13 @@ def test_declaration_line_ignores_blank_lines_before_theorem(tmp_path: Path) -> 
         return LLMResponse(text=source, model="fixture")
 
     passed = SimpleNamespace(success=True, errors=[], stderr="")
-    theorem = formalize_theorem("Pythagorean theorem", _plan(), generate, Project(tmp_path, [passed]))
+    theorem = formalize_theorem(
+        "Pythagorean theorem",
+        _plan(),
+        generate,
+        Project(tmp_path, [passed]),
+        llm_config=_CONFIG,
+    )
     actual_line = theorem.source.splitlines().index("theorem pythagorean : True := by") + 1
 
     assert theorem.declaration_line == actual_line

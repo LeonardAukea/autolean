@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -32,6 +33,12 @@ class PaperDeclaration:
     name: str
     kind: PaperDeclarationKind
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise PaperProfileError("paper declaration name must not be empty")
+        if not isinstance(self.kind, PaperDeclarationKind):
+            raise PaperProfileError("paper declaration kind is invalid")
+
 
 @dataclass(frozen=True)
 class PaperItem:
@@ -40,6 +47,19 @@ class PaperItem:
     label: str
     scope: PaperScope
     declarations: tuple[PaperDeclaration, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise PaperProfileError("paper item label must not be empty")
+        if not isinstance(self.scope, PaperScope):
+            raise PaperProfileError("paper item scope is invalid")
+        if (
+            not isinstance(self.declarations, tuple)
+            or not self.declarations
+            or any(not isinstance(declaration, PaperDeclaration) for declaration in self.declarations)
+            or len({item.name for item in self.declarations}) != len(self.declarations)
+        ):
+            raise PaperProfileError(f"paper item has invalid declaration witnesses: {self.label}")
 
 
 @dataclass(frozen=True)
@@ -56,12 +76,34 @@ class PaperProfile:
     items: tuple[PaperItem, ...]
 
     def __post_init__(self) -> None:
+        text_values = (self.id, self.arxiv_id, self.title)
+        if any(not isinstance(value, str) or not value.strip() for value in text_values):
+            raise PaperProfileError("paper profile identity must be complete")
+        if any(
+            not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            for digest in (self.pdf_sha256, self.source_archive_sha256)
+        ):
+            raise PaperProfileError(f"paper profile has invalid digests: {self.id}")
+        if (
+            not isinstance(self.authors, tuple)
+            or not self.authors
+            or any(not isinstance(author, str) or not author.strip() for author in self.authors)
+            or len(set(self.authors)) != len(self.authors)
+        ):
+            raise PaperProfileError(f"paper profile has invalid authors: {self.id}")
+        if not isinstance(self.items, tuple) or any(not isinstance(item, PaperItem) for item in self.items):
+            raise PaperProfileError(f"paper profile has invalid items: {self.id}")
         labels = [item.label for item in self.items]
         if len(labels) != len(set(labels)):
             raise PaperProfileError(f"paper profile has duplicate labels: {self.id}")
         if any(not item.declarations for item in self.items):
             raise PaperProfileError(f"paper profile has an unmapped item: {self.id}")
-        if not self.imports or any(not module.strip() for module in self.imports):
+        if (
+            not isinstance(self.imports, tuple)
+            or not self.imports
+            or any(not isinstance(module, str) or not module.strip() for module in self.imports)
+            or len(set(self.imports)) != len(self.imports)
+        ):
             raise PaperProfileError(f"paper profile has an invalid import closure: {self.id}")
 
     @property

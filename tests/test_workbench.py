@@ -94,6 +94,9 @@ def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> 
     session.write_program(settings, session_program)
 
     parsed = parse_program(session_program)
+    rendered = session_program.read_text(encoding="utf-8")
+    assert "provider: muse" in rendered
+    assert "\nbackend:" not in rendered
     assert parsed.model == "muse-glimmer"
     assert parsed.backend == "muse_glimmer"
     assert parsed.endpoint == "http://127.0.0.1:8080"
@@ -118,29 +121,30 @@ def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "settings, message",
+    "settings_args, message",
     [
         (
-            WorkbenchSettings("two words", None, None, None, None, 1),
+            ("two words", None, None, None, None, 1),
             "one non-empty token",
         ),
         (
-            WorkbenchSettings("opus", None, "file:///tmp/model", None, None, 1),
+            ("opus", None, "file:///tmp/model", None, None, 1),
             "absolute HTTP or HTTPS",
         ),
         (
-            WorkbenchSettings("opus", None, None, None, None, 0),
+            ("opus", None, None, None, None, 0),
             "cycles must be positive",
         ),
     ],
 )
 def test_workbench_settings_fail_closed(
     tmp_path: Path,
-    settings: WorkbenchSettings,
+    settings_args: tuple[object, ...],
     message: str,
 ) -> None:
     session = WorkbenchSession.load(_program(tmp_path))
     with pytest.raises(WorkbenchInputError, match=message):
+        settings = WorkbenchSettings(*settings_args)  # type: ignore[arg-type]
         settings.program_config(session.config)
 
 

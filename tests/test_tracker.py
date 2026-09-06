@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import logging
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,7 +16,12 @@ from autolean.tracker import (
     ExperimentRecord,
     ExperimentTracker,
     GitError,
+    LoggingHandle,
     Outcome,
+    ensure_proof_repository,
+    git_toplevel,
+    rejected_proof_path,
+    setup_logging,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,6 +54,29 @@ def _make_record(
         error_category=error_category,
         build_duration_seconds=build_duration,
     )
+
+
+def test_logging_handle_owns_and_closes_its_handlers(tmp_path: Path) -> None:
+    logger = logging.getLogger("autolean")
+    unrelated = logging.NullHandler()
+    logger.addHandler(unrelated)
+    handle: LoggingHandle | None = None
+    try:
+        handle = setup_logging(tmp_path, verbose=True)
+
+        assert handle.path.is_file()
+        assert len(handle.handlers) == 2
+        assert all(handler in logger.handlers for handler in handle.handlers)
+        assert unrelated in logger.handlers
+
+        handle.close()
+
+        assert handle.handlers == ()
+        assert unrelated in logger.handlers
+    finally:
+        if handle is not None:
+            handle.close()
+        logger.removeHandler(unrelated)
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +123,14 @@ class TestExperimentRecordAsDict:
         assert d["outcome"] == "fail_build"
 
     def test_serializes_proof_provenance_and_axioms(self) -> None:
-        rec = _make_record()
-        rec.environment_sha256 = "a" * 64
-        rec.proof_sha256 = "b" * 64
-        rec.axioms = "none"
-        rec.model = "gpt-5.6-luna"
-        rec.backend = "codex_cli"
+        rec = replace(
+            _make_record(),
+            environment_sha256="a" * 64,
+            proof_sha256="b" * 64,
+            axioms="none",
+            model="gpt-5.6-luna",
+            backend="codex_cli",
+        )
 
         serialized = rec.as_dict()
 
@@ -256,6 +288,60 @@ def _repository(tmp_path: Path) -> tuple[Path, Path]:
     return workspace, source
 
 
+def test_rejected_proof_path_names_an_ignored_untracked_destination(tmp_path: Path) -> None:
+    workspace, source = _repository(tmp_path)
+    (tmp_path / ".gitignore").write_text("workspace/AutoLean/Generated/\nworkspace/AutoLean/Target.lean\n")
+
+    probe = workspace / "AutoLean" / "Generated" / "New.lean"
+    reason = rejected_proof_path(workspace, probe)
+    assert reason is not None and "ignore rules" in reason
+
+    # A tracked file commits even when ignore rules match it.
+    assert rejected_proof_path(workspace, source) is None
+    # An untracked file outside the ignore rules commits.
+    assert rejected_proof_path(workspace, workspace / "AutoLean" / "Other.lean") is None
+    outside = rejected_proof_path(workspace, tmp_path.parent / "elsewhere.lean")
+    assert outside is not None and "outside the Git repository" in outside
+
+
+def test_git_toplevel_is_absent_outside_a_repository(tmp_path: Path) -> None:
+    assert git_toplevel(tmp_path) is None
+
+
+def test_ensure_proof_repository_is_a_no_op_outside_git(tmp_path: Path) -> None:
+    ensure_proof_repository(tmp_path)
+    assert not (tmp_path / ".git").exists()
+
+
+def test_ensure_proof_repository_leaves_a_tracked_project_alone(tmp_path: Path) -> None:
+    workspace, _source = _repository(tmp_path)
+    (tmp_path / ".gitignore").write_text("workspace/AutoLean/Generated/\n")
+
+    ensure_proof_repository(workspace)
+
+    assert git_toplevel(workspace) == tmp_path.resolve()
+    assert not (workspace / ".git").exists()
+    probe = workspace / "AutoLean" / "Generated" / "Probe.lean"
+    reason = rejected_proof_path(workspace, probe)
+    assert reason is not None and "ignore rules" in reason
+
+
+def test_ensure_proof_repository_nests_git_when_the_parent_ignores_the_project(
+    tmp_path: Path,
+) -> None:
+    _git(tmp_path, "init")
+    (tmp_path / ".gitignore").write_text("/lean/\n")
+    project = tmp_path / "lean"
+    project.mkdir()
+    (project / "lakefile.lean").write_text("package p\n")
+
+    ensure_proof_repository(project)
+
+    assert git_toplevel(project) == project.resolve()
+    probe = project / "AutoLean" / "Generated" / "Probe.lean"
+    assert rejected_proof_path(project, probe) is None
+
+
 def test_proof_commit_contains_only_the_proven_file(tmp_path: Path) -> None:
     workspace, source = _repository(tmp_path)
     tracker = ExperimentTracker(workspace)
@@ -267,8 +353,10 @@ def test_proof_commit_contains_only_the_proven_file(tmp_path: Path) -> None:
     _git(tmp_path, "add", "--", "unrelated.txt")
     (tmp_path / "untracked.txt").write_text("user artifact\n")
 
-    record = _make_record(target_id="AutoLean/Target.lean:2:target")
-    record.file = "AutoLean/Target.lean"
+    record = replace(
+        _make_record(target_id="AutoLean/Target.lean:2:target"),
+        file="AutoLean/Target.lean",
+    )
     tracker.commit_success(record)
 
     committed = _git(
@@ -294,6 +382,26 @@ def test_existing_branch_does_not_fall_through_to_current_branch(
     with pytest.raises(GitError, match="already exists"):
         tracker.setup_branch("autolean/existing")
     assert _git(tmp_path, "branch", "--show-current").stdout.strip() == original
+
+
+def test_changed_accepted_source_cannot_receive_a_proof_commit(tmp_path: Path) -> None:
+    import hashlib
+
+    workspace, source = _repository(tmp_path)
+    tracker = ExperimentTracker(workspace)
+    tracker.setup_branch("autolean/source-bound")
+    before = source.read_text()
+    accepted = "theorem target : True := by\n  trivial\n"
+    record = replace(_make_record(), file="AutoLean/Target.lean").bind_source(before, accepted)
+    assert record.source_after_sha256 == hashlib.sha256(accepted.encode()).hexdigest()
+    head = _git(tmp_path, "rev-parse", "HEAD").stdout
+    source.write_text("theorem editor_claim : False := by sorry\n")
+
+    with pytest.raises(GitError, match="source changed"):
+        tracker.commit_success(record)
+
+    assert _git(tmp_path, "rev-parse", "HEAD").stdout == head
+    assert "editor_claim" in source.read_text()
 
 
 def test_git_process_start_failure_uses_the_typed_boundary(

@@ -81,13 +81,44 @@ def test_completed_session_is_not_the_latest_resumable_session(tmp_path: Path) -
         model="opus",
         backend="claude_cli",
         max_cycles=5,
+        effort="max",
         session_id="20260811-workspace-00000001",
     )
+    assert store.load(session.id).effort == "max"
+    record = session.as_dict()
+    record.pop("effort")
+    assert ProofSession.from_dict(record).effort is None
     completed = store.save(session.update(status=SessionStatus.COMPLETED, remaining_targets=0))
 
     with pytest.raises(SessionError, match="no resumable"):
         store.latest()
     assert store.latest(include_completed=True) == completed
+
+
+def test_latest_session_orders_instants_across_utc_offsets(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    store = SessionStore(tmp_path)
+    first = store.create(
+        kind=SessionKind.PROJECT,
+        title="Earlier",
+        model="codex",
+        backend="codex_cli",
+        max_cycles=1,
+        session_id="earlier-session",
+    )
+    second = store.create(
+        kind=SessionKind.PROJECT,
+        title="Later",
+        model="codex",
+        backend="codex_cli",
+        max_cycles=1,
+        session_id="later-session",
+    )
+    for session, stamp in [(first, "2026-09-06T14:00:00+02:00"), (second, "2026-09-06T13:00:00Z")]:
+        store.save(replace(session, created_at=stamp, updated_at=stamp))
+
+    assert store.latest().id == second.id
 
 
 def test_session_target_must_remain_inside_project(tmp_path: Path) -> None:
@@ -143,3 +174,35 @@ def test_session_loader_rejects_filename_identity_mismatch(tmp_path: Path) -> No
 
     with pytest.raises(SessionError, match="does not match"):
         store.load("20260811-other-00000001")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_cycles", True),
+        ("artifacts", "AutoLean/Target.lean"),
+        ("remaining_targets", False),
+        ("message", ["not", "text"]),
+    ],
+)
+def test_session_loader_rejects_coercible_wrong_types(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create(
+        kind=SessionKind.PROJECT,
+        title="Workspace",
+        model="opus",
+        backend="claude_cli",
+        max_cycles=5,
+        session_id="20260811-types-00000001",
+    )
+    path = store.directory / f"{session.id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record[field] = value
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(SessionError, match="malformed"):
+        store.load(session.id)

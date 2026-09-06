@@ -11,7 +11,8 @@ It is read once at command start.
 
 `## Lean Project Path`
 
-: Lean project path relative to `program.md`. The default is `workspace`.
+: Lean project path, absolute or relative to `program.md`. The default is
+  `workspace`.
 
 `## Goals`
 
@@ -41,31 +42,43 @@ It is read once at command start.
   machine provider as described in
   [Choose and switch models](../how-to/choose-a-model.md).
 
-`backend`
+`provider`
 
-: Optional backend override. Valid values are listed by `autolean models`.
+: Optional provider override. Use a short name such as `codex` or `anthropic`;
+  `autolean models` lists every name. Canonical backend IDs are also accepted.
 
 `endpoint`
 
-: HTTP endpoint for a self-hosted backend. Only `http` and `https` endpoints
+: HTTP endpoint for a self-hosted provider. Only `http` and `https` endpoints
   with a host are accepted.
 
 `effort`
 
-: Reasoning effort: `none`, `low`, `medium`, `high`, `xhigh`, or `max`.
-  The backend must advertise the selected control.
+: Reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or
+  `max`. The backend must advertise the selected control.
 
 `temperature`
 
-: Finite value from 0 through 2. The default is `0.4`.
+: Optional finite value from 0 through 2. Raw models default to `0.4` when
+  their provider supports sampling. Named profiles own this setting, and
+  reasoning providers reject it when they expose no temperature control.
 
 `max_output_tokens`
 
-: Positive output limit. `num_predict` is the accepted local-backend alias.
+: Positive output limit. `num_predict` is the accepted local-provider alias.
+  Providers without an enforceable output control reject this setting.
 
 `llm_timeout_seconds`
 
 : Positive finite provider timeout. `timeout` is an accepted alias.
+
+`search_scope`
+
+: Placement for advisory Loogle, LeanSearch, and arXiv queries: `local`,
+  `remote`, or `auto`. `local` uses the project CodeDB index only. `remote`
+  sends the theorem name and goal to the configured research services. `auto`
+  enables those services when model inference is remote. The default is
+  `auto`.
 
 `max_retries_per_sorry`
 
@@ -124,6 +137,7 @@ workspace
 ## LLM Configuration
 
 model: auto
+search_scope: auto
 temperature: 0.4
 max_output_tokens: 32768
 max_retries_per_sorry: 5
@@ -140,13 +154,15 @@ max_cycles: 5
 
 ## Precedence and capability checks
 
-`--model` and `--backend` override the file. Workflow-specific cycle and
+`--model` and `--provider` override the file. Workflow-specific cycle and
 escalation options override the corresponding settings for that invocation.
 
-A profile may supply backend, endpoint, effort, token limit, seed, revision,
-and artifact identity. Explicit `program.md` values replace the fields they
-control. Configuration is validated before provider or project work begins.
+A profile supplies its provider binding, endpoint, effort, token limit, seed,
+revision, and artifact identity. A profile and an explicit provider must
+describe the same binding. Use a raw provider model ID when no shipped profile
+represents the required combination. Configuration is validated before
+provider or project work begins.
 
 Some subscription CLIs do not expose temperature, stop sequences, or a hard
-output ceiling. AutoLean rejects unsupported explicit controls instead of
-presenting them as effective.
+output ceiling. AutoLean rejects an explicit setting its provider cannot
+enforce.

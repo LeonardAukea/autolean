@@ -68,7 +68,7 @@ class TestSkillPersistence:
         # New instance loads from disk
         sm2 = SkillMemory(skills_dir=tmp_path)
         assert "reflexivity" in sm2.skills
-        assert sm2.skills["reflexivity"].tactics == ["rfl"]
+        assert sm2.skills["reflexivity"].tactics == ("rfl",)
 
     def test_reinforcement_increments_count(self, tmp_path: Path) -> None:
         sm = SkillMemory(skills_dir=tmp_path)
@@ -140,7 +140,7 @@ class TestTacticExtraction:
         )
 
         assert skill is not None
-        assert skill.tactics == ["induction", "rfl", "simp"]
+        assert skill.tactics == ("induction", "rfl", "simp")
         assert "zero" not in skill.tactics
         assert "succ" not in skill.tactics
 
@@ -150,12 +150,12 @@ class TestTacticExtraction:
         skill = sm.learn_from_proof("t", "...", "hpq h\nexact h")
 
         assert skill is not None
-        assert skill.tactics == ["exact"]
+        assert skill.tactics == ("exact",)
 
     def test_a_proof_with_no_known_tactic_teaches_nothing(self, tmp_path: Path) -> None:
         sm = SkillMemory(skills_dir=tmp_path, persist=False)
 
-        assert sm.learn_from_proof("t", "...", "⟨h, trivial⟩\nfoo bar") is None or True
+        assert sm.learn_from_proof("t", "...", "⟨h, h⟩\nfoo bar") is None
 
 
 class TestSkillRanking:

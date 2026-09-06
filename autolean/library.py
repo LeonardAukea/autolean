@@ -68,7 +68,7 @@ FILL_GAP_SYSTEM = "You are a Lean 4 expert. Create minimal, correct definitions.
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class MissingDefinition:
     """A definition that's needed but doesn't exist."""
 
@@ -76,6 +76,13 @@ class MissingDefinition:
     error_message: str
     context: str  # surrounding code where it was needed
     file: str
+
+    def __post_init__(self) -> None:
+        values = (self.name, self.error_message, self.context, self.file)
+        if any(not isinstance(value, str) for value in values):
+            raise ValueError("missing-definition evidence must be text")
+        if not self.name or not self.error_message:
+            raise ValueError("missing-definition identity must be complete")
 
 
 @dataclass(frozen=True)
@@ -85,6 +92,14 @@ class GeneratedDefinition:
     code: str
     response: LLMResponse
     prompt_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not self.code.strip():
+            raise ValueError("generated definition code must not be empty")
+        if not isinstance(self.response, LLMResponse):
+            raise ValueError("generated definition response must use LLMResponse")
+        if re.fullmatch(r"[0-9a-f]{64}", self.prompt_sha256) is None:
+            raise ValueError("generated definition prompt must have a lowercase SHA-256")
 
 
 def detect_missing_definitions(
@@ -96,10 +111,9 @@ def detect_missing_definitions(
     """
     gaps: list[MissingDefinition] = []
 
-    # Unknown identifier
     for m in re.finditer(r"unknown (?:identifier|constant) ['\u2018](\S+?)['\u2019]", error_message):
         name = m.group(1)
-        # Skip names that are likely typos of standard things
+        # Single-character and underscore names are binders, not gaps.
         if len(name) < 2 or name.startswith("_"):
             continue
         gaps.append(
@@ -123,20 +137,11 @@ def generate_library_source(
     topic: str,
     llm_generate: GenerateFn,
 ) -> str:
-    """Generate a complete Lean 4 library source for a topic.
-
-    Args:
-        topic: Mathematical topic (e.g., "differential geometry")
-        llm_generate: LLM generate function
-
-    Returns:
-        Generated source ready for sandbox validation.
-    """
+    """Generate a Lean 4 library source for a topic, ready for validation."""
     prompt = BUILD_LIBRARY_PROMPT.format(topic=topic)
     response = llm_generate("You are a Lean 4 formalization expert.", prompt)
 
     code = response.text.strip()
-    # Clean markdown fences
     code = re.sub(r"^```(?:lean4?|)\s*\n?", "", code)
     code = re.sub(r"\n?```\s*$", "", code)
     code = "\n".join(
@@ -144,7 +149,6 @@ def generate_library_source(
     )
     code = validate_generated_declarations(code)
 
-    # Add header
     safe_topic = safe_lean_comment_text(topic)
     header = (
         f"import Mathlib\n\n"

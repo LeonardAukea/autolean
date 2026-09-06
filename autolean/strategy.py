@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from autolean.llm import GenerateFn, LLMError, LLMResponse
+from autolean.validation import require_instance, require_int, require_text, require_texts
 
 _PLAN_FIELDS = (
     "formalization",
@@ -99,6 +101,30 @@ class PlanAttempt:
     duration_seconds: float
     validation_error: str = ""
 
+    def __post_init__(self) -> None:
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or self.attempt < 1:
+            raise ValueError("plan attempt number must be positive")
+        if not isinstance(self.guidance, tuple) or any(
+            not isinstance(item, str) or not item.strip() for item in self.guidance
+        ):
+            raise ValueError("plan guidance must contain non-empty text")
+        if any(
+            not isinstance(value, str) or not value.strip() for value in (self.response, self.model)
+        ) or not isinstance(self.validation_error, str):
+            raise ValueError("plan response identity must be complete text")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.input_tokens, self.output_tokens)
+        ):
+            raise ValueError("plan token counts must be non-negative integers")
+        if (
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(self.duration_seconds)
+            or self.duration_seconds < 0
+        ):
+            raise ValueError("plan duration must be finite and non-negative")
+
     @property
     def response_sha256(self) -> str:
         """Return the identity of the provider response bytes."""
@@ -136,6 +162,20 @@ class ProofPlan:
     completion_criteria: tuple[str, ...] = ()
     checkpoints: tuple[str, ...] = ()
     revision_triggers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError("proof plan objective must not be empty")
+        for field_name in _PLAN_FIELDS:
+            values = getattr(self, field_name)
+            if (
+                not isinstance(values, tuple)
+                or len(values) > _MAX_ITEMS
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+            ):
+                raise ValueError(f"proof plan {field_name} must contain at most {_MAX_ITEMS} non-empty items")
+        if len(self.to_json()) > _MAX_PLAN_CHARS:
+            raise ValueError(f"strategy exceeds {_MAX_PLAN_CHARS} characters")
 
     @property
     def sha256(self) -> str:
@@ -190,13 +230,38 @@ def generate_proof_plan(
     on_response: Callable[[PlanAttempt], None] | None = None,
 ) -> ProofPlan:
     """Generate one concise strategy for a statement and explicit guidance."""
+    require_text(
+        statement,
+        "statement must not be empty",
+        error_type=ProofStrategyError,
+    )
     statement = " ".join(statement.split())
-    if not statement:
-        raise ProofStrategyError("statement must not be empty")
+    require_instance(
+        guidance,
+        tuple,
+        "strategy guidance must be a tuple",
+        error_type=ProofStrategyError,
+    )
+    require_texts(
+        guidance,
+        "strategy guidance must contain non-empty text",
+        error_type=ProofStrategyError,
+    )
+    require_text(
+        context,
+        "strategy context must be text",
+        allow_empty=True,
+        error_type=ProofStrategyError,
+    )
     guidance_text = "\n".join(f"- {' '.join(item.split())}" for item in guidance) or "(none)"
     context_text = context.strip() or "(none)"
-    if max_repairs < 0 or max_repairs > 3:
-        raise ProofStrategyError("strategy repair budget must be between 0 and 3")
+    require_int(
+        max_repairs,
+        "strategy repair budget must be between 0 and 3",
+        minimum=0,
+        maximum=3,
+        error_type=ProofStrategyError,
+    )
     try:
         response = llm_generate(
             _SYSTEM_PROMPT,
@@ -212,37 +277,29 @@ def generate_proof_plan(
             try:
                 plan = parse_proof_plan(response.text)
             except ProofStrategyError as error:
-                if on_response is not None:
-                    on_response(
-                        _plan_attempt(
-                            response,
-                            attempt=repair + 1,
-                            guidance=guidance,
-                            validation_error=str(error),
-                        )
-                    )
+                _record_plan_attempt(
+                    on_response,
+                    response,
+                    attempt=repair + 1,
+                    guidance=guidance,
+                    validation_error=str(error),
+                )
                 if repair == max_repairs:
                     raise
-                if on_repair is not None:
-                    on_repair(repair + 1, str(error))
-                response = llm_generate(
-                    _SYSTEM_PROMPT,
-                    _REPAIR_PROMPT.format(
-                        error=error,
-                        response=response.text[:_MAX_PLAN_CHARS],
-                        max_items=_MAX_ITEMS,
-                        max_plan_chars=_MAX_PLAN_CHARS,
-                    ),
+                response = _repair_strategy_response(
+                    llm_generate,
+                    response,
+                    error,
+                    repair=repair + 1,
+                    on_repair=on_repair,
                 )
             else:
-                if on_response is not None:
-                    on_response(
-                        _plan_attempt(
-                            response,
-                            attempt=repair + 1,
-                            guidance=guidance,
-                        )
-                    )
+                _record_plan_attempt(
+                    on_response,
+                    response,
+                    attempt=repair + 1,
+                    guidance=guidance,
+                )
                 return plan
     except LLMError as error:
         raise ProofStrategyError(f"strategy generation failed: {error}") from error
@@ -251,19 +308,51 @@ def generate_proof_plan(
 
 def parse_proof_plan(raw: str) -> ProofPlan:
     """Parse and bound one model-produced JSON strategy."""
+    require_text(
+        raw,
+        "strategy response must be text",
+        allow_empty=True,
+        error_type=ProofStrategyError,
+    )
     text = raw.strip()
+    payload = _strategy_payload(text)
+    _validate_strategy_fields(payload)
+
+    objective = _normalized_text(payload.get("objective"), "objective")
+    values = _strategy_values(payload)
+    try:
+        plan = ProofPlan(objective=objective, **values)
+    except ValueError as error:
+        raise ProofStrategyError(str(error)) from error
+    if len(plan.to_json()) > _MAX_PLAN_CHARS:
+        raise ProofStrategyError(f"strategy exceeds {_MAX_PLAN_CHARS} characters")
+    return plan
+
+
+def _strategy_payload(text: str) -> dict[str, Any]:
+    """Decode one bounded JSON strategy object."""
     if len(text) > _MAX_RESPONSE_CHARS:
         raise ProofStrategyError(f"strategy response exceeds {_MAX_RESPONSE_CHARS} characters")
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    fenced = re.search(r"```(?:json)?\s*\n?(.*?)\s*```", text, re.DOTALL)
     if fenced:
         text = fenced.group(1)
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
-        raise ProofStrategyError(f"strategy is not valid JSON: {error.msg}") from error
+        start = text.find("{")
+        if start < 0:
+            raise ProofStrategyError(f"strategy is not valid JSON: {error.msg}") from error
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(text, start)
+        except json.JSONDecodeError as nested:
+            raise ProofStrategyError(f"strategy is not valid JSON: {nested.msg}") from nested
     if not isinstance(payload, dict):
         raise ProofStrategyError("strategy must be one JSON object")
+    return payload
 
+
+def _validate_strategy_fields(payload: dict[str, Any]) -> None:
+    """Require the complete closed strategy schema."""
     expected_fields = {"objective", *_PLAN_FIELDS}
     actual_fields = set(payload)
     if actual_fields != expected_fields:
@@ -271,7 +360,9 @@ def parse_proof_plan(raw: str) -> ProofPlan:
         unexpected = ", ".join(sorted(actual_fields - expected_fields)) or "none"
         raise ProofStrategyError(f"strategy fields differ; missing: {missing}; unexpected: {unexpected}")
 
-    objective = _normalized_text(payload.get("objective"), "objective")
+
+def _strategy_values(payload: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Normalize the bounded list fields of one strategy."""
     values: dict[str, tuple[str, ...]] = {}
     for field_name in _PLAN_FIELDS:
         raw_items = payload.get(field_name, [])
@@ -280,10 +371,49 @@ def parse_proof_plan(raw: str) -> ProofPlan:
         if len(raw_items) > _MAX_ITEMS:
             raise ProofStrategyError(f"{field_name} exceeds {_MAX_ITEMS} items")
         values[field_name] = tuple(_normalized_text(item, f"{field_name} item") for item in raw_items)
-    plan = ProofPlan(objective=objective, **values)
-    if len(plan.to_json()) > _MAX_PLAN_CHARS:
-        raise ProofStrategyError(f"strategy exceeds {_MAX_PLAN_CHARS} characters")
-    return plan
+    return values
+
+
+def _record_plan_attempt(
+    observer: Callable[[PlanAttempt], None] | None,
+    response: LLMResponse,
+    *,
+    attempt: int,
+    guidance: tuple[str, ...],
+    validation_error: str = "",
+) -> None:
+    """Send one immutable strategy-attempt record to its observer."""
+    if observer is not None:
+        observer(
+            _plan_attempt(
+                response,
+                attempt=attempt,
+                guidance=guidance,
+                validation_error=validation_error,
+            )
+        )
+
+
+def _repair_strategy_response(
+    llm_generate: GenerateFn,
+    response: LLMResponse,
+    error: ProofStrategyError,
+    *,
+    repair: int,
+    on_repair: Callable[[int, str], None] | None,
+) -> LLMResponse:
+    """Request one schema repair while retaining the rejected response."""
+    if on_repair is not None:
+        on_repair(repair, str(error))
+    return llm_generate(
+        _SYSTEM_PROMPT,
+        _REPAIR_PROMPT.format(
+            error=error,
+            response=response.text[:_MAX_PLAN_CHARS],
+            max_items=_MAX_ITEMS,
+            max_plan_chars=_MAX_PLAN_CHARS,
+        ),
+    )
 
 
 def _plan_attempt(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,17 @@ def _tracked_paths(*pathspecs: str) -> list[Path]:
         text=True,
     )
     return [ROOT / line for line in result.stdout.splitlines() if (ROOT / line).is_file()]
+
+
+def test_python_package_modules_are_tracked() -> None:
+    """The flake copies Git-tracked files; an untracked module cannot import."""
+    tracked = set(_tracked_paths("autolean"))
+    missing = [
+        path
+        for path in (ROOT / "autolean").rglob("*.py")
+        if "__pycache__" not in path.parts and path not in tracked
+    ]
+    assert missing == [], f"untracked package modules: {sorted(p.relative_to(ROOT) for p in missing)}"
 
 
 def test_external_actions_use_full_commit_ids() -> None:
@@ -73,6 +85,12 @@ def test_documentation_checks_use_the_ci_tools_shell() -> None:
     assert workflow.count("nix develop .#ci --command") == 3
     assert 'name = "autolean-ci";' in flake
     assert 'name = "autolean";' in flake
+
+
+def test_dev_shell_uses_the_live_checkout() -> None:
+    flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+
+    assert "export PYTHONPATH=\"$PWD''${PYTHONPATH:+:$PYTHONPATH}\"" in flake
 
 
 def test_default_lean_target_imports_every_shipped_module() -> None:
@@ -188,7 +206,18 @@ def test_the_recorded_demonstration_runs_the_documented_command() -> None:
     assert quickstart in tutorial
     recorded = [line for line in tape.splitlines() if "autolean prove" in line]
     assert len(recorded) == 1
-    assert quickstart in recorded[0]
+    command = recorded[0].removeprefix("Type `").removesuffix("`")
+    arguments = shlex.split(command)
+    assert arguments[:3] == ["autolean", "prove", "the Pythagorean theorem"]
+    assert arguments[3:] == [
+        "--model",
+        "codex",
+        "--review-plan",
+        "--guide",
+        "$guide",
+        "--max-attempts",
+        "5",
+    ]
 
 
 def _formula() -> str:

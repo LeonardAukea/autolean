@@ -8,17 +8,20 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from autolean.llm import LLMBackend
 from autolean.models import PROFILES, ModelProfile, resolve_llm_config, resolve_profile
+from autolean.tracker import Outcome
+from autolean.validation import require_optional_instance
 
 if TYPE_CHECKING:
-    from autolean.llm import LLMBackend, LLMConfig
+    from autolean.llm import LLMConfig
 
 DEFAULT_ESCALATION_AFTER = 2
 RESEARCH_DIFFICULTY = 8
 
 #: A timeout counts: the budget was spent elaborating the proof this model
 #: chose, and a stronger one can choose a cheaper route to the same goal.
-_ELIGIBLE_OUTCOMES = frozenset({"fail_build", "fail_sorry_remains", "fail_timeout"})
+_ELIGIBLE_OUTCOMES = frozenset({Outcome.FAIL_BUILD, Outcome.FAIL_SORRY_REMAINS, Outcome.FAIL_TIMEOUT})
 _INELIGIBLE_CATEGORIES = frozenset(
     {
         "duplicate_declaration",
@@ -44,8 +47,14 @@ class EscalationPolicy(StrEnum):
 class FailureEvidence:
     """One kernel-facing failure considered by the routing policy."""
 
-    outcome: str
+    outcome: Outcome
     category: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, Outcome):
+            raise ValueError("failure evidence must use the Outcome vocabulary")
+        if not isinstance(self.category, str):
+            raise ValueError("failure category must be text")
 
     @property
     def eligible(self) -> bool:
@@ -67,6 +76,32 @@ class EscalationDecision:
     difficulty: int
     reason: str
 
+    def __post_init__(self) -> None:
+        names = (
+            self.from_model,
+            self.from_backend,
+            self.to_profile,
+            self.to_model,
+            self.to_backend,
+            self.reason,
+        )
+        if any(not isinstance(name, str) or not name.strip() for name in names):
+            raise ValueError("escalation decision identity must be complete")
+        if (
+            isinstance(self.failure_count, bool)
+            or not isinstance(self.failure_count, int)
+            or self.failure_count <= 0
+        ):
+            raise ValueError("escalation failure count must be positive")
+        if isinstance(self.difficulty, bool) or not isinstance(self.difficulty, int) or self.difficulty < 0:
+            raise ValueError("escalation difficulty must be non-negative")
+        if (
+            not isinstance(self.categories, tuple)
+            or not self.categories
+            or any(not isinstance(category, str) or not category.strip() for category in self.categories)
+        ):
+            raise ValueError("escalation decision must name its failure categories")
+
 
 @dataclass(frozen=True)
 class ModelTransition:
@@ -79,6 +114,31 @@ class ModelTransition:
     to_backend: str
     reason: str
     failure_count: int
+
+    def __post_init__(self) -> None:
+        names = (
+            self.from_model,
+            self.from_backend,
+            self.to_model,
+            self.to_backend,
+            self.reason,
+        )
+        if any(not isinstance(name, str) or not name.strip() for name in names):
+            raise ValueError("model transition identity must be complete")
+        if (
+            isinstance(self.failure_count, bool)
+            or not isinstance(self.failure_count, int)
+            or self.failure_count <= 0
+        ):
+            raise ValueError("model transition failure count must be positive")
+        if not isinstance(self.timestamp, str):
+            raise ValueError("model transition timestamp must be text")
+        try:
+            timestamp = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("model transition timestamp must be ISO 8601") from error
+        if timestamp.tzinfo is None:
+            raise ValueError("model transition timestamp must include a UTC offset")
 
     @classmethod
     def from_decision(cls, decision: EscalationDecision) -> ModelTransition:
@@ -103,14 +163,27 @@ class ModelTransition:
         if not isinstance(value, dict):
             raise ValueError("model transition must be an object")
         try:
+            string_fields = (
+                "timestamp",
+                "from_model",
+                "from_backend",
+                "to_model",
+                "to_backend",
+                "reason",
+            )
+            if any(not isinstance(value.get(name), str) for name in string_fields):
+                raise TypeError("transition text fields must be strings")
+            failure_count = value["failure_count"]
+            if isinstance(failure_count, bool) or not isinstance(failure_count, int):
+                raise TypeError("failure_count must be an integer")
             return cls(
-                timestamp=str(value["timestamp"]),
-                from_model=str(value["from_model"]),
-                from_backend=str(value["from_backend"]),
-                to_model=str(value["to_model"]),
-                to_backend=str(value["to_backend"]),
-                reason=str(value["reason"]),
-                failure_count=int(value["failure_count"]),
+                timestamp=value["timestamp"],
+                from_model=value["from_model"],
+                from_backend=value["from_backend"],
+                to_model=value["to_model"],
+                to_backend=value["to_backend"],
+                reason=value["reason"],
+                failure_count=failure_count,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"malformed model transition: {error}") from error
@@ -124,6 +197,47 @@ class EscalationRoute:
     backend: LLMBackend | None = None
     transition: ModelTransition | None = None
     notice: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.notice, str):
+            raise ValueError("routing notice must be text")
+        require_optional_instance(
+            self.decision,
+            EscalationDecision,
+            "routing decision must use EscalationDecision",
+        )
+        require_optional_instance(
+            self.backend,
+            LLMBackend,
+            "routing backend must implement LLMBackend",
+        )
+        require_optional_instance(
+            self.transition,
+            ModelTransition,
+            "routing transition must use ModelTransition",
+        )
+        if (self.backend is None) != (self.transition is None):
+            raise ValueError("a connected route requires its model transition")
+        if self.transition is None:
+            return
+        if self.decision is None:
+            raise ValueError("a connected route requires its routing decision")
+        transition_identity = (
+            self.transition.from_model,
+            self.transition.from_backend,
+            self.transition.to_model,
+            self.transition.to_backend,
+            self.transition.failure_count,
+        )
+        decision_identity = (
+            self.decision.from_model,
+            self.decision.from_backend,
+            self.decision.to_model,
+            self.decision.to_backend,
+            self.decision.failure_count,
+        )
+        if transition_identity != decision_identity:
+            raise ValueError("route transition must record its routing decision")
 
 
 class EscalationRouter:
@@ -147,7 +261,7 @@ class EscalationRouter:
         self,
         *,
         target_id: str,
-        outcome: str,
+        outcome: Outcome,
         category: str,
         policy: EscalationPolicy,
         current_model: str,
@@ -206,7 +320,7 @@ class EscalationRouter:
         self,
         *,
         target_id: str,
-        outcome: str,
+        outcome: Outcome,
         category: str,
         policy: EscalationPolicy,
         current_model: str,

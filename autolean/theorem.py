@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,12 +14,22 @@ from autolean.generated_code import (
     safe_lean_comment_text,
     validate_generated_declarations,
 )
-from autolean.llm import GenerateFn, LLMError
+from autolean.llm import (
+    GenerateFn,
+    LLMConfig,
+    LLMError,
+    ModelCallReceipt,
+    inference_location,
+)
 from autolean.scanner import count_sorries
 from autolean.strategy import ProofPlan
 
 _DECLARATION = re.compile(r"(?m)^[ \t]*(?:theorem|lemma)[ \t]+([A-Za-z_][A-Za-z0-9_'.]*)")
-_FENCE = re.compile(r"^```(?:lean4?|)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
+_FENCE = re.compile(r"```(?:lean4?|)?\s*\n?(.*?)\n?```", re.DOTALL)
+_FORMALIZATION_START = re.compile(
+    r"(?m)^[ \t]*(?:noncomputable[ \t]+)?(?:theorem|lemma|def|abbrev|instance|"
+    r"structure|class|inductive|open|variable)\b"
+)
 
 _SYSTEM_PROMPT = """\
 You are a Lean 4 and Mathlib formalization expert. Return one source fragment
@@ -88,6 +100,23 @@ class FormalizedTheorem:
     source: str
     declaration_line: int
     attempts: int
+    receipts: tuple[ModelCallReceipt, ...]
+
+    def __post_init__(self) -> None:
+        text_values = (self.declaration_name, self.code, self.source)
+        if any(not isinstance(value, str) or not value.strip() for value in text_values):
+            raise ValueError("formalized theorem identity must be complete")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in (self.declaration_line, self.attempts)
+        ):
+            raise ValueError("formalization positions and counts must be positive")
+        if (
+            not isinstance(self.receipts, tuple)
+            or not 1 <= len(self.receipts) <= self.attempts
+            or any(not isinstance(receipt, ModelCallReceipt) for receipt in self.receipts)
+        ):
+            raise ValueError("formalization attempts require one model receipt each")
 
 
 def formalize_theorem(
@@ -96,24 +125,38 @@ def formalize_theorem(
     llm_generate: GenerateFn,
     project: FormalizationProject,
     *,
+    llm_config: LLMConfig,
     max_repairs: int = 2,
     timeout: int = 120,
 ) -> FormalizedTheorem:
     """Generate and compiler-repair one theorem before project installation."""
-    if max_repairs < 0:
+    if not isinstance(llm_config, LLMConfig):
+        raise ValueError("formalization requires the selected model configuration")
+    if isinstance(max_repairs, bool) or not isinstance(max_repairs, int) or max_repairs < 0:
         raise ValueError("max_repairs must be non-negative")
     prompt = _INITIAL_PROMPT.format(statement=statement, plan=plan.render())
     code = ""
     diagnostics = ""
+    receipts: list[ModelCallReceipt] = []
     for attempt in range(1, max_repairs + 2):
         try:
             response = llm_generate(_SYSTEM_PROMPT, prompt)
+            receipts.append(
+                ModelCallReceipt.from_response(
+                    llm_config,
+                    response,
+                    location=inference_location(llm_config),
+                    system=_SYSTEM_PROMPT,
+                    user=prompt,
+                )
+            )
             code = _normalize_formalization(response.text)
             theorem = _formalized_theorem(
                 code,
                 statement=statement,
                 plan=plan,
                 attempts=attempt,
+                receipts=tuple(receipts),
             )
         except (LLMError, GeneratedCodeError, FormalizationError) as error:
             diagnostics = str(error)
@@ -159,9 +202,12 @@ def generated_theorem_path(lean_root: Path, declaration_name: str) -> Path:
 
 def _normalize_formalization(raw: str) -> str:
     text = raw.strip()
-    fenced = _FENCE.fullmatch(text)
+    fenced = _FENCE.search(text)
     if fenced:
         text = fenced.group(1).strip()
+    started = _FORMALIZATION_START.search(text)
+    if started:
+        text = text[started.start() :]
     text = "\n".join(
         line for line in text.splitlines() if not line.strip().startswith(("import ", "-- import"))
     )
@@ -174,6 +220,7 @@ def _formalized_theorem(
     statement: str,
     plan: ProofPlan,
     attempts: int,
+    receipts: tuple[ModelCallReceipt, ...],
 ) -> FormalizedTheorem:
     if count_sorries(code) != 1:
         raise FormalizationError("formalization must contain exactly one `sorry`")
@@ -185,13 +232,31 @@ def _formalized_theorem(
     declaration = declarations[-1]
     statement_text = safe_lean_comment_text(statement)
     plan_text = safe_lean_comment_text(plan.render())
+    receipt_records = [receipt.as_dict() for receipt in receipts]
+    trace = json.dumps(
+        receipt_records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    trace_sha256 = hashlib.sha256(trace.encode()).hexdigest()
+    response_identities = "\n".join(
+        f"Formalization response {index} SHA-256:\n{receipt.response_sha256}"
+        for index, receipt in enumerate(receipts, 1)
+    )
+    accepted = receipts[-1]
     prefix = (
         "import Mathlib\n\n"
         "/-!\n"
         "# AutoLean proof task\n\n"
         f"Informal statement: {statement_text}\n"
         f"Proof plan: {plan_text}\n"
-        f"Proof plan SHA-256: {plan.sha256}\n"
+        f"Proof plan SHA-256:\n{plan.sha256}\n"
+        f"Formalization model: {accepted.model}\n"
+        f"Formalization provider: {accepted.backend}\n"
+        f"Formalization inference: {accepted.location.value}\n"
+        f"Formalization trace SHA-256:\n{trace_sha256}\n"
+        f"{response_identities}\n"
         "-/\n\n"
     )
     source = f"{prefix}{code.strip()}\n"
@@ -202,6 +267,7 @@ def _formalized_theorem(
         source=source,
         declaration_line=declaration_line,
         attempts=attempts,
+        receipts=receipts,
     )
 
 

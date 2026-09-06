@@ -16,23 +16,44 @@ from pathlib import Path
 from autolean.scanner import count_sorries
 
 try:
+    from scripts.demo_media import (
+        assert_tape_contract,
+        completed_session,
+        playback_speed,
+        preserve_workspace,
+        publish_outputs,
+        render_tape,
+        require_media_tools,
+        sha256,
+        staging_outputs,
+        validate_media,
+        vhs_version,
+    )
+    from scripts.lean_workspace import clear_runtime_state, copy_workspace, initialize_repository
+except ImportError:
+    from demo_media import (  # type: ignore[no-redef]
+        assert_tape_contract,
+        completed_session,
+        playback_speed,
+        preserve_workspace,
+        publish_outputs,
+        render_tape,
+        require_media_tools,
+        sha256,
+        staging_outputs,
+        validate_media,
+        vhs_version,
+    )
+    from lean_workspace import clear_runtime_state, copy_workspace, initialize_repository
+
+try:
     from scripts.record_paper_demo import (
         _autolean,
-        _clear_runtime_state,
-        _copy_workspace,
-        _file_identity,
-        _initialize_repository,
-        _sha256,
         recording_environment,
     )
 except ImportError:
     from record_paper_demo import (  # type: ignore[no-redef]
         _autolean,
-        _clear_runtime_state,
-        _copy_workspace,
-        _file_identity,
-        _initialize_repository,
-        _sha256,
         recording_environment,
     )
 
@@ -45,6 +66,19 @@ GUIDANCE = (
 )
 EXPORT_TITLE = "A checked Pythagorean theorem"
 EXPORT_DIRECTORY = "pythagorean-artifact"
+MODEL_PROFILE = "codex"
+TAPE_REQUIREMENTS = (
+    "autolean",
+    "bash",
+    "codex",
+    "clear",
+    "find",
+    "git",
+    "jq",
+    "lake",
+    "python3",
+    "sort",
+)
 
 
 @contextmanager
@@ -53,44 +87,11 @@ def prove_workspace(repository: Path) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="autolean-prove-demo-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
-        _copy_workspace(repository / "workspace", workspace)
-        _clear_runtime_state(workspace)
-        _initialize_repository(workspace)
-        # The shared demo .gitignore excludes AutoLean/Generated/ for the
-        # paper workflow; this demo commits an accepted generated proof.
-        marker = workspace / "AutoLean" / ".gitignore"
-        marker.write_text("!Generated/\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "add", str(marker)],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "commit", "-qm", "Demo: Track generated proofs"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        copy_workspace(repository / "workspace", workspace)
+        clear_runtime_state(workspace)
+        initialize_repository(workspace)
         shutil.copy2(repository / "program.md", root / "program.md")
         yield root
-
-
-def _assert_session(root: Path) -> dict[str, object]:
-    sessions = list((root / "workspace" / ".autolean" / "sessions").glob("*.json"))
-    records = [json.loads(path.read_text(encoding="utf-8")) for path in sessions]
-    completed = [
-        record
-        for record in records
-        if record.get("schema") == "autolean.proof-session.v1"
-        and record.get("kind") == "theorem"
-        and record.get("status") == "completed"
-    ]
-    if len(completed) != 1 or completed[0].get("remaining_targets") != 0:
-        raise SystemExit("demo theorem session is not complete")
-    return completed[0]
 
 
 def _assert_generated(root: Path) -> Path:
@@ -119,15 +120,20 @@ def _assert_export(root: Path) -> None:
         raise SystemExit(f"demo export contains an unexpected Lean source set: {sources}")
     if count_sorries(sources[0].read_text(encoding="utf-8")):
         raise SystemExit("demo export contains a proof placeholder")
+    if sources[0].read_bytes() != _assert_generated(root).read_bytes():
+        raise SystemExit("demo export differs from the accepted proof")
 
 
 def _assert_compiles(root: Path) -> None:
-    """Compile the recorded source through the pinned project environment."""
+    """Compile the exported proof inside its standalone project."""
     workspace = root / "workspace"
+    project = root / EXPORT_DIRECTORY / "project"
     generated = _assert_generated(root)
+    if not (project / ".lake").exists():
+        copy_workspace(workspace / ".lake", project / ".lake")
     result = subprocess.run(
         ["lake", "env", "lean", str(generated.relative_to(workspace))],
-        cwd=workspace,
+        cwd=project,
         capture_output=True,
         text=True,
         timeout=300,
@@ -138,18 +144,10 @@ def _assert_compiles(root: Path) -> None:
 
 
 def _assert_demo(root: Path) -> None:
-    _assert_session(root)
+    completed_session(root, "theorem")
     _assert_generated(root)
     _assert_export(root)
     _assert_compiles(root)
-
-
-def _playback_speed(tape: Path) -> float:
-    """Read the factor by which the tape plays its recording back."""
-    for line in tape.read_text(encoding="utf-8").splitlines():
-        if line.startswith("Set PlaybackSpeed"):
-            return float(line.split()[-1])
-    return 1.0
 
 
 def _session_seconds(session: dict[str, object]) -> float:
@@ -159,29 +157,32 @@ def _session_seconds(session: dict[str, object]) -> float:
     return round((ended - started).total_seconds(), 3)
 
 
-def _write_demo_manifest(repository: Path, root: Path) -> Path:
+def _write_demo_manifest(
+    repository: Path,
+    root: Path,
+    media: list[dict[str, object]],
+    tape_sources: list[dict[str, object]],
+    recorder_version: str,
+) -> Path:
     """Bind the recording to its live provider and Lean evidence."""
-    session = _assert_session(root)
+    session = completed_session(root, "theorem")
     generated = _assert_generated(root)
-    media = [
-        repository / "docs" / "assets" / "autolean-pythagorean.gif",
-        repository / "docs" / "assets" / "autolean-pythagorean.mp4",
-    ]
-    tape = repository / "docs" / "demos" / "pythagorean.tape"
     record = {
         "backend": session["backend"],
-        "export_manifest_sha256": _sha256(root / EXPORT_DIRECTORY / "manifest.json"),
+        "export_manifest_sha256": sha256(root / EXPORT_DIRECTORY / "manifest.json"),
         "generated_module": generated.name,
-        "generated_sha256": _sha256(generated),
-        "media": [_file_identity(path) for path in media],
+        "generated_sha256": sha256(generated),
+        "media": media,
         "model": session["model"],
-        "playback_speed": _playback_speed(tape),
+        "playback_speed": playback_speed(repository),
         "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "schema": "autolean.demo.v1",
         "session": session["id"],
         "session_seconds": _session_seconds(session),
         "statement": STATEMENT,
-        "tape_sha256": _sha256(tape),
+        "tape_sha256": tape_sources[0]["sha256"],
+        "tape_sources": tape_sources,
+        "vhs_version": recorder_version,
     }
     path = repository / "docs" / "demos" / "pythagorean.json"
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -195,6 +196,8 @@ def _run_prove(root: Path) -> None:
             _autolean(),
             "prove",
             STATEMENT,
+            "--model",
+            MODEL_PROFILE,
             "--review-plan",
             "--guide",
             GUIDANCE,
@@ -208,7 +211,7 @@ def _run_prove(root: Path) -> None:
     )
     if result.returncode != 0:
         raise SystemExit(result.returncode)
-    session = _assert_session(root)
+    session = completed_session(root, "theorem")
     subprocess.run(
         [
             _autolean(),
@@ -228,22 +231,32 @@ def _run_prove(root: Path) -> None:
 
 def _record(repository: Path, root: Path) -> None:
     """Render the GIF and MP4 from the versioned live VHS tape."""
-    if shutil.which("vhs") is None:
-        raise SystemExit("vhs is unavailable; enter `nix develop`")
-    subprocess.run(
-        ["vhs", "docs/demos/pythagorean.tape"],
-        cwd=repository,
-        env=recording_environment(AUTOLEAN_DEMO_ROOT=str(root)),
-        check=True,
-        timeout=2400,
-    )
-    _assert_demo(root)
-    for name in ("autolean-pythagorean.gif", "autolean-pythagorean.mp4"):
-        path = repository / "docs" / "assets" / name
-        if not path.is_file() or path.stat().st_size == 0:
-            raise SystemExit(f"recording did not produce {path}")
+    tape = repository / "docs" / "demos" / "pythagorean.tape"
+    tape_sources = assert_tape_contract(repository, tape, TAPE_REQUIREMENTS)
+    recorder_version = vhs_version()
+    with staging_outputs(repository, "autolean-pythagorean") as staged:
+        render_tape(
+            repository,
+            tape,
+            staged,
+            environment=recording_environment(
+                AUTOLEAN_DEMO_ROOT=str(root),
+                AUTOLEAN_DEMO_WORKSPACE_HELPER=str(repository / "scripts" / "lean_workspace.py"),
+            ),
+            timeout=3000,
+        )
+        _assert_demo(root)
+        media = validate_media(staged)
+        media_paths = publish_outputs(repository, staged)
+    for path in media_paths:
         print(f"{path.relative_to(repository)} ({path.stat().st_size:,} bytes)")
-    manifest = _write_demo_manifest(repository, root)
+    manifest = _write_demo_manifest(
+        repository,
+        root,
+        media,
+        tape_sources,
+        recorder_version,
+    )
     print(f"{manifest.relative_to(repository)} ({manifest.stat().st_size:,} bytes)")
 
 
@@ -260,8 +273,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(arguments: Sequence[str] | None = None) -> int:
     """Prepare an isolated project, then run or record the live demo."""
     options = _parser().parse_args(arguments)
+    if not options.check:
+        require_media_tools()
     repository = Path(__file__).resolve().parents[1]
-    with prove_workspace(repository) as root:
+    with prove_workspace(repository) as root, preserve_workspace(repository, root):
         if options.check:
             _run_prove(root)
         else:

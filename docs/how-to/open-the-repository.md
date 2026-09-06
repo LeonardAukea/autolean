@@ -1,79 +1,53 @@
-# Open the repository
+# Maintain public distribution
 
-This gate governs the change from private to public visibility. Changing
-visibility is a separate maintainer action after the qualifying pull request
-merges.
+The repository is public. Its default-branch ruleset requires a pull request,
+resolved review threads, signed commits, linear history, deletion protection,
+and the aggregate `Required` check. The routine qualification commands live
+in [Qualify a release](release.md).
 
-## 1. Audit the complete history
+## Audit publication surfaces
 
-Scan every reachable commit for credentials, personal data, unpublished paper
-text, model transcripts, logs, training records, and generated research state.
-Check each vendored or copied asset for its license and source. Remove a secret
-from its upstream service before repairing Git history.
+Review source, complete reachable history, assets, distribution contents,
+Actions logs, and release artifacts for credentials, personal data, and
+unpublished research. Check copied assets against their source licenses.
+Generated proofs, training records, logs, and local indexes belong to their
+research workspace.
 
-Require a clean unauthenticated clone to pass the release guide from setup
-through the README demonstration. Check the wheel, source distribution, release
-assets, GitHub Actions logs, caches, and old workflow artifacts as publication
-surfaces.
+The public community boundary consists of the license, citation record,
+security-reporting route, contributor guide, support route, governance,
+code of conduct, issue forms, and pull-request template. Keep their contact
+routes usable and their ownership explicit.
 
-## 2. Finish the community boundary
+## Check repository controls
 
-Verify the public contact addresses, support route, moderation owner, security
-advisory process, issue labels, issue forms, pull-request template, license,
-citation record, code of conduct, changelog, and release notes. Read each page
-as a first-time contributor and remove private operational detail.
+Verify the default-branch ruleset, secret scanning, push protection,
+Dependabot updates, CodeQL, release immutability, and full-SHA action pins.
+These controls are repository settings as well as source configuration.
+Inspect the live settings before relying on their enforcement.
 
-Reserve the `autolean-proof` PyPI distribution and configure its trusted
-publisher for the `Publish Python` workflow and `pypi` environment.
+Require the complete CI gate on the exact release commit. Validate supported
+Python versions, the declared Nix systems, native containment, the standalone
+export, dependency SBOM, and reproducible distribution bytes. Record the
+platform and commit for every result.
 
-Confirm that one maintainer can acknowledge security reports and review pull
-requests while another person is unavailable. Record any single-maintainer
-limit in the launch decision.
+## Qualify each installation route
 
-## 3. Qualify the public build
+An anonymous user must be able to clone the source, enter the development
+shell, and run the first-proof tutorial. Downloaded wheels must pass the
+installed-package smoke test outside the checkout. Release downloads must
+match their manifest and attestations.
 
-Require the aggregate `Required` job and CodeQL on the launch commit. Run the
-host containment suite on macOS and Linux. Build the standalone paper artifact
-and its LaTeX companion from a clean directory. Verify the release manifest,
-SBOM, proof-environment record, and byte-identical Python distributions.
+PyPI publication requires a trusted publisher with these exact fields:
 
-Keep the release qualified for supported Python versions and every declared Nix
-system. Record unavailable hardware or builders as explicit boundaries.
+| Field | Value |
+| --- | --- |
+| Project | `autolean-proof` |
+| Owner | `LeonardAukea` |
+| Repository | `autolean` |
+| Workflow filename | `publish-pypi.yml` |
+| Environment | `pypi` |
 
-## 4. Change visibility once
-
-Review GitHub's [visibility-change warnings] immediately before publication.
-Making the repository public exposes source, Actions history, logs, and prior
-activity. It also enables public forks.
-
-After changing visibility:
-
-1. create a `main` ruleset that requires pull requests, the `Required` check,
-   resolved review threads, linear history, and deletion protection;
-2. enable secret scanning, push protection, code scanning, the dependency
-   graph, Dependabot alerts, and Dependabot security updates through the
-   [security settings];
-3. add the supported [Nix ecosystem] to Dependabot for `flake.lock`;
-4. verify release immutability, full-SHA action pinning, and the selected-action
-   allowlist;
-5. verify Issues, Discussions, security advisories, merge policy, topic labels,
-   the community profile, and the unauthenticated README links;
-6. run the public CI and download the resulting release as an anonymous user.
-
-GitHub disables push rulesets during a private-to-public visibility change.
-Create and verify the public ruleset after the change. The private Free
-repository uses maintainer review of the aggregate check because
-[private rulesets] require a paid plan.
-
-## 5. Record the decision
-
-Open one launch issue containing the qualified commit, evidence links, known
-boundaries, maintainer approval, and publication time. Close it only after the
-anonymous installation and release-download checks pass.
-
-The routine release process remains in [Qualify a release](release.md).
-
-[Nix ecosystem]: https://docs.github.com/en/code-security/reference/supply-chain-security/supported-ecosystems-and-repositories
-[private rulesets]: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets
-[security settings]: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-security-and-analysis-settings-for-your-repository
-[visibility-change warnings]: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility
+The publisher is configured in the owning PyPI account. The publication
+workflow accepts an immutable, qualified GitHub release tag. Verify registry
+installation after the workflow succeeds, using the
+[publication procedure](release.md#6-publish-the-python-distribution).

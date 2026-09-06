@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -20,15 +19,58 @@ from pathlib import Path
 from autolean.paper import fetch_arxiv
 from autolean.scanner import count_sorries
 
+try:
+    from scripts.demo_media import (
+        assert_tape_contract,
+        completed_session,
+        playback_speed,
+        preserve_workspace,
+        publish_outputs,
+        render_tape,
+        require_media_tools,
+        sha256,
+        staging_outputs,
+        validate_media,
+        vhs_version,
+    )
+    from scripts.lean_workspace import clear_runtime_state, copy_workspace, initialize_repository
+except ImportError:
+    from demo_media import (  # type: ignore[no-redef]
+        assert_tape_contract,
+        completed_session,
+        playback_speed,
+        preserve_workspace,
+        publish_outputs,
+        render_tape,
+        require_media_tools,
+        sha256,
+        staging_outputs,
+        validate_media,
+        vhs_version,
+    )
+    from lean_workspace import clear_runtime_state, copy_workspace, initialize_repository
+
 ARXIV_ID = "2506.18616v5"
 PDF_SHA256 = "39db363898dfb4a51c0e344a6154f76dd6c3e8768a414d516853e6cdc12dfe2d"
 PROFILE_ID = "arxiv-2506.18616v5"
 ITEM_COUNT = 25
 DECLARATION_COUNT = 33
+MODEL_PROFILE = "codex"
 REVIEW_GUIDANCE = (
     "Separate the executable alias-elaboration audit from follow-up work. "
     "Do not claim signature comparison, mapping grades, paper-form equivalence, "
     "or per-declaration axiom audits."
+)
+TAPE_REQUIREMENTS = (
+    "autolean",
+    "bash",
+    "clear",
+    "codex",
+    "find",
+    "jq",
+    "lake",
+    "python3",
+    "sort",
 )
 
 
@@ -38,91 +80,6 @@ class DemoWorkspace:
 
     root: Path
     pdf: Path
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _copy_workspace(source: Path, destination: Path) -> None:
-    """Create an independent copy-on-write workspace for the recording."""
-    command = (
-        ["/bin/cp", "-cR", str(source), str(destination)]
-        if sys.platform == "darwin"
-        else ["cp", "--archive", "--reflink=auto", str(source), str(destination)]
-    )
-    subprocess.run(command, check=True, capture_output=True, text=True)
-
-
-def _clear_runtime_state(workspace: Path) -> None:
-    """Remove research state that does not belong to this recording."""
-    for relative in (
-        ".autolean",
-        ".codedb",
-        "logs",
-        "skills",
-        "training_data",
-        "workspace",
-        "AutoLean/Generated",
-        "AutoLean/Papers",
-    ):
-        shutil.rmtree(workspace / relative, ignore_errors=True)
-    for pattern in (
-        "AutoLean/Paper*.lean",
-        "AutoLean/Challenge_*.lean",
-        "AutoLean/Lib*.lean",
-    ):
-        for path in workspace.glob(pattern):
-            path.unlink()
-    for relative in (
-        ".overnight.pid",
-        "overnight.log",
-        "results.tsv",
-        "AutoLean/UserTheorems.lean",
-    ):
-        (workspace / relative).unlink(missing_ok=True)
-
-
-def _initialize_repository(workspace: Path) -> None:
-    """Prepare the isolated project for exact source commits."""
-    (workspace / ".gitignore").write_text(
-        ".autolean/\n"
-        ".codedb/\n"
-        ".lake/\n"
-        "logs/\n"
-        "skills/\n"
-        "training_data/\n"
-        "workspace/\n"
-        "AutoLean/Generated/\n"
-        "AutoLean/Papers/\n"
-        "AutoLean/Paper*.lean\n"
-        "AutoLean/Challenge_*.lean\n"
-        "AutoLean/Lib*.lean\n"
-        "AutoLean/UserTheorems.lean\n"
-        "results.tsv\n"
-        "overnight.log\n",
-        encoding="utf-8",
-    )
-    commands = (
-        ("init", "-q"),
-        ("config", "user.name", "AutoLean Demo"),
-        ("config", "user.email", "demo@autolean.invalid"),
-        ("config", "commit.gpgsign", "false"),
-        ("add", "."),
-        ("commit", "-qm", "Demo: Record initial project"),
-    )
-    for arguments in commands:
-        subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", *arguments],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
 
 
 def _materialize_pdf(root: Path) -> Path:
@@ -136,7 +93,7 @@ def _materialize_pdf(root: Path) -> Path:
         shutil.copy2(source, pdf)
     else:
         pdf = fetch_arxiv(ARXIV_ID, root)
-    actual = _sha256(pdf)
+    actual = sha256(pdf)
     if actual != PDF_SHA256:
         raise SystemExit(f"reviewed PDF SHA-256 differs: expected {PDF_SHA256}, got {actual}")
     return pdf
@@ -148,9 +105,9 @@ def demo_workspace(repository: Path) -> Iterator[DemoWorkspace]:
     with tempfile.TemporaryDirectory(prefix="autolean-paper-demo-") as temporary:
         root = Path(temporary)
         workspace = root / "workspace"
-        _copy_workspace(repository / "workspace", workspace)
-        _clear_runtime_state(workspace)
-        _initialize_repository(workspace)
+        copy_workspace(repository / "workspace", workspace)
+        clear_runtime_state(workspace)
+        initialize_repository(workspace)
         shutil.copy2(repository / "program.md", root / "program.md")
         yield DemoWorkspace(root=root, pdf=_materialize_pdf(root))
 
@@ -214,19 +171,25 @@ def _assert_coverage(root: Path) -> Path:
     return path
 
 
-def _assert_session(root: Path) -> str:
-    sessions = list((root / "workspace" / ".autolean" / "sessions").glob("*.json"))
-    records = [json.loads(path.read_text(encoding="utf-8")) for path in sessions]
-    completed = [
-        record
-        for record in records
-        if record.get("schema") == "autolean.proof-session.v1"
-        and record.get("kind") == "paper"
-        and record.get("status") == "completed"
-    ]
-    if len(completed) != 1 or completed[0].get("remaining_targets") != 0:
-        raise SystemExit("demo paper session is not complete")
-    return str(completed[0]["id"])
+def _assert_compiles(root: Path) -> None:
+    """Compile the paper module from the standalone exported project."""
+    project = root / "paper-artifact" / "project"
+    sources = sorted((project / "AutoLean").glob("Paper_*.lean"))
+    if len(sources) != 1:
+        raise SystemExit(f"demo export contains an unexpected paper source set: {sources}")
+    source = sources[0]
+    if not (project / ".lake").exists():
+        copy_workspace(root / "workspace" / ".lake", project / ".lake")
+    result = subprocess.run(
+        ["lake", "env", "lean", str(source.relative_to(project))],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode != 0:
+        diagnostics = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        raise SystemExit(f"pinned Lean rejected the exported paper module:\n{diagnostics}")
 
 
 def _assert_export(root: Path) -> None:
@@ -238,9 +201,14 @@ def _assert_export(root: Path) -> None:
     lakefile = project / "lakefile.lean"
     if not lakefile.is_file():
         raise SystemExit("demo export omits lakefile.lean")
-    sources = sorted(path for path in project.rglob("*.lean") if path != lakefile)
+    sources = sorted(
+        path
+        for path in project.rglob("*.lean")
+        if path != lakefile and ".lake" not in path.relative_to(project).parts
+    )
     if len(sources) != 2 or any(path.name == "UserTheorems.lean" for path in sources):
-        raise SystemExit(f"demo export contains an unexpected Lean source set: {sources}")
+        names = [path.relative_to(project).as_posix() for path in sources]
+        raise SystemExit(f"demo export contains an unexpected Lean source set: {names}")
     evidence = next(path for path in sources if path.name.startswith("Paper_"))
     text = evidence.read_text(encoding="utf-8")
     if "import Mathlib.Probability.ProductMeasure" not in text:
@@ -252,19 +220,18 @@ def _assert_export(root: Path) -> None:
 def _assert_demo(root: Path) -> None:
     _assert_plan(root)
     _assert_coverage(root)
-    _assert_session(root)
+    completed_session(root, "paper")
     _assert_export(root)
+    _assert_compiles(root)
 
 
-def _file_identity(path: Path) -> dict[str, object]:
-    return {
-        "name": path.name,
-        "sha256": _sha256(path),
-        "size": path.stat().st_size,
-    }
-
-
-def _write_demo_manifest(repository: Path, root: Path) -> Path:
+def _write_demo_manifest(
+    repository: Path,
+    root: Path,
+    media: list[dict[str, object]],
+    tape_sources: list[dict[str, object]],
+    recorder_version: str,
+) -> Path:
     """Bind the recording to its live provider and Lean evidence."""
     plan_path, plan = _single_record(root, "*_plan_*.json", "autolean.paper-plan.v2")
     coverage_path, coverage = _single_record(
@@ -272,27 +239,26 @@ def _write_demo_manifest(repository: Path, root: Path) -> Path:
         "*_coverage_*.json",
         "autolean.paper-coverage.v2",
     )
-    session = _assert_session(root)
-    media = [
-        repository / "docs" / "assets" / "autolean-ionescu-tulcea.gif",
-        repository / "docs" / "assets" / "autolean-ionescu-tulcea.mp4",
-    ]
+    session = str(completed_session(root, "paper")["id"])
     record = {
         "arxiv_id": ARXIV_ID,
-        "coverage_sha256": _sha256(coverage_path),
+        "coverage_sha256": sha256(coverage_path),
         "evidence": coverage["lean_evidence"],
-        "export_manifest_sha256": _sha256(root / "paper-artifact" / "manifest.json"),
-        "media": [_file_identity(path) for path in media],
+        "export_manifest_sha256": sha256(root / "paper-artifact" / "manifest.json"),
+        "media": media,
         "model": plan["accepted_response_model"],
         "pdf_sha256": PDF_SHA256,
-        "plan_artifact_sha256": _sha256(plan_path),
+        "playback_speed": playback_speed(repository),
+        "plan_artifact_sha256": sha256(plan_path),
         "plan_sha256": plan["plan_sha256"],
         "plan_trace_sha256": plan["trace_sha256"],
         "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "response_sha256": plan["accepted_response_sha256"],
         "schema": "autolean.demo.v1",
         "session": session,
-        "tape_sha256": _sha256(repository / "docs" / "demos" / "ionescu-tulcea.tape"),
+        "tape_sha256": tape_sources[0]["sha256"],
+        "tape_sources": tape_sources,
+        "vhs_version": recorder_version,
     }
     path = repository / "docs" / "demos" / "ionescu-tulcea.json"
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -305,6 +271,8 @@ def _run_check(workspace: DemoWorkspace) -> None:
         _autolean(),
         "verify",
         str(workspace.pdf),
+        "--model",
+        MODEL_PROFILE,
         "--review-plan",
         "--max-cycles",
         "5",
@@ -314,11 +282,11 @@ def _run_check(workspace: DemoWorkspace) -> None:
         cwd=workspace.root,
         input=f"n\n{REVIEW_GUIDANCE}\ny\n",
         text=True,
-        timeout=900,
+        timeout=2400,
     )
     if result.returncode != 0:
         raise SystemExit(result.returncode)
-    session = _assert_session(workspace.root)
+    session = str(completed_session(workspace.root, "paper")["id"])
     subprocess.run(
         [
             _autolean(),
@@ -351,26 +319,34 @@ def recording_environment(**demo_variables: str) -> dict[str, str]:
 
 def _record(repository: Path, workspace: DemoWorkspace) -> None:
     """Render the GIF and MP4 from the versioned live VHS tape."""
-    if shutil.which("vhs") is None:
-        raise SystemExit("vhs is unavailable; enter `nix develop`")
+    tape = repository / "docs" / "demos" / "ionescu-tulcea.tape"
+    tape_sources = assert_tape_contract(repository, tape, TAPE_REQUIREMENTS)
+    recorder_version = vhs_version()
     environment = recording_environment(
         AUTOLEAN_DEMO_ROOT=str(workspace.root),
         AUTOLEAN_DEMO_PDF=str(workspace.pdf),
+        AUTOLEAN_DEMO_WORKSPACE_HELPER=str(repository / "scripts" / "lean_workspace.py"),
     )
-    subprocess.run(
-        ["vhs", "docs/demos/ionescu-tulcea.tape"],
-        cwd=repository,
-        env=environment,
-        check=True,
-        timeout=1200,
-    )
-    _assert_demo(workspace.root)
-    for name in ("autolean-ionescu-tulcea.gif", "autolean-ionescu-tulcea.mp4"):
-        path = repository / "docs" / "assets" / name
-        if not path.is_file() or path.stat().st_size == 0:
-            raise SystemExit(f"recording did not produce {path}")
+    with staging_outputs(repository, "autolean-ionescu-tulcea") as staged:
+        render_tape(
+            repository,
+            tape,
+            staged,
+            environment=environment,
+            timeout=3600,
+        )
+        _assert_demo(workspace.root)
+        media = validate_media(staged)
+        media_paths = publish_outputs(repository, staged)
+    for path in media_paths:
         print(f"{path.relative_to(repository)} ({path.stat().st_size:,} bytes)")
-    manifest = _write_demo_manifest(repository, workspace.root)
+    manifest = _write_demo_manifest(
+        repository,
+        workspace.root,
+        media,
+        tape_sources,
+        recorder_version,
+    )
     print(f"{manifest.relative_to(repository)} ({manifest.stat().st_size:,} bytes)")
 
 
@@ -387,8 +363,10 @@ def _parser() -> argparse.ArgumentParser:
 def main(arguments: Sequence[str] | None = None) -> int:
     """Prepare an isolated project, then run or record the live demo."""
     options = _parser().parse_args(arguments)
+    if not options.check:
+        require_media_tools()
     repository = Path(__file__).resolve().parents[1]
-    with demo_workspace(repository) as workspace:
+    with demo_workspace(repository) as workspace, preserve_workspace(repository, workspace.root):
         if options.check:
             _run_check(workspace)
         else:

@@ -30,8 +30,10 @@ class ReleaseIdentity:
     committed_at: datetime
 
     def __post_init__(self) -> None:
-        if _COMMIT_PATTERN.fullmatch(self.commit) is None:
+        if not isinstance(self.commit, str) or _COMMIT_PATTERN.fullmatch(self.commit) is None:
             raise ReleaseIdentityError("commit must be a full lowercase Git object ID")
+        if not isinstance(self.committed_at, datetime):
+            raise ReleaseIdentityError("commit timestamp must be a datetime")
         if self.committed_at.tzinfo is None:
             raise ReleaseIdentityError("commit timestamp must include a timezone")
 

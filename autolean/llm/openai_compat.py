@@ -12,20 +12,19 @@ from dataclasses import dataclass
 
 import httpx
 
-from autolean.llm._http import HttpBackend, as_int, as_list, as_object, as_text
-from autolean.llm.base import Capabilities, LLMError, LLMResponse
+from autolean.llm._http import HttpBackend, as_list, as_object, as_text
+from autolean.llm.base import Capabilities, LLMError, LLMResponse, token_count
+from autolean.llm.capabilities import OPENAI_COMPAT_CAPABILITIES
 from autolean.ui import console
 
 DEFAULT_OPENAI_COMPAT_URL = "http://localhost:8000"
-
-_CAPABILITIES = Capabilities(temperature=True)
 
 
 @dataclass
 class OpenAICompatibleClient(HttpBackend):
     """Client for any server exposing the OpenAI chat-completions shape."""
 
-    capabilities: Capabilities = _CAPABILITIES
+    capabilities: Capabilities = OPENAI_COMPAT_CAPABILITIES
     default_base_url: str = DEFAULT_OPENAI_COMPAT_URL
 
     def ping(self) -> bool:
@@ -119,7 +118,7 @@ class OpenAICompatibleClient(HttpBackend):
         return LLMResponse(
             text=text,
             model=model,
-            input_tokens=as_int(usage.get("prompt_tokens")),
-            output_tokens=as_int(usage.get("completion_tokens")),
+            input_tokens=token_count(usage.get("prompt_tokens")),
+            output_tokens=token_count(usage.get("completion_tokens")),
             duration_seconds=elapsed,
         )

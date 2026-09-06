@@ -10,7 +10,7 @@ optional provider and document runtimes:
 
 | Installation | Capability |
 | --- | --- |
-| `autolean-proof` | CLI, workbench, subscription CLIs, HTML papers |
+| `autolean-proof` | CLI, workbench, Claude/Codex/Grok CLIs, HTML papers |
 | `autolean-proof[structure]` | Tree-sitter structural context for prompts |
 | `autolean-proof[pdf]` | PyMuPDF4LLM and PyMuPDF Layout PDF extraction |
 | `autolean-proof[anthropic]` | Anthropic API provider |
@@ -25,11 +25,12 @@ uv sync --extra pdf
 
 ## Installing without Nix
 
-The distribution is a Python application. Installed on its own it supplies
-the `autolean` command and nothing else:
+Install the application from this checkout or a downloaded release wheel:
 
 ```bash
-uv tool install autolean-proof     # or: pipx install autolean-proof
+uv tool install .
+# Or, after downloading a release wheel:
+uv tool install ./autolean_proof-0.5.0-py3-none-any.whl
 ```
 
 That command needs a Lean toolchain to check anything, which
@@ -41,17 +42,22 @@ autolean init lean
 cd lean && lake update && lake exe cache get && lake build
 ```
 
-The Nix shell remains the release-qualified environment: it pins the exact
-Lean, Mathlib, and CSLib closure that every recorded proof identity names,
-along with the sandbox tools. An elan-managed toolchain is whatever the
-project's `lean-toolchain` resolves to on the day it is fetched, so two
-machines can disagree. Prefer the Nix shell when a result has to be
-reproducible; use the standalone install to try the command.
+Linux also requires Bubblewrap (`bwrap`) with user namespaces enabled. macOS
+uses its supplied `sandbox-exec`. The Nix shell supplies the pinned Lean,
+Mathlib, CSLib, and sandbox tools, with archive hashes checked during setup.
+Every proof environment records the actual installed toolchain and artifacts.
+The [release guide](../how-to/release.md#6-publish-the-python-distribution)
+owns registry publication and its trusted-publisher requirements.
 
-There is no Homebrew formula. A formula would have to pin every Python
-dependency as its own resource and would still leave the Lean closure to
-elan, so it would carry the maintenance of the Nix flake without its
-guarantee.
+A checkout also carries a Homebrew formula. It installs one pinned immutable
+release with every runtime dependency as a locked resource and depends on
+elan for the Lean toolchain:
+
+```bash
+brew install --build-from-source Formula/autolean.rb
+```
+
+The [release guide](../how-to/release.md) moves the formula to a new release.
 
 AutoLean source is MIT licensed. Each dependency retains its own license.
 PyMuPDF and PyMuPDF4LLM are available under GNU AGPL terms or a commercial

@@ -68,4 +68,4 @@ def test_real_model_plans_and_proves_inside_sandbox() -> None:
     )
 
     assert result.success, result.stderr
-    assert result.errors == []
+    assert not result.errors

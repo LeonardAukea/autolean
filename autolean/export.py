@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from autolean.files import walk_files
+
 EXPORT_SCHEMA = "autolean.project-export.v1"
 _PROJECT_FILES = {"lake-manifest.json", "lakefile.lean", "lakefile.toml", "lean-toolchain"}
 #: Directories a run writes under the project that carry no exported source.
@@ -56,6 +58,21 @@ class ExportResult:
     manifest_sha256: str
     source_count: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise ExportError("export result path must be a path")
+        if (
+            not isinstance(self.manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.manifest_sha256) is None
+        ):
+            raise ExportError("export manifest identity must be a lowercase SHA-256")
+        if (
+            isinstance(self.source_count, bool)
+            or not isinstance(self.source_count, int)
+            or self.source_count < 1
+        ):
+            raise ExportError("export source count must be positive")
+
 
 @dataclass(frozen=True)
 class PaperBundle:
@@ -63,8 +80,14 @@ class PaperBundle:
 
     markdown_path: Path
     coverage_path: Path
-    pdf_path: Path | None = None
-    plan_path: Path | None = None
+    pdf_path: Path | None
+    plan_path: Path
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(path, Path) for path in (self.markdown_path, self.coverage_path, self.plan_path)
+        ) or (self.pdf_path is not None and not isinstance(self.pdf_path, Path)):
+            raise ExportError("paper bundle artifacts must be paths")
 
 
 def _sha256(path: Path) -> str:
@@ -86,10 +109,8 @@ def _is_runtime_source(relative: Path) -> bool:
 
 def _source_files(root: Path) -> list[Path]:
     files: list[Path] = []
-    for path in root.rglob("*"):
+    for path in walk_files(root, excluded=_EXCLUDED_PARTS):
         relative = path.relative_to(root)
-        if any(part in _EXCLUDED_PARTS for part in relative.parts):
-            continue
         if path.is_symlink():
             raise ExportError(f"project export does not follow symbolic links: {relative}")
         if (
@@ -126,12 +147,16 @@ def _source_closure(root: Path, roots: tuple[Path, ...]) -> list[Path]:
     pending = list(roots)
     sources: set[Path] = set()
     while pending:
-        source = pending.pop().resolve()
+        source = pending.pop()
         try:
             relative = source.relative_to(root)
         except ValueError as error:
             raise ExportError(f"session source escapes the Lean project: {source}") from error
-        if source.is_symlink():
+        if ".." in relative.parts:
+            raise ExportError(f"session source escapes the Lean project: {source}")
+        if any(
+            (root / Path(*relative.parts[:index])).is_symlink() for index in range(1, len(relative.parts) + 1)
+        ):
             raise ExportError(f"project export does not follow symbolic links: {relative}")
         if not source.is_file() or source.suffix != ".lean":
             raise ExportError(f"session source is not a Lean file: {relative}")
@@ -141,6 +166,9 @@ def _source_closure(root: Path, roots: tuple[Path, ...]) -> list[Path]:
         pending.extend(_local_imports(root, source))
 
     project_files = [root / name for name in _PROJECT_FILES if (root / name).is_file()]
+    for path in project_files:
+        if path.is_symlink():
+            raise ExportError(f"project export does not follow symbolic links: {path.name}")
     return sorted(
         [*sources, *project_files],
         key=lambda path: path.relative_to(root).as_posix(),
@@ -242,6 +270,10 @@ def _plan_record(plan_path: Path) -> dict[str, Any]:
         raise ExportError(f"paper plan is not valid JSON: {error}") from error
     if not isinstance(record, dict) or record.get("schema") != "autolean.paper-plan.v2":
         raise ExportError("paper plan must use autolean.paper-plan.v2")
+    if record.get("inference_location") not in {"local", "remote"}:
+        raise ExportError("paper plan must record local or remote inference")
+    if any(not isinstance(record.get(name), str) or not record[name] for name in ("model", "backend")):
+        raise ExportError("paper plan model and backend must be complete")
     responses = _validated_plan_responses(record)
     _validate_plan_trace(record, responses)
     _validate_accepted_plan(record, responses[-1])
@@ -301,7 +333,7 @@ def _validate_paper_bundle(
     coverage: dict[str, Any],
 ) -> None:
     """Check the links between source, model trace, ledger, and Lean result."""
-    if bundle.plan_path is None or not bundle.plan_path.is_file():
+    if not bundle.plan_path.is_file():
         raise ExportError("paper export requires its model plan")
     plan = _plan_record(bundle.plan_path)
     _validate_plan_links(bundle.plan_path, coverage, plan)
@@ -390,7 +422,7 @@ def _plan_latex(plan_path: Path | None) -> str:
         if not isinstance(items, list) or not items:
             continue
         heading = field.replace("_", " ").title()
-        lines.extend((f"\\paragraph{{{heading}}}", "\\begin{itemize}"))
+        lines.extend((f"\\paragraph{{{heading}}}", "\\begin{itemize}\\raggedright"))
         lines.extend(f"\\item {_latex_escape(str(item))}" for item in items)
         lines.append("\\end{itemize}")
     return "\n".join(lines) + "\n"
@@ -455,7 +487,9 @@ def _paper_source(
     for path in lean_files:
         sections.append(
             "\\subsection*{\\texttt{\\detokenize{" + path + "}}}\n"
-            "\\VerbatimInput[fontsize=\\scriptsize]{../project/" + path + "}\n"
+            "\\VerbatimInput[fontsize=\\scriptsize,breaklines=true,breakanywhere=true]{../project/"
+            + path
+            + "}\n"
         )
     environment = environment_sha256 or "not recorded"
     return (
@@ -472,7 +506,8 @@ def _paper_source(
         "\\usepackage{amsmath,amsthm}\n"
         "\\usepackage{array,longtable}\n"
         "\\usepackage[margin=1in]{geometry}\n"
-        "\\usepackage{fancyvrb}\n"
+        "\\usepackage{fvextra}\n"
+        "\\setlength{\\emergencystretch}{3em}\n"
         "\\usepackage[hidelinks]{hyperref}\n"
         f"\\title{{{_latex_escape(title)}}}\n"
         "\\author{AutoLean proof artifact}\n"
@@ -480,9 +515,10 @@ def _paper_source(
         "\\begin{document}\n"
         "\\maketitle\n"
         "\\section*{Verification contract}\n"
-        "The mathematical declarations in this artifact are checked by the pinned "
-        "Lean toolchain. The accompanying manifest binds every source file to its "
-        "SHA-256 digest.\\par\n"
+        "This artifact contains a Lean source snapshot and pinned project "
+        "configuration. Build the project to check these exact source files. "
+        "The accompanying manifest binds every source file to its SHA-256 "
+        "digest.\\par\n"
         f"\\noindent Environment SHA-256: \\texttt{{{environment}}}\n"
         + _coverage_latex(coverage)
         + _plan_latex(plan_path)
@@ -503,7 +539,7 @@ def _readme(title: str, environment_sha256: str) -> str:
         "lake build\n"
         "```\n\n"
         "Build the companion paper with a TeX distribution that provides "
-        "`fancyvrb`:\n\n"
+        "`fvextra`:\n\n"
         "```console\n"
         "cd paper\n"
         "latexmk -xelatex main.tex\n"
@@ -519,11 +555,7 @@ def _validated_destination(project_root: Path, output: Path) -> tuple[Path, Path
     """Resolve an export destination outside a complete Lean project."""
     root = project_root.resolve()
     destination = output.resolve()
-    try:
-        destination.relative_to(root)
-    except ValueError:
-        pass
-    else:
+    if destination.is_relative_to(root):
         raise ExportError("export destination must be outside the Lean project")
     if destination.exists():
         raise ExportError(f"export destination already exists: {destination}")
@@ -593,8 +625,7 @@ def _copy_paper_sources(staging: Path, bundle: PaperBundle) -> None:
     shutil.copyfile(bundle.coverage_path, source_output / "coverage.json")
     if bundle.pdf_path is not None:
         shutil.copyfile(bundle.pdf_path, source_output / "paper.pdf")
-    if bundle.plan_path is not None:
-        shutil.copyfile(bundle.plan_path, source_output / "plan.json")
+    shutil.copyfile(bundle.plan_path, source_output / "plan.json")
 
 
 def _write_export_documents(

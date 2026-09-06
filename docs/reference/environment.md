@@ -40,7 +40,8 @@ The environment SHA-256 covers:
 - the selected Lean executable and reported version
 - `lean-toolchain`, `lakefile.lean`, and `lake-manifest.json`
 - resolved dependency names and Git revisions
-- importable project and dependency `.olean` files
+- importable `.olean`, `.olean.private`, `.olean.server`, `.ir`, and `.ir.sig`
+  files from the toolchain, project, and dependencies
 - native libraries used by the Lean environment
 
 AutoLean hashes the environment before and after final elaboration. A changed
@@ -60,8 +61,10 @@ A successful experiment records:
 - input and output token measurements when available
 - terminal outcome and duration
 
-The accepted source uses compare-and-swap semantics. An editor save between
-validation and installation stops the operation.
+Source comparison runs after staging and immediately before atomic
+replacement. A detected edit stops installation; the proof commit checks the
+accepted source identity again. External writers must keep the source stable
+during installation and Git commit.
 
 ## Axiom policy
 

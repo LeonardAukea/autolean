@@ -21,7 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, OptionList, RichLog, Select, Static
 from textual.widgets.option_list import Option
 
-from autolean.llm import BACKEND_NAMES, BACKENDS
+from autolean.llm import BACKEND_NAMES, BACKENDS, provider_name, resolve_backend_name
 from autolean.models import AUTO_PROFILE, ModelProfile, profile_groups, resolve_profile
 from autolean.program import ProgramConfig, parse_program
 from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
@@ -51,6 +51,36 @@ class WorkbenchSettings:
     escalation_model: str | None = None
     escalation_after_failures: int = DEFAULT_ESCALATION_AFTER
     guidance: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, str):
+            raise WorkbenchInputError("Model must be text.")
+        optional_text = (
+            self.backend,
+            self.endpoint,
+            self.effort,
+            self.escalation_model,
+        )
+        if any(value is not None and not isinstance(value, str) for value in optional_text) or not isinstance(
+            self.guidance, str
+        ):
+            raise WorkbenchInputError("Optional model settings must be text.")
+        if isinstance(self.max_cycles, bool) or not isinstance(self.max_cycles, int) or self.max_cycles <= 0:
+            raise WorkbenchInputError("Experiment cycles must be positive.")
+        if self.max_output_tokens is not None and (
+            isinstance(self.max_output_tokens, bool)
+            or not isinstance(self.max_output_tokens, int)
+            or self.max_output_tokens <= 0
+        ):
+            raise WorkbenchInputError("Output token limit must be positive.")
+        if not isinstance(self.escalation_policy, EscalationPolicy):
+            raise WorkbenchInputError("Escalation policy is invalid.")
+        if (
+            isinstance(self.escalation_after_failures, bool)
+            or not isinstance(self.escalation_after_failures, int)
+            or self.escalation_after_failures <= 0
+        ):
+            raise WorkbenchInputError("Escalation threshold must be positive.")
 
     def program_config(self, base: ProgramConfig) -> ProgramConfig:
         """Apply session choices to a copy of the parsed program."""
@@ -93,6 +123,20 @@ class CommandPlan:
     cwd: Path
     mutates_project: bool
 
+    def __post_init__(self) -> None:
+        if self.action not in {"doctor", "inspect", "validate", "solve"}:
+            raise WorkbenchInputError("Workbench action is invalid.")
+        if (
+            not isinstance(self.argv, tuple)
+            or not self.argv
+            or any(not isinstance(value, str) or not value for value in self.argv)
+        ):
+            raise WorkbenchInputError("Workbench command must be a text tuple.")
+        if not isinstance(self.cwd, Path):
+            raise WorkbenchInputError("Workbench command directory must be a path.")
+        if not isinstance(self.mutates_project, bool):
+            raise WorkbenchInputError("Workbench mutation flag must be a boolean.")
+
     @property
     def display(self) -> str:
         """Return a shell-readable command for the activity log."""
@@ -107,6 +151,16 @@ class WorkbenchSession:
     config: ProgramConfig
     lean_root: Path
     targets: tuple[SorryTarget, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.program_path, Path) or not isinstance(self.lean_root, Path):
+            raise WorkbenchInputError("Workbench project locations must be paths.")
+        if not isinstance(self.config, ProgramConfig):
+            raise WorkbenchInputError("Workbench config must use ProgramConfig.")
+        if not isinstance(self.targets, tuple) or any(
+            not isinstance(target, SorryTarget) for target in self.targets
+        ):
+            raise WorkbenchInputError("Workbench targets must use SorryTarget.")
 
     @classmethod
     def load(cls, program_path: Path) -> WorkbenchSession:
@@ -176,12 +230,17 @@ def render_program(config: ProgramConfig, lean_root: Path) -> str:
     config.validate()
     llm_lines = [f"model: {config.model}"]
     if config.backend is not None:
-        llm_lines.append(f"backend: {config.backend}")
+        backend = resolve_backend_name(config.backend)
+        if backend is None:
+            raise WorkbenchInputError(f"Unknown provider: {config.backend}")
+        llm_lines.append(f"provider: {provider_name(backend)}")
     if config.endpoint is not None:
         llm_lines.append(f"endpoint: {config.endpoint}")
     if config.effort is not None:
         llm_lines.append(f"effort: {config.effort}")
-    llm_lines.append(f"temperature: {config.temperature}")
+    llm_lines.append(f"search_scope: {config.search_scope.value}")
+    if config.temperature is not None:
+        llm_lines.append(f"temperature: {config.temperature}")
     if config.max_output_tokens is not None:
         llm_lines.append(f"max_output_tokens: {config.max_output_tokens}")
     llm_lines.extend(
@@ -453,11 +512,17 @@ class AutoLeanWorkbench(App[None]):
                     id="custom-model",
                     disabled=initial_profile is not None or is_automatic,
                 )
-                yield Label("Backend", classes="field-label")
+                yield Label("Provider", classes="field-label")
                 yield Select(
                     [
                         ("Use profile default", PROFILE_DEFAULT),
-                        *((f"{name} · {BACKENDS[name].summary}", name) for name in BACKEND_NAMES),
+                        *(
+                            (
+                                f"{BACKENDS[name].provider} · {BACKENDS[name].summary}",
+                                name,
+                            )
+                            for name in BACKEND_NAMES
+                        ),
                     ],
                     value=backend_value,
                     allow_blank=False,
@@ -739,16 +804,16 @@ class AutoLeanWorkbench(App[None]):
         if value == AUTO_PROFILE:
             details.update(
                 "Strongest profile for an authenticated provider.\n"
-                "Select a hosted backend to choose its maximum explicitly."
+                "Select a hosted provider to choose its maximum explicitly."
             )
             return
         profile: ModelProfile | None = resolve_profile(value) if value != CUSTOM_MODEL else None
         if profile is None:
-            details.update("Custom model · choose its backend and optional endpoint.")
+            details.update("Custom model · choose its provider and optional endpoint.")
             return
         route = f"\nStronger sibling: {profile.escalates_to}" if profile.escalates_to else ""
         setup = f"\nSetup: {profile.setup_command}" if profile.setup_command else ""
-        details.update(f"{profile.description}\nBackend: {profile.backend}{route}{setup}")
+        details.update(f"{profile.description}\nProvider: {provider_name(profile.backend)}{route}{setup}")
 
     def _launch(self, action: WorkbenchAction) -> None:
         try:

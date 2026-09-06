@@ -54,15 +54,34 @@ audits the locked dependency graph and emits a CycloneDX SBOM.
 Regenerate a recorded demonstration when its command or output changes:
 
 ```bash
+vhs validate docs/demos/pythagorean.tape docs/demos/ionescu-tulcea.tape
 python scripts/record_prove_demo.py    # README front page
 python scripts/record_paper_demo.py    # paper audit
 ```
 
-Each recorder requires the configured live provider. It verifies the input
-identity, checks the accepted evidence and export, then drives the versioned
-VHS tape. The recorder and tape contain the command and any human review
-guidance. Provider responses enter the generated provenance records at
-runtime.
+Each recorder requires the configured live provider and the complete VHS,
+FFmpeg, and ffprobe toolchain. It drives the versioned VHS tape in an isolated
+project, then checks the accepted evidence and standalone export. The tape
+declares its command dependencies and sources the shared
+presentation settings. Recording pauses during provider and compiler latency;
+the resulting media retains every review, acceptance, artifact, and
+independent Lean check. The manifest records both tape sources, the VHS
+version, and each output's hash, size, dimensions, frame rate, and duration.
+The recorder renders to same-filesystem staging paths and promotes both media
+files only after the evidence, independent Lean, and media checks pass.
+Terminal transcripts and failed media, source, and records remain in
+`.autolean/demo-diagnostics/`. Dependency caches are excluded from retained
+workspaces. Keep the development environment rooted throughout a recording
+when the host runs concurrent Nix garbage collection:
+
+```bash
+nix develop --profile .autolean/demo-environment
+```
+
+Inspect both formats at the README display size. The command, review choices,
+accepted evidence, and final Lean result must be readable. Treat unexpected
+terminal output, clipped text, missing stages, credentials, and a timeline
+that does not start at the command as release failures.
 
 ## 3. Merge through the required gate
 
@@ -74,8 +93,7 @@ and update the branch before squash merging.
 
 The repository accepts squash merges, keeps a linear history, and deletes
 merged topic branches. Branch-rule enforcement of the `Required` check is
-owned by the [public launch gate](open-the-repository.md); merge only after
-inspecting the aggregate check where no rule enforces it.
+defined in [Maintain public distribution](open-the-repository.md).
 
 ## 4. Verify the immutable release
 
@@ -103,8 +121,8 @@ complete asset set, file sizes, and SHA-256 values from the manifest. A manual
 dispatch with the exact tag repeats the same verification.
 
 GitHub supplies release attestations for public repositories on the current
-plan. The verifier also runs `gh release verify` after the repository becomes
-public. Private repository attestations require GitHub Enterprise Cloud; the
+plan. The verifier also runs `gh release verify` for the public repository.
+Private repository attestations require GitHub Enterprise Cloud; the
 [GitHub availability contract](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
 defines that qualification boundary.
 
@@ -166,8 +184,8 @@ request; the resulting commit receives its own identity and evidence.
 The [environment reference](../reference/environment.md) defines the proof
 identity recorded in every accepted result.
 
-Repository visibility is governed by the separate
-[public launch gate](open-the-repository.md).
+Public distribution controls are defined in
+[Maintain public distribution](open-the-repository.md).
 
 ## 5. Point the Homebrew formula at the release
 
