@@ -1,26 +1,47 @@
 {
-  "backend": "claude_cli",
-  "export_manifest_sha256": "a008c3da903e18e5df767758ab3a9b864e7eb0da1dab3ad2fb9800749f2f0398",
-  "generated_module": "DistSqEqDistSqAddDistSqOfAngleEqPiDivTwo.lean",
-  "generated_sha256": "c586a7b6c06e4a3b2fe441a7edcc010ed59ffb9e54782e31428054a8da6b540d",
+  "backend": "codex_cli",
+  "export_manifest_sha256": "a7b53d251d44e002631010ea939c162c0f157c76b6c3a9c297ed2cc28b583057",
+  "generated_module": "PythagoreanOfRightAngle.lean",
+  "generated_sha256": "5d8844cb423ac270510abd017b862ead83e093f3d7c1abc3c961b1d304b86dac",
   "media": [
     {
+      "duration_seconds": 38.04,
+      "frame_rate": "25/1",
+      "height": 800,
       "name": "autolean-pythagorean.gif",
-      "sha256": "19f27432c3565f07728466298f569342dd1efcf6007c6ba30d68cfd1b4b388c2",
-      "size": 6119053
+      "sha256": "c4f1abb1013867f526f307ae3a32d86662de5ce51f5db0ef04616acf321b2614",
+      "size": 918248,
+      "width": 1280
     },
     {
+      "duration_seconds": 38.04,
+      "frame_rate": "25/1",
+      "height": 800,
       "name": "autolean-pythagorean.mp4",
-      "sha256": "7728c2f09b00dc05faa6a9cdeb765b66c43d04764831b2fac550b08fa4cc907f",
-      "size": 4174187
+      "sha256": "c7616f4b462c1013a7f72e3307ec9f25b867aa6d59a00deb4b76d1fc3072da83",
+      "size": 639149,
+      "width": 1280
     }
   ],
-  "model": "fable",
-  "playback_speed": 4.0,
-  "recorded_at": "2026-08-17T20:07:46.018872Z",
+  "model": "gpt-6-astra",
+  "playback_speed": 1.25,
+  "recorded_at": "2026-09-06T16:41:27.443568Z",
   "schema": "autolean.demo.v1",
-  "session": "20260817-195912-the-pythagorean-theorem-92947b4b",
-  "session_seconds": 248.489,
+  "session": "20260906-163300-the-pythagorean-theorem-b1c8ac99",
+  "session_seconds": 322.173,
   "statement": "the Pythagorean theorem",
-  "tape_sha256": "c65fa55494b02f78a612818ffddae0ea017e56c71ce9e68ff243bacfa312e3e8"
+  "tape_sha256": "7f47e460e5c8607a4fc6081e3034b618b1a459ede1c957a95e94218d7c0cb069",
+  "tape_sources": [
+    {
+      "name": "docs/demos/pythagorean.tape",
+      "sha256": "7f47e460e5c8607a4fc6081e3034b618b1a459ede1c957a95e94218d7c0cb069",
+      "size": 2492
+    },
+    {
+      "name": "docs/demos/style.tape",
+      "sha256": "496c4215b922fecaf3764209e931460534820cd0cbf1ed4594982af773711f96",
+      "size": 291
+    }
+  ],
+  "vhs_version": "0.11.0"
 }

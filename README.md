@@ -14,14 +14,14 @@
 
 AutoLean turns a mathematical goal into a reviewable research plan, a Lean 4
 declaration, and a kernel-checked proof. Every accepted result is an auditable
-derivation: the proof commit binds the source to the identity of the exact
-Lean, Mathlib, and dependency closure that checked it, to the proof hash, and
-to the transitive axiom report, so the theorem can be re-checked in the same
-pinned environment. The model, prompt layers, and search evidence behind it
-are recorded per attempt and travel with an export. Acceptance itself is
-earned — a source policy, an operating-system sandbox, elaboration by the
-pinned toolchain, and a declaration and axiom audit stand between a proposal
-and a commit.
+derivation. Its proof commit binds the source to the exact Lean, Mathlib, and
+dependency closure that checked it, to the proof hash, and to the transitive
+axiom report, so the theorem can be re-checked in the same pinned environment.
+Every attempt records the model and identities of its prompt and search
+context. Exports bind the selected source and session to a manifest.
+Acceptance requires a source policy, an
+operating-system sandbox, elaboration by the pinned toolchain, and a
+declaration and axiom audit stand between a proposal and a commit.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
@@ -44,19 +44,20 @@ faithfully expresses an informal claim.
 </p>
 
 The recording runs the front-page workflow live with a configured subscription
-backend: a reviewed mathematical plan, an isolated formalization compiled
+provider: a reviewed mathematical plan, an isolated formalization compiled
 before proof search, a bounded proof session, and a kernel-checked commit
 exported as a standalone Lean project. It adds one `--guide` fixing the
 geometric statement and the Mathlib lemma that closes it, so the run is
-reproducible; the VHS source holds the exact command. Playback runs at four
-times speed. The session behind it takes minutes, most of them spent in Lean.
-A second recording
+reproducible; the VHS source holds the exact command. The recording pauses
+during provider and compiler latency, then shows every review, acceptance,
+artifact, and independent Lean check at 1.25 times speed. A second recording
 [audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
 (arXiv:2506.18616v5) —
 [MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·
 [VHS source](docs/demos/ionescu-tulcea.tape) ·
-[run manifest](docs/demos/ionescu-tulcea.json). Each tape holds the live
-command; each manifest identifies the run.
+[run manifest](docs/demos/ionescu-tulcea.json). Both recordings use the
+versioned [VHS presentation](docs/demos/style.tape); the
+[release guide](docs/how-to/release.md) states how to re-record them.
 
 ## Start here
 
@@ -68,8 +69,9 @@ cd autolean
 nix develop
 
 autolean models
-claude                    # enter /login
-# or: codex login
+codex login
+# or: claude              # enter /login
+# or: grok login
 
 cd ..
 mkdir autolean-quickstart
@@ -87,10 +89,9 @@ The checkout's `workspace/` is the release fixture. `autolean init lean`
 creates a proof project whose generated source and proof commits belong to the
 user.
 
-The automatic default selects the strongest profile for an authenticated
-Claude or Codex subscription, or an Anthropic or OpenAI API key. Name a local
-model explicitly with `--model` or in `program.md`. See
-[Choose and switch models](docs/how-to/choose-a-model.md).
+The automatic default prefers GPT-6 Astra at `max` reasoning through Codex.
+[Choose and switch models](docs/how-to/choose-a-model.md) describes provider
+fallbacks, project settings, and local inference.
 
 Use `autolean workbench` for the interactive interface. The
 [first-proof tutorial](docs/tutorials/first-proof.md) walks each step and ends

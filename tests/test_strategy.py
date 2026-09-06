@@ -82,6 +82,14 @@ def test_plan_parser_rejects_unstructured_prose() -> None:
         parse_proof_plan("First, think about the theorem.")
 
 
+def test_plan_parser_accepts_json_after_a_prose_prefix() -> None:
+    payload = _plan_payload()
+    plan = parse_proof_plan(
+        "I'll inspect the workspace and then return the strategy.\n" + json.dumps(payload)
+    )
+    assert plan.objective.startswith("Prove")
+
+
 def test_generate_plan_repairs_one_contract_violation_with_the_model() -> None:
     calls: list[str] = []
     responses: list[PlanAttempt] = []

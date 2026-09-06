@@ -1,11 +1,11 @@
-"""Paper verification — extract claims from PDFs and formalize in Lean 4.
+"""Paper verification — extract claims from a paper and formalize them.
 
 Workflow:
-  1. Read a math paper (arXiv HTML, PDF, or abstract)
-  2. Extract theorem/lemma/definition environments (structured HTML or LLM)
-  3. LLM formalizes each claim as a Lean 4 theorem with sorry
-  4. Writes a .lean file into the workspace
-  5. The normal agent loop attempts proofs
+  1. Read the paper (arXiv HTML, PDF, or abstract).
+  2. Extract theorem, lemma, and definition environments.
+  3. Formalize each claim as a Lean 4 declaration ending in `sorry`.
+  4. Write the declarations into the project.
+  5. Prove them through the normal agent loop.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Any
 import httpx
 
 from autolean import ui
+from autolean.files import read_source
 from autolean.generated_code import (
     GeneratedCodeError,
     validate_generated_declarations,
@@ -33,10 +35,27 @@ from autolean.llm import (
     DocumentBackend,
     DocumentInput,
     GenerateFn,
+    InferenceLocation,
     LLMBackend,
+    LLMConfig,
     LLMError,
+    LLMResponse,
+    ModelCallReceipt,
+    endpoint_location,
+    inference_location,
+    validate_endpoint,
 )
 from autolean.ui import console
+from autolean.validation import (
+    require_instance,
+    require_int,
+    require_optional_instance,
+    require_optional_text,
+    require_ordered_int_tuple,
+    require_sha256,
+    require_text,
+    require_texts,
+)
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -51,6 +70,7 @@ class Claim:
     statement: str  # Natural language statement
     lean_name: str = ""  # Generated Lean identifier
     lean_code: str = ""  # Formalized Lean 4 code
+    formalization_receipt: ModelCallReceipt | None = None
     proof_sketch: str = ""  # Proof from the paper (if available)
     kind: str = "claim"  # theorem, lemma, definition, conjecture, or context
     input_ref: str = ""  # acquired source supplied for extraction
@@ -60,6 +80,43 @@ class Claim:
     profile_id: str = ""  # reviewed profile that owns the mapping
     profile_scope: str = ""  # background, core construction, or application
     elaborated: bool = False  # complete evidence source passed Lean acceptance
+
+    def __post_init__(self) -> None:
+        text_values = (
+            self.label,
+            self.statement,
+            self.lean_name,
+            self.lean_code,
+            self.proof_sketch,
+            self.kind,
+            self.input_ref,
+            self.input_sha256,
+            self.profile_id,
+            self.profile_scope,
+        )
+        if any(not isinstance(value, str) for value in text_values):
+            raise ValueError("paper claim fields must be text")
+        if not self.label.strip() or not self.statement.strip():
+            raise ValueError("paper claim label and statement must not be empty")
+        self.kind = normalize_claim_kind(self.kind)
+        if self.input_sha256 and re.fullmatch(r"[0-9a-f]{64}", self.input_sha256) is None:
+            raise ValueError("claim input SHA-256 must be lowercase hexadecimal")
+        for name, declarations in (
+            ("Lean declarations", self.lean_declarations),
+            ("evidence names", self.evidence_names),
+        ):
+            if (
+                not isinstance(declarations, tuple)
+                or any(not isinstance(declaration, str) or not declaration for declaration in declarations)
+                or len(set(declarations)) != len(declarations)
+            ):
+                raise ValueError(f"claim {name} must be unique non-empty names")
+        if not isinstance(self.elaborated, bool):
+            raise ValueError("claim elaboration verdict must be a boolean")
+        if self.formalization_receipt is not None and not isinstance(
+            self.formalization_receipt, ModelCallReceipt
+        ):
+            raise ValueError("claim formalization evidence must use ModelCallReceipt")
 
     @property
     def disposition(self) -> ClaimDisposition:
@@ -117,6 +174,72 @@ class PdfEngine(StrEnum):
     PADDLEOCR_VL = "paddleocr-vl"
 
 
+@dataclass(frozen=True)
+class DocumentExtractionReceipt:
+    """Content and placement evidence for one PDF-to-Markdown pass."""
+
+    engine: PdfEngine
+    location: InferenceLocation
+    document_sha256: str
+    document_bytes: int
+    document_pages: tuple[int, ...]
+    result_sha256: str
+    endpoint: str = ""
+
+    def __post_init__(self) -> None:
+        require_instance(self.engine, PdfEngine, "document extraction engine is invalid")
+        require_instance(
+            self.location,
+            InferenceLocation,
+            "document extraction location must be local or remote",
+        )
+        require_sha256(
+            self.document_sha256,
+            "document extraction document digest is invalid",
+        )
+        require_sha256(
+            self.result_sha256,
+            "document extraction result digest is invalid",
+        )
+        require_int(
+            self.document_bytes,
+            "document extraction byte count must be positive",
+            minimum=1,
+        )
+        require_ordered_int_tuple(
+            self.document_pages,
+            "document extraction pages must be ordered one-indexed values",
+            minimum=1,
+            allow_empty=False,
+        )
+        require_text(
+            self.endpoint,
+            "document extraction endpoint must be text",
+            allow_empty=True,
+        )
+        if self.engine is PdfEngine.HYBRID:
+            if self.endpoint or self.location is not InferenceLocation.LOCAL:
+                raise ValueError("hybrid document extraction runs locally")
+        else:
+            if not self.endpoint:
+                raise ValueError("PaddleOCR-VL extraction requires its endpoint")
+            validate_endpoint(self.endpoint)
+            if endpoint_location(self.endpoint) is not self.location:
+                raise ValueError("document extraction endpoint and location differ")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical JSON-compatible receipt."""
+        return {
+            "document_bytes": self.document_bytes,
+            "document_pages": list(self.document_pages),
+            "document_sha256": self.document_sha256,
+            "endpoint": self.endpoint,
+            "engine": self.engine.value,
+            "location": self.location.value,
+            "result_sha256": self.result_sha256,
+        }
+
+
 @dataclass
 class PaperDocument:
     """One acquired paper and the exact material available for extraction."""
@@ -127,7 +250,98 @@ class PaperDocument:
     input_ref: str = ""
     input_sha256: str = ""
     pdf_path: Path | None = None
+    pdf_pages: tuple[int, ...] | None = None
     extractor: str = ""
+    document_extraction_receipt: DocumentExtractionReceipt | None = None
+    extraction_receipt: ExtractionReceipt | None = None
+
+    def __post_init__(self) -> None:
+        require_texts(
+            (
+                self.title,
+                self.text,
+                self.input_ref,
+                self.input_sha256,
+                self.extractor,
+            ),
+            "paper document fields must be text",
+            allow_empty=True,
+        )
+        require_text(self.title, "paper document title must not be empty")
+        if not isinstance(self.claims, list) or any(not isinstance(claim, Claim) for claim in self.claims):
+            raise ValueError("paper document claims must contain Claim values")
+        require_sha256(
+            self.input_sha256,
+            "paper input SHA-256 must be lowercase hexadecimal",
+            allow_empty=True,
+        )
+        require_optional_instance(self.pdf_path, Path, "paper PDF must be a path")
+        require_optional_instance(
+            self.extraction_receipt,
+            ExtractionReceipt,
+            "paper extraction evidence must use ExtractionReceipt",
+        )
+        require_optional_instance(
+            self.document_extraction_receipt,
+            DocumentExtractionReceipt,
+            "PDF extraction evidence must use DocumentExtractionReceipt",
+        )
+        if self.pdf_pages is None:
+            return
+        if self.pdf_path is None:
+            raise ValueError("selected PDF pages require a PDF path")
+        require_ordered_int_tuple(
+            self.pdf_pages,
+            "PDF pages must be unique zero-indexed values in order",
+            minimum=0,
+            allow_empty=False,
+        )
+
+
+@dataclass(frozen=True)
+class ExtractionReceipt(ModelCallReceipt):
+    """Content and placement evidence for model-based claim extraction."""
+
+    document_sha256: str = ""
+    document_bytes: int = 0
+    document_pages: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.document_sha256, str) or (
+            self.document_sha256 and re.fullmatch(r"[0-9a-f]{64}", self.document_sha256) is None
+        ):
+            raise ValueError("document_sha256 must be 64 lowercase hexadecimal characters")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.document_bytes,)
+        ):
+            raise ValueError("extraction byte count must be a non-negative integer")
+        if bool(self.document_sha256) != (self.document_bytes > 0):
+            raise ValueError("document identity and byte count must be present together")
+        if (
+            not isinstance(self.document_pages, tuple)
+            or any(
+                isinstance(page, bool) or not isinstance(page, int) or page < 1
+                for page in self.document_pages
+            )
+            or tuple(sorted(set(self.document_pages))) != self.document_pages
+        ):
+            raise ValueError("document pages must be unique one-indexed values in order")
+        if self.document_pages and not self.document_sha256:
+            raise ValueError("document pages require an attached document")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical JSON-compatible receipt."""
+        record = super().as_dict()
+        record.update(
+            {
+                "document_bytes": self.document_bytes,
+                "document_pages": list(self.document_pages),
+                "document_sha256": self.document_sha256,
+            }
+        )
+        return record
 
 
 @dataclass(frozen=True)
@@ -139,6 +353,24 @@ class PaperArtifact:
     input_sha256: str
     text_sha256: str
     pdf_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.markdown_path, Path) or (
+            self.pdf_path is not None and not isinstance(self.pdf_path, Path)
+        ):
+            raise ValueError("paper artifact locations must be paths")
+        for name, digest in (
+            ("input", self.input_sha256),
+            ("text", self.text_sha256),
+        ):
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"paper artifact {name} digest is invalid")
+        if not isinstance(self.pdf_sha256, str) or (
+            self.pdf_sha256 and re.fullmatch(r"[0-9a-f]{64}", self.pdf_sha256) is None
+        ):
+            raise ValueError("paper artifact PDF digest is invalid")
+        if self.pdf_path is not None and not self.pdf_sha256:
+            raise ValueError("retained paper PDF requires its content digest")
 
 
 @dataclass(frozen=True)
@@ -152,6 +384,22 @@ class PreparedPaper:
     profile_id: str = ""
     model: str = ""
     backend: str = ""
+    title: str = ""
+    effort: str | None = None
+
+    def __post_init__(self) -> None:
+        paths = (self.lean_path, self.coverage_path, self.plan_path)
+        if any(not isinstance(path, Path) for path in paths):
+            raise ValueError("prepared paper locations must be paths")
+        if not isinstance(self.source, PaperArtifact):
+            raise ValueError("prepared paper source must use PaperArtifact")
+        if any(
+            not isinstance(value, str) for value in (self.profile_id, self.model, self.backend, self.title)
+        ):
+            raise ValueError("prepared paper identity must be text")
+        require_optional_text(self.effort, "prepared paper effort must not be empty")
+        if bool(self.model) != bool(self.backend):
+            raise ValueError("prepared paper model and backend belong together")
 
 
 def _sha256_file(path: Path) -> str:
@@ -180,10 +428,10 @@ def _paper_text(document: PaperDocument) -> str:
 def _write_exact_text(path: Path, content: str, *, label: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        if path.read_text(encoding="utf-8") != content:
+        if read_source(path) != content:
             raise OSError(f"{label} identity collision: {path}")
         return
-    with path.open("x", encoding="utf-8") as handle:
+    with path.open("x", encoding="utf-8", newline="") as handle:
         handle.write(content)
 
 
@@ -295,19 +543,17 @@ def fetch_arxiv(arxiv_id_or_url: str, output_dir: Path | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Structured HTML extraction (best quality — no LLM needed)
+# Structured HTML extraction
 # ---------------------------------------------------------------------------
 
 
 def extract_claims_from_html(arxiv_id: str, *, timeout: float = 60.0) -> list[Claim]:
-    """Extract theorem/lemma/definition environments directly from arXiv HTML.
+    """Extract theorem/lemma/definition environments from arXiv HTML.
 
-    arXiv's native HTML rendering (`arxiv.org/html/ID`) uses structured
-    classes like ltx_theorem_thm, ltx_theorem_lem, ltx_tag, ltx_proof.
-    We parse these directly — no LLM needed for finding claims.
-
-    Returns list of Claims with label, statement, kind, and proof_sketch.
-    Returns empty list if HTML is unavailable or has no theorem environments.
+    arXiv's native HTML rendering (`arxiv.org/html/ID`) marks claims with
+    structured classes (ltx_theorem_thm, ltx_theorem_lem, ltx_tag,
+    ltx_proof), so extraction is direct parsing. Returns an empty list
+    when the HTML is unavailable or holds no theorem environments.
     """
     # An unversioned identifier resolves to the latest revision, which is the
     # one `fetch_arxiv` hashes. Claims are read from that same revision, and
@@ -634,15 +880,50 @@ def read_pdf(
     paddleocr_url: str | None = None,
 ) -> str:
     """Extract page-addressable Markdown with the selected document engine."""
+    text, _, _ = _read_pdf(
+        path,
+        pages,
+        engine=engine,
+        paddleocr_url=paddleocr_url,
+    )
+    return text
+
+
+def _read_pdf(
+    path: Path,
+    pages: str | None,
+    *,
+    engine: PdfEngine,
+    paddleocr_url: str | None,
+) -> tuple[str, tuple[int, ...] | None, DocumentExtractionReceipt]:
+    """Extract Markdown and return the exact zero-indexed page selection."""
     pymupdf, pymupdf4llm = _load_pdf_stack()
 
     with pymupdf.open(str(path)) as document:
-        page_indices = _parse_page_selection(pages, len(document))
+        page_count = len(document)
+        page_indices = _parse_page_selection(pages, page_count)
+    selected_pages = tuple(
+        page + 1 for page in (page_indices if page_indices is not None else range(page_count))
+    )
 
     if engine is PdfEngine.PADDLEOCR_VL:
         if paddleocr_url is None:
             raise ValueError("paddleocr-vl requires --paddleocr-url")
-        return _read_pdf_with_paddleocr(path, page_indices, paddleocr_url)
+        text, document_sha256, document_bytes = _read_pdf_with_paddleocr(
+            path,
+            page_indices,
+            paddleocr_url,
+        )
+        receipt = DocumentExtractionReceipt(
+            engine=engine,
+            location=endpoint_location(paddleocr_url),
+            endpoint=paddleocr_url,
+            document_sha256=document_sha256,
+            document_bytes=document_bytes,
+            document_pages=selected_pages,
+            result_sha256=hashlib.sha256(text.encode()).hexdigest(),
+        )
+        return text, tuple(page_indices) if page_indices is not None else None, receipt
 
     result = _pymupdf_markdown(path, page_indices, pymupdf4llm)
 
@@ -652,18 +933,24 @@ def read_pdf(
             "  Check the OCR runtime or select relevant pages with --pages."
         )
 
-    return result
+    receipt = DocumentExtractionReceipt(
+        engine=engine,
+        location=InferenceLocation.LOCAL,
+        document_sha256=_sha256_file(path),
+        document_bytes=path.stat().st_size,
+        document_pages=selected_pages,
+        result_sha256=hashlib.sha256(result.encode()).hexdigest(),
+    )
+    return result, tuple(page_indices) if page_indices is not None else None, receipt
 
 
 def _read_pdf_with_paddleocr(
     path: Path,
     page_indices: list[int] | None,
     endpoint: str,
-) -> str:
+) -> tuple[str, str, int]:
     """Use a configured PaddleOCR-VL 1.6 service for document parsing."""
     import pymupdf
-
-    from autolean.llm import validate_endpoint
 
     validate_endpoint(endpoint)
     with pymupdf.open(str(path)) as document:
@@ -712,7 +999,11 @@ def _read_pdf_with_paddleocr(
         if text.strip():
             page_number = selected[position] + 1 if position < len(selected) else position + 1
             text_parts.append(f"--- Page {page_number} ---\n{text.strip()}")
-    return "\n\n".join(text_parts)
+    return (
+        "\n\n".join(text_parts),
+        hashlib.sha256(document_bytes).hexdigest(),
+        len(document_bytes),
+    )
 
 
 def _parse_page_selection(pages: str | None, page_count: int) -> list[int] | None:
@@ -776,17 +1067,16 @@ def extract_claims_via_llm(
     llm_generate: GenerateFn,
     *,
     max_text_chars: int = 12000,
+    on_response: Callable[[str, str, LLMResponse], None] | None = None,
 ) -> list[Claim]:
     """Extract claims from unstructured text using an LLM."""
     truncated = _smart_truncate(text, max_text_chars)
     prompt = EXTRACT_CLAIMS_PROMPT.format(text=truncated)
+    system = "You are a mathematical paper analyst. Extract all theorems precisely."
 
     try:
         with ui.status(f"Extracting claims from {len(truncated):,} chars..."):
-            response = llm_generate(
-                "You are a mathematical paper analyst. Extract all theorems precisely.",
-                prompt,
-            )
+            response = llm_generate(system, prompt)
     except LLMError as e:
         error_msg = str(e).lower()
         if "timeout" in error_msg or "timed out" in error_msg:
@@ -795,7 +1085,27 @@ def extract_claims_via_llm(
             console.print(f"[red]LLM error: {e}[/]")
         return []
 
+    if on_response is not None:
+        on_response(system, prompt, response)
     return _parse_claims_from_llm(response.text)
+
+
+def _document_input(document: PaperDocument) -> DocumentInput:
+    """Build the exact PDF payload allowed by the selected pages."""
+    assert document.pdf_path is not None
+    if document.pdf_pages is None:
+        return DocumentInput.from_path(document.pdf_path)
+
+    import pymupdf
+
+    with pymupdf.open(str(document.pdf_path)) as pdf:
+        pages = list(document.pdf_pages)
+        if not pages or pages[0] < 0 or pages[-1] >= len(pdf):
+            raise ValueError("document page selection is outside the cached PDF")
+        pdf.select(pages)
+        data = pdf.tobytes(garbage=4, deflate=True)
+    filename = f"{document.pdf_path.stem}-selected.pdf"
+    return DocumentInput(filename, "application/pdf", data)
 
 
 def extract_document_claims(
@@ -806,36 +1116,70 @@ def extract_document_claims(
 ) -> list[Claim]:
     """Extract claims with Markdown and an optional native PDF attachment."""
     generate: GenerateFn = backend.generate
+    attachment: DocumentInput | None = None
     if (
         document.pdf_path is not None
         and backend.capabilities.document_inputs
         and isinstance(backend, DocumentBackend)
     ):
-        attachment = DocumentInput.from_path(document.pdf_path)
+        try:
+            attachment = _document_input(document)
+        except (ImportError, RuntimeError, ValueError) as error:
+            console.print(f"  [yellow]Using bounded Markdown; native PDF input is unavailable: {error}[/]")
 
-        def generate_with_pdf(
-            system: str,
-            user: str,
-            *,
-            temperature: float | None = None,
-            stop: list[str] | None = None,
-        ) -> Any:
-            return backend.generate_with_documents(
-                system,
-                user,
-                (attachment,),
-                temperature=temperature,
-                stop=stop,
+        if attachment is not None:
+
+            def generate_with_pdf(
+                system: str,
+                user: str,
+                *,
+                temperature: float | None = None,
+                stop: list[str] | None = None,
+            ) -> LLMResponse:
+                assert attachment is not None
+                return backend.generate_with_documents(
+                    system,
+                    user,
+                    (attachment,),
+                    temperature=temperature,
+                    stop=stop,
+                )
+
+            generate = generate_with_pdf
+            pages = (
+                "all pages" if document.pdf_pages is None else f"{len(document.pdf_pages)} selected page(s)"
+            )
+            console.print(
+                f"  Attaching native PDF ({pages}, "
+                f"{attachment.size_bytes / (1024 * 1024):.1f} MiB) to the model request..."
             )
 
-        generate = generate_with_pdf
-        console.print(
-            f"  Attaching native PDF ({len(attachment.data) / (1024 * 1024):.1f} MiB) to the model request..."
+    def record_response(system: str, user: str, response: LLMResponse) -> None:
+        config: LLMConfig = backend.config
+        request = f"{system}\0{user}".encode()
+        document.extraction_receipt = ExtractionReceipt(
+            model=response.model,
+            backend=config.backend,
+            location=inference_location(config),
+            request_sha256=hashlib.sha256(request).hexdigest(),
+            response_sha256=hashlib.sha256(response.text.encode()).hexdigest(),
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            duration_seconds=response.duration_seconds,
+            document_sha256=attachment.sha256 if attachment is not None else "",
+            document_bytes=attachment.size_bytes if attachment is not None else 0,
+            document_pages=(
+                tuple(page + 1 for page in document.pdf_pages)
+                if attachment is not None and document.pdf_pages is not None
+                else ()
+            ),
         )
+
     return extract_claims_via_llm(
         document.text,
         generate,
         max_text_chars=max_text_chars,
+        on_response=record_response,
     )
 
 
@@ -881,59 +1225,53 @@ def _smart_truncate(text: str, max_chars: int) -> str:
 
 
 def _parse_claims_from_llm(raw: str) -> list[Claim]:
-    """Parse claims from LLM response."""
-    claims = []
-
-    # Pattern: N. [Type X.Y]: statement
-    for m in re.finditer(
-        r"(\d+)\.\s*\[([^\]]+)\]\s*:?\s*(.*?)(?=\n\d+\.\s*\[|$)",
+    """Parse the supported ranked-claim notations in precedence order."""
+    bracketed = _claims_from_pattern(
         raw,
+        r"(\d+)\.\s*\[([^\]]+)\]\s*:?\s*(.*?)(?=\n\d+\.\s*\[|$)",
         re.DOTALL,
-    ):
-        label = m.group(2).strip()
-        statement = m.group(3).strip()
-        lean_name = _to_lean_name(label)
-        kind = normalize_claim_kind(label.split()[0] if label else "claim")
-        if statement:
-            claims.append(
-                Claim(
-                    label=label,
-                    statement=statement[:500],
-                    lean_name=lean_name,
-                    kind=kind,
-                )
-            )
-
-    if claims:
-        return claims
-
-    # Fallback: N. Label: statement
-    for m in re.finditer(
+    )
+    if bracketed:
+        return bracketed
+    labeled = _claims_from_pattern(
+        raw,
         r"(\d+)\.\s*"
         r"((?:Theorem|Lemma|Proposition|Corollary|Claim|Definition|Conjecture)"
         r"(?:\s*[\d.()]+)?)"
         r":?\s*(.*?)(?=\n\d+\.\s*(?:Theorem|Lemma|Prop|Cor|Claim|Def|Conj)|$)",
-        raw,
         re.DOTALL | re.IGNORECASE,
-    ):
-        label = m.group(2).strip()
-        statement = m.group(3).strip()
-        lean_name = _to_lean_name(label)
-        kind = normalize_claim_kind(label.split()[0] if label else "claim")
-        if statement:
-            claims.append(
-                Claim(
-                    label=label,
-                    statement=statement[:500],
-                    lean_name=lean_name,
-                    kind=kind,
-                )
-            )
+    )
+    return labeled or _claims_from_numbered_lines(raw)
 
-    if claims:
-        return claims
 
-    # Last resort: numbered lines
+def _claims_from_pattern(raw: str, pattern: str, flags: re.RegexFlag) -> list[Claim]:
+    """Decode claims whose label and statement occupy regex groups two and three."""
+    claims: list[Claim] = []
+    for match in re.finditer(pattern, raw, flags):
+        claim = _parsed_claim(match.group(2), match.group(3), default_kind="claim")
+        if claim is not None:
+            claims.append(claim)
+    return claims
+
+
+def _parsed_claim(label: str, statement: str, *, default_kind: str) -> Claim | None:
+    """Build one bounded claim from parsed model text."""
+    label = label.strip()
+    statement = statement.strip()
+    if not statement:
+        return None
+    kind = normalize_claim_kind(label.split()[0] if label else default_kind)
+    return Claim(
+        label=label,
+        statement=statement[:500],
+        lean_name=_to_lean_name(label),
+        kind=kind,
+    )
+
+
+def _claims_from_numbered_lines(raw: str) -> list[Claim]:
+    """Decode the permissive numbered-list claim notation."""
+    claims: list[Claim] = []
     entries = re.split(r"\n(\d+)\.\s+", "\n" + raw.strip())
     i = 1
     while i + 1 < len(entries):
@@ -950,16 +1288,9 @@ def _parse_claims_from_llm(raw: str) -> list[Claim]:
             label = f"Claim {num}"
             statement = content
 
-        if statement:
-            inferred_kind = normalize_claim_kind(label.split()[0] if label else "context")
-            claims.append(
-                Claim(
-                    label=label,
-                    statement=statement[:500],
-                    lean_name=_to_lean_name(label),
-                    kind=inferred_kind,
-                )
-            )
+        claim = _parsed_claim(label, statement, default_kind="context")
+        if claim is not None:
+            claims.append(claim)
         i += 2
 
     return claims
@@ -986,7 +1317,6 @@ def read_paper(
     if arxiv_id:
         paper_title = f"arXiv:{arxiv_id}"
 
-        # Strategy 1: Structured HTML extraction (no LLM needed)
         console.print("[bold]Strategy 1:[/] arXiv HTML structured extraction")
         claims = extract_claims_from_html(arxiv_id)
         if claims:
@@ -1007,9 +1337,9 @@ def read_paper(
         console.print("[bold]Strategy 2:[/] PDF download + document extraction")
         try:
             pdf_path = fetch_arxiv(source)
-            text = read_pdf(
+            text, pdf_pages, extraction_receipt = _read_pdf(
                 pdf_path,
-                pages=pages,
+                pages,
                 engine=pdf_engine,
                 paddleocr_url=paddleocr_url,
             )
@@ -1027,7 +1357,9 @@ def read_paper(
                     input_ref=input_ref,
                     input_sha256=pdf_sha256,
                     pdf_path=pdf_path,
+                    pdf_pages=pdf_pages,
                     extractor=pdf_engine.value,
+                    document_extraction_receipt=extraction_receipt,
                 )
         except (OSError, ValueError, RuntimeError, ImportError, httpx.HTTPError) as e:
             console.print(f"  [yellow]PDF failed: {e}[/]")
@@ -1047,9 +1379,9 @@ def read_paper(
 
     source_path = Path(source)
     if source_path.exists() and source_path.suffix == ".pdf":
-        text = read_pdf(
+        text, pdf_pages, extraction_receipt = _read_pdf(
             source_path,
-            pages=pages,
+            pages,
             engine=pdf_engine,
             paddleocr_url=paddleocr_url,
         )
@@ -1066,7 +1398,9 @@ def read_paper(
             input_ref=input_ref,
             input_sha256=source_sha256,
             pdf_path=source_path.resolve(),
+            pdf_pages=pdf_pages,
             extractor=pdf_engine.value,
+            document_extraction_receipt=extraction_receipt,
         )
 
     console.print(f"[red]Cannot resolve source: {source}[/]")
@@ -1110,14 +1444,13 @@ def _fetch_arxiv_abstract(arxiv_id: str) -> str | None:
 
 def formalize_claim(
     claim: Claim,
-    llm_generate: GenerateFn,
+    llm: LLMBackend,
     system: str = "You are a Lean 4 formalization expert using Mathlib4.",
 ) -> Claim:
     """Formalize a single claim into Lean 4 code."""
     if claim.disposition is not ClaimDisposition.PROVE:
         return claim
 
-    # Include proof sketch if available — helps the LLM formalize
     proof_hint = ""
     if claim.proof_sketch:
         proof_hint = f"\nProof sketch from paper: {claim.proof_sketch[:300]}"
@@ -1129,7 +1462,14 @@ def formalize_claim(
     )
 
     try:
-        response = llm_generate(system, prompt)
+        response = llm.generate(system, prompt)
+        claim.formalization_receipt = ModelCallReceipt.from_response(
+            llm.config,
+            response,
+            location=inference_location(llm.config),
+            system=system,
+            user=prompt,
+        )
         code = re.sub(r"^```(?:lean4?|)\s*\n?", "", response.text.strip())
         code = re.sub(r"\n?```\s*$", "", code)
         code = "\n".join(

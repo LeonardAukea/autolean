@@ -10,24 +10,22 @@ import httpx
 from autolean.llm._http import (
     CONNECT_TIMEOUT,
     HttpBackend,
-    as_int,
     as_list,
     as_object,
     as_text,
 )
-from autolean.llm.base import Capabilities, LLMError, LLMResponse
+from autolean.llm.base import Capabilities, LLMError, LLMResponse, token_count
+from autolean.llm.capabilities import OLLAMA_CAPABILITIES
 from autolean.ui import console
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-
-_CAPABILITIES = Capabilities(temperature=True)
 
 
 @dataclass
 class OllamaClient(HttpBackend):
     """Synchronous Ollama client."""
 
-    capabilities: Capabilities = _CAPABILITIES
+    capabilities: Capabilities = OLLAMA_CAPABILITIES
     default_base_url: str = DEFAULT_OLLAMA_URL
 
     def ping(self) -> bool:
@@ -89,8 +87,8 @@ class OllamaClient(HttpBackend):
         return LLMResponse(
             text=text,
             model=model,
-            input_tokens=as_int(data.get("prompt_eval_count")),
-            output_tokens=as_int(data.get("eval_count")),
+            input_tokens=token_count(data.get("prompt_eval_count")),
+            output_tokens=token_count(data.get("eval_count")),
             duration_seconds=elapsed,
         )
 

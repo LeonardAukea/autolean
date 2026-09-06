@@ -3,27 +3,35 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import math
 import os
 import platform
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import textwrap
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+from autolean.files import read_source
+from autolean.process import ProcessOutputError, run_process
 from autolean.provenance import (
     EnvironmentFingerprint,
     ProofEnvironment,
     ProofEnvironmentError,
     capture_proof_environment,
+    compiled_module_paths,
     environment_fingerprint,
 )
-from autolean.scanner import _mask_lean_noncode, count_sorries
+from autolean.scanner import _mask_lean_noncode, count_sorries, lean_source_files
+
+log = logging.getLogger("autolean")
 
 # ---------------------------------------------------------------------------
 # Types
@@ -32,7 +40,7 @@ from autolean.scanner import _mask_lean_noncode, count_sorries
 Severity = Literal["error", "warning", "info"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Diagnostic:
     """A single Lean compiler diagnostic."""
 
@@ -42,16 +50,29 @@ class Diagnostic:
     severity: Severity
     message: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.file, str) or not self.file:
+            raise ValueError("diagnostic file must not be empty")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (self.line, self.col)
+        ):
+            raise ValueError("diagnostic positions must be non-negative integers")
+        if self.severity not in {"error", "warning", "info"}:
+            raise ValueError("diagnostic severity must be error, warning, or info")
+        if not isinstance(self.message, str) or not self.message.strip():
+            raise ValueError("diagnostic message must not be empty")
+
     def __str__(self) -> str:
         return f"{self.file}:{self.line}:{self.col}: {self.severity}: {self.message}"
 
 
-@dataclass
+@dataclass(frozen=True)
 class BuildResult:
-    """Result of a `lake build` invocation."""
+    """Result of Lean compilation and declaration audits."""
 
     success: bool
-    diagnostics: list[Diagnostic] = field(default_factory=list)
+    diagnostics: tuple[Diagnostic, ...] = ()
     stdout: str = ""
     stderr: str = ""
     duration_seconds: float = 0.0
@@ -63,13 +84,42 @@ class BuildResult:
     #: report says what a proof rests on; this says what it proves.
     statement_sha256: str = ""
 
-    @property
-    def errors(self) -> list[Diagnostic]:
-        return [d for d in self.diagnostics if d.severity == "error"]
+    def __post_init__(self) -> None:
+        if not isinstance(self.success, bool) or not isinstance(self.timed_out, bool):
+            raise ValueError("build verdicts must be booleans")
+        if self.success and self.timed_out:
+            raise ValueError("a timed-out build cannot be successful")
+        if isinstance(self.diagnostics, list):
+            object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        if not isinstance(self.diagnostics, tuple) or not all(
+            isinstance(item, Diagnostic) for item in self.diagnostics
+        ):
+            raise ValueError("build diagnostics must contain Diagnostic values")
+        if any(not isinstance(value, str) for value in (self.stdout, self.stderr)):
+            raise ValueError("build output must be text")
+        if (
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(self.duration_seconds)
+            or self.duration_seconds < 0
+        ):
+            raise ValueError("build duration must be finite and non-negative")
+        if self.axioms is not None and (
+            not isinstance(self.axioms, tuple)
+            or any(not isinstance(axiom, str) or not axiom for axiom in self.axioms)
+            or len(set(self.axioms)) != len(self.axioms)
+        ):
+            raise ValueError("build axioms must be a tuple of unique names")
+        if self.statement_sha256 and re.fullmatch(r"[0-9a-f]{64}", self.statement_sha256) is None:
+            raise ValueError("statement_sha256 must be 64 lowercase hexadecimal characters")
 
     @property
-    def warnings(self) -> list[Diagnostic]:
-        return [d for d in self.diagnostics if d.severity == "warning"]
+    def errors(self) -> tuple[Diagnostic, ...]:
+        return tuple(d for d in self.diagnostics if d.severity == "error")
+
+    @property
+    def warnings(self) -> tuple[Diagnostic, ...]:
+        return tuple(d for d in self.diagnostics if d.severity == "warning")
 
 
 class LeanSandboxError(RuntimeError):
@@ -123,14 +173,12 @@ def _parse_diagnostics(output: str) -> list[Diagnostic]:
     3. Multi-line continuations (indented or non-matching lines)
     """
     diags: list[Diagnostic] = []
-    # Lean sometimes emits multi-line diagnostics; collect them
     lines = output.split("\n")
     i = 0
     while i < len(lines):
         m = _DIAG_RE.match(lines[i])
         if m:
             file, line_s, col_s, sev, msg = m.groups()
-            # Collect continuation lines (indented or non-matching)
             msg_lines = [msg]
             j = i + 1
             while j < len(lines) and not _DIAG_RE.match(lines[j]):
@@ -287,19 +335,21 @@ def _apply_statement_policy(
     if not result.success or expected_statement is None:
         return result
     if result.statement_sha256 != expected_statement:
-        result.success = False
-        result.diagnostics.append(
-            Diagnostic(
-                file="<audit>",
-                line=0,
-                col=0,
-                severity="error",
-                message=(
-                    f"{declaration} no longer states what it was asked to prove "
-                    f"(statement {result.statement_sha256[:12] or 'unreported'}, "
-                    f"expected {expected_statement[:12]})"
-                ),
-            )
+        diagnostic = Diagnostic(
+            file="<audit>",
+            line=0,
+            col=0,
+            severity="error",
+            message=(
+                f"{declaration} no longer states what it was asked to prove "
+                f"(statement {result.statement_sha256[:12] or 'unreported'}, "
+                f"expected {expected_statement[:12]})"
+            ),
+        )
+        result = replace(
+            result,
+            success=False,
+            diagnostics=(*result.diagnostics, diagnostic),
         )
     return result
 
@@ -314,28 +364,31 @@ def _apply_axiom_policy(
         return result
     axioms = result.axioms
     if axioms is None:
-        result.success = False
-        result.diagnostics.append(
-            Diagnostic(
-                file="<axiom-audit>",
-                line=0,
-                col=0,
-                severity="error",
-                message=f"Lean returned no axiom report for {declaration}",
-            )
+        diagnostic = Diagnostic(
+            file="<axiom-audit>",
+            line=0,
+            col=0,
+            severity="error",
+            message=f"Lean returned no axiom report for {declaration}",
         )
-        return result
+        return replace(
+            result,
+            success=False,
+            diagnostics=(*result.diagnostics, diagnostic),
+        )
     unexpected = sorted(set(axioms) - allowed_axioms)
     if unexpected:
-        result.success = False
-        result.diagnostics.append(
-            Diagnostic(
-                file="<axiom-audit>",
-                line=0,
-                col=0,
-                severity="error",
-                message=(f"{declaration} depends on disallowed axioms: " + ", ".join(unexpected)),
-            )
+        diagnostic = Diagnostic(
+            file="<axiom-audit>",
+            line=0,
+            col=0,
+            severity="error",
+            message=(f"{declaration} depends on disallowed axioms: " + ", ".join(unexpected)),
+        )
+        result = replace(
+            result,
+            success=False,
+            diagnostics=(*result.diagnostics, diagnostic),
         )
     return result
 
@@ -391,11 +444,15 @@ def _resolve_lean(root: Path) -> Path:
                 text=True,
                 timeout=15,
             )
-            candidate = Path(result.stdout.strip())
-            if result.returncode == 0 and candidate.is_file():
-                return candidate.resolve()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        except (OSError, subprocess.SubprocessError) as error:
+            raise LeanSandboxError(f"could not resolve the project's Lean toolchain: {error}") from error
+        candidate = Path(result.stdout.strip())
+        if result.returncode != 0 or not candidate.is_absolute() or not candidate.is_file():
+            detail = (result.stderr or result.stdout).strip()
+            raise LeanSandboxError(
+                f"could not resolve the project's Lean toolchain: {detail or 'elan returned no Lean binary'}"
+            )
+        return candidate.resolve()
     lean = shutil.which("lean")
     if lean is None:
         raise LeanSandboxError("secure Lean checks require Lean on PATH")
@@ -430,11 +487,9 @@ def _run_lean_check(
     """Run one Lean check and normalize process and diagnostic failures."""
     t0 = time.monotonic()
     try:
-        result = subprocess.run(
+        result = run_process(
             cmd,
             cwd=cwd,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             env=env,
         )
@@ -445,7 +500,7 @@ def _run_lean_check(
             duration_seconds=timeout,
             timed_out=True,
         )
-    except OSError as e:
+    except (OSError, ProcessOutputError) as e:
         return BuildResult(
             success=False,
             stderr=f"Could not start Lean check: {e}",
@@ -458,14 +513,14 @@ def _run_lean_check(
     has_errors = any(d.severity == "error" for d in diagnostics)
     return BuildResult(
         success=result.returncode == 0 and not has_errors,
-        diagnostics=diagnostics,
+        diagnostics=tuple(diagnostics),
         stdout=result.stdout,
         stderr=result.stderr,
         duration_seconds=duration,
     )
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
+def _atomic_write_text(path: Path, content: str, *, expected_content: str | None = None) -> None:
     """Replace one text file atomically within its parent directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -478,10 +533,14 @@ def _atomic_write_text(path: Path, content: str) -> None:
             suffix=".tmp",
             delete=False,
         ) as handle:
+            temporary = Path(handle.name)
             handle.write(content)
+            if path.exists():
+                os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
             handle.flush()
             os.fsync(handle.fileno())
-            temporary = Path(handle.name)
+        if expected_content is not None and read_source(path) != expected_content:
+            raise LeanSourceChangedError(f"source changed during validation: {path}")
         temporary.replace(path)
     finally:
         if temporary is not None:
@@ -501,10 +560,10 @@ def _atomic_create_text(path: Path, content: str) -> None:
             suffix=".tmp",
             delete=False,
         ) as handle:
+            temporary = Path(handle.name)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-            temporary = Path(handle.name)
         os.link(temporary, path)
     finally:
         if temporary is not None:
@@ -548,41 +607,7 @@ class LeanProject:
         if target:
             cmd.append(target)
 
-        t0 = time.monotonic()
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            return BuildResult(
-                success=False,
-                stdout="",
-                stderr=f"Build timed out after {timeout}s",
-                duration_seconds=timeout,
-                timed_out=True,
-            )
-        except OSError as e:
-            return BuildResult(
-                success=False,
-                stderr=f"Could not start Lean build: {e}",
-                duration_seconds=time.monotonic() - t0,
-            )
-
-        duration = time.monotonic() - t0
-        combined = result.stdout + "\n" + result.stderr
-        diags = _parse_diagnostics(combined)
-
-        return BuildResult(
-            success=result.returncode == 0,
-            diagnostics=diags,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration_seconds=duration,
-        )
+        return _run_lean_check(cmd, cwd=self.root, timeout=timeout)
 
     def check_file(
         self,
@@ -601,7 +626,6 @@ class LeanProject:
         module = str(rel).replace("/", ".").removesuffix(".lean")
         result = self.build(target=module, timeout=timeout)
 
-        # Fallback: if lake build doesn't know the module, use lake env lean
         if not result.success and "unknown target" in (result.stderr or ""):
             return self._check_file_via_env(rel, timeout)
 
@@ -703,9 +727,12 @@ class LeanProject:
                 timeout=timeout,
                 env=audit_env,
             )
-            audit.duration_seconds += candidate.duration_seconds
-            audit.stdout = f"{candidate.stdout}\n{audit.stdout}"
-            audit.stderr = f"{candidate.stderr}\n{audit.stderr}"
+            audit = replace(
+                audit,
+                duration_seconds=audit.duration_seconds + candidate.duration_seconds,
+                stdout=f"{candidate.stdout}\n{audit.stdout}",
+                stderr=f"{candidate.stderr}\n{audit.stderr}",
+            )
             if not audit.success:
                 return audit
             report = _parse_declaration_audit(
@@ -713,7 +740,11 @@ class LeanProject:
                 nonce,
             )
             if report is not None:
-                audit.axioms, audit.statement_sha256 = report
+                audit = replace(
+                    audit,
+                    axioms=report[0],
+                    statement_sha256=report[1],
+                )
             return audit
 
     def validate_candidate(
@@ -811,13 +842,7 @@ class LeanProject:
         environment identity check.
         """
         if self._module_paths is None:
-            self._module_paths = tuple(
-                sorted(
-                    path.resolve()
-                    for path in self.root.rglob("lib/lean")
-                    if path.is_dir() and ".lake" in path.parts
-                )
-            )
+            self._module_paths = tuple(compiled_module_paths(self.root))
         return list(self._module_paths)
 
     def _capture_environment(self, lean: Path) -> tuple[ProofEnvironment, EnvironmentFingerprint]:
@@ -1021,23 +1046,12 @@ class LeanProject:
     # -- File operations ----------------------------------------------------
 
     def lean_files(self) -> list[Path]:
-        """Find all .lean files in the project (excluding .lake/)."""
-        files = []
-        for p in self.root.rglob("*.lean"):
-            # Skip lake build cache, lakefile, and nested workspace copies
-            parts = p.relative_to(self.root).parts
-            if ".lake" in parts or "lake-packages" in parts or "build" in parts:
-                continue
-            if "workspace" in parts:
-                continue
-            if p.name == "lakefile.lean":
-                continue
-            files.append(p)
-        return sorted(files)
+        """Return the same source scope used for proof-target discovery."""
+        return lean_source_files(self.root)
 
     def read_file(self, path: Path) -> str:
         """Read a Lean file."""
-        return path.read_text(encoding="utf-8")
+        return read_source(path)
 
     def write_file(
         self,
@@ -1056,11 +1070,7 @@ class LeanProject:
             except FileExistsError as e:
                 raise LeanSourceChangedError(f"source appeared during validation: {path}") from e
             return
-        if expected_content is not None:
-            current = path.read_text(encoding="utf-8")
-            if current != expected_content:
-                raise LeanSourceChangedError(f"source changed during validation: {path}")
-        _atomic_write_text(path, content)
+        _atomic_write_text(path, content, expected_content=expected_content)
 
     # -- Goal extraction (hole-punch method) --------------------------------
 
@@ -1081,7 +1091,6 @@ class LeanProject:
         if not sorry_match:
             return None
 
-        # Punch: replace sorry with ?_ (typed hole)
         punched_line = target_line[: sorry_match.start()] + "?_" + target_line[sorry_match.end() :]
         lines[line - 1] = punched_line
         punched_content = "\n".join(lines)
@@ -1097,49 +1106,6 @@ class LeanProject:
 
     # -- Deterministic tactic search ------------------------------------------
 
-    def try_standard_tactics(
-        self,
-        lean_file: Path,
-        line: int,
-        col: int,
-        *,
-        timeout_per_tactic: int = 30,
-        include_compound: bool = True,
-    ) -> str | None:
-        """Try standard closing tactics at a sorry position.
-
-        Returns the first tactic that makes the file build cleanly with no
-        sorry remaining at the target line. Returns None if nothing works.
-        """
-        original = self.read_file(lean_file)
-        original_sorries = count_sorries(original)
-
-        tactics_to_try = list(STANDARD_TACTICS)
-        if include_compound:
-            tactics_to_try.extend(COMPOUND_TACTICS)
-
-        for tactic in tactics_to_try:
-            try:
-                new_content = self.replace_sorry_at(
-                    lean_file,
-                    line,
-                    tactic,
-                    original_content=original,
-                    col=col,
-                )
-                result = self.validate_candidate(
-                    lean_file,
-                    new_content,
-                    timeout=timeout_per_tactic,
-                )
-
-                if result.success and count_sorries(new_content) == original_sorries - 1:
-                    return tactic
-            except (ValueError, OSError):
-                pass
-
-        return None
-
     def try_tactics_fast(
         self,
         lean_file: Path,
@@ -1149,33 +1115,29 @@ class LeanProject:
         *,
         timeout_per_tactic: int = 30,
     ) -> str | None:
-        """Try a specific list of tactics at a sorry position.
-
-        Like try_standard_tactics but with a caller-provided list.
-        Returns the first working tactic or None.
-        """
+        """Return the first closing tactic; a timeout ends the search pass."""
         original = self.read_file(lean_file)
         original_sorries = count_sorries(original)
 
         for tactic in tactics:
-            try:
-                new_content = self.replace_sorry_at(
-                    lean_file,
-                    line,
-                    tactic,
-                    original_content=original,
-                    col=col,
-                )
-                result = self.validate_candidate(
-                    lean_file,
-                    new_content,
-                    timeout=timeout_per_tactic,
-                )
+            new_content = self.replace_sorry_at(
+                lean_file,
+                line,
+                tactic,
+                original_content=original,
+                col=col,
+            )
+            result = self.validate_candidate(
+                lean_file,
+                new_content,
+                timeout=timeout_per_tactic,
+            )
 
-                if result.success and count_sorries(new_content) == original_sorries - 1:
-                    return tactic
-            except (ValueError, OSError):
-                pass
+            if result.success and count_sorries(new_content) == original_sorries - 1:
+                return tactic
+            if result.timed_out:
+                log.info("Tactic search stopped after a %ss timeout", timeout_per_tactic)
+                return None
 
         return None
 
@@ -1190,11 +1152,7 @@ class LeanProject:
         *,
         col: int | None = None,
     ) -> str:
-        """
-        Replace a `sorry` at the given line with the replacement tactic block.
-
-        Returns the new file content.
-        """
+        """Return the file content with one `sorry` replaced by the block."""
         content = self.read_file(path) if original_content is None else original_content
         lines = content.split("\n")
         masked_lines = _mask_lean_noncode(content).split("\n")
@@ -1225,14 +1183,12 @@ class LeanProject:
             if not rline.strip():
                 indented.append("")
             elif i == 0:
-                # First line: placed exactly where sorry was
                 indented.append(rline.strip())
             else:
                 indented.append(indent + rline.rstrip())
 
         replacement_block = "\n".join(indented)
 
-        # Replace sorry with the block
         new_line = target_line[: sorry_match.start()] + replacement_block + target_line[sorry_match.end() :]
         lines[line - 1] = new_line
 

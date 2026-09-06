@@ -6,12 +6,14 @@ import logging
 import re
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from autolean import ui
@@ -20,11 +22,6 @@ from autolean.error_classifier import (
     ErrorCategory,
     classify_error,
     retry_hint_for,
-)
-from autolean.finetune import (
-    FINETUNE_THRESHOLD,
-    check_finetune_readiness,
-    trigger_local_finetune,
 )
 from autolean.generated_code import (
     GeneratedCodeError,
@@ -38,13 +35,22 @@ from autolean.lean_interface import (
     Diagnostic,
     LeanProject,
 )
+from autolean.library import (
+    GeneratedDefinition,
+    MissingDefinition,
+    detect_missing_definitions,
+    fill_gap,
+)
 from autolean.llm import (
     LLMAuthenticationError,
     LLMBackend,
     LLMError,
     LLMRateLimitError,
+    LLMResponse,
     LLMTransientError,
     create_llm_client,
+    inference_location,
+    provider_name,
 )
 from autolean.program import parse_program
 from autolean.prompts import LEAN_TACTICS, SORRY_FILL_USER, SYSTEM_PROMPT
@@ -52,6 +58,7 @@ from autolean.proof_loop import (
     EscalationDecision,
     EscalationRouter,
     ModelTransition,
+    ProofContext,
     ProofContextBuilder,
     ProofContextError,
 )
@@ -61,11 +68,22 @@ from autolean.scanner import (
     count_sorries,
     difficulty_score,
     prioritize_targets,
+    scan_file,
     scan_project,
 )
-from autolean.structure import LeanStructureProvider
-from autolean.tracker import FAILURE_OUTCOMES, ExperimentRecord, ExperimentTracker, GitError, Outcome
+from autolean.structure import LeanStructureProvider, StructuralContext
+from autolean.tracker import (
+    FAILURE_OUTCOMES,
+    ExperimentRecord,
+    ExperimentTracker,
+    GitError,
+    LoggingHandle,
+    Outcome,
+    rejected_proof_path,
+    setup_logging,
+)
 from autolean.ui import GLYPH_FAIL, GLYPH_OK, GLYPH_SKIP, console
+from autolean.validation import require_instance, require_int, require_number, require_text
 
 log = logging.getLogger("autolean")
 
@@ -87,7 +105,11 @@ def _has_redundant_tail(build: BuildResult) -> bool:
     return len(errors) == 1 and "No goals to be solved" in errors[0].message
 
 
-def _locate_in_candidate(errors: list[Diagnostic], proof: str, first_line: int) -> str:
+def _locate_in_candidate(
+    errors: Sequence[Diagnostic],
+    proof: str,
+    first_line: int,
+) -> str:
     """Describe rejections by their position inside the candidate.
 
     Lean reports a line in the file; the model only ever saw the block it
@@ -138,6 +160,12 @@ class AgentRunResult:
     successful: bool
     message: str = ""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.successful, bool):
+            raise ValueError("agent result verdict must be a boolean")
+        if not isinstance(self.message, str):
+            raise ValueError("agent result message must be text")
+
 
 # ---------------------------------------------------------------------------
 # Proof cleaner
@@ -145,7 +173,7 @@ class AgentRunResult:
 
 
 _WRAPPED_PROOF = re.compile(
-    r"^\s*(?:theorem|lemma|example)\b.*?:=\s*by\b(?P<body>.*)$",
+    r"(?:theorem|lemma|example)\b.*?:=\s*by\b(?P<body>.*)$",
     re.DOTALL,
 )
 
@@ -160,7 +188,6 @@ def _is_tactic_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return True  # blank lines are fine in tactic blocks
-    # Check if the first token is a known tactic keyword
     first_token = stripped.split()[0].rstrip("(").rstrip("{") if stripped.split() else ""
     if first_token in LEAN_TACTICS or first_token in _LEAN_LINE_OPENERS:
         return True
@@ -213,31 +240,37 @@ def _trim_explanatory_prose(lines: list[str]) -> list[str]:
     return tactics or lines
 
 
+def _peel_trailing_tactic(line: str) -> str:
+    """Return a tactic glued to the end of an English sentence, if present."""
+    stripped = line.strip()
+    if not stripped or _is_tactic_line(stripped):
+        return line
+    last = max(stripped.rfind("."), stripped.rfind("!"), stripped.rfind("?"))
+    if last < 0:
+        return line
+    suffix = stripped[last + 1 :].strip()
+    if suffix and _is_tactic_line(suffix):
+        return suffix
+    return line
+
+
 def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
-    """Strip markdown fences and LLM artifacts from proof output.
+    """Extract the tactic block from a model completion.
 
-    This function is aggressive about extracting tactic code from verbose
-    LLM responses. It handles:
-    - Markdown code fences (```lean ... ```)
-    - English text before/after the tactic block
-    - Leading `by` keyword (in tactic mode)
-    - Explanatory text that mentions "sorry"
-
-    Args:
-        raw: Raw LLM output text.
-        tactic_mode: If True, the sorry is inside a `by` block, so
-            a leading `by` in the output should be stripped.
+    Strips Markdown fences, a restated theorem header, and surrounding
+    prose. In tactic mode the sorry sits inside a `by` block, so a
+    leading `by` is stripped as well.
     """
     text = _unwrap_markdown_code(raw.strip())
 
-    wrapped = _WRAPPED_PROOF.match(text)
+    wrapped = _WRAPPED_PROOF.search(text)
     if wrapped:
         body = wrapped.group("body")
         text = body.lstrip("\r\n") if body.startswith(("\r", "\n")) else body.lstrip(" \t")
 
-    lines = _trim_explanatory_prose(_strip_blank_edges(text.split("\n")))
+    peeled = [_peel_trailing_tactic(line) for line in text.split("\n")]
+    lines = _trim_explanatory_prose(_strip_blank_edges(peeled))
 
-    # Strip leading `by` only in tactic mode (sorry is already inside `by`)
     if tactic_mode and lines and lines[0].strip() == "by":
         lines = _strip_blank_edges(lines[1:])
 
@@ -261,8 +294,89 @@ class AttemptEvidence:
     prompt_sha256: str = ""
     structural_context_sha256: str = ""
     indexed_context_sha256: str = ""
+    search_context_sha256: str = ""
+    remote_search: bool | None = None
     strategy_sha256: str = ""
     strategy_response_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class AttemptPrompt:
+    """Exact source context, goal, and request for one proof attempt."""
+
+    file_context: str
+    goal_state: str
+    user: str
+
+    def __post_init__(self) -> None:
+        require_text(self.file_context, "attempt context must not be empty")
+        require_text(
+            self.goal_state,
+            "attempt goal state must be text",
+            allow_empty=True,
+        )
+        require_text(self.user, "attempt request must not be empty")
+
+
+@dataclass(frozen=True)
+class ProofCandidate:
+    """One generated proof, replacement source, and optional Lean verdict."""
+
+    response: LLMResponse
+    proof: str
+    source: str
+    build: BuildResult | None = None
+
+    def __post_init__(self) -> None:
+        require_instance(self.response, LLMResponse, "proof candidate requires a model response")
+        require_text(self.proof, "proof candidate must not be empty")
+        require_text(self.source, "proof candidate source must not be empty")
+        if self.build is not None:
+            require_instance(self.build, BuildResult, "proof candidate verdict must be a build result")
+
+    @property
+    def line_count(self) -> int:
+        """Return the generated proof's line count."""
+        return len(self.proof.splitlines())
+
+
+@dataclass(frozen=True)
+class SessionReport:
+    """Computed facts rendered at the end of one agent session."""
+
+    elapsed_seconds: float
+    proved: tuple[ExperimentRecord, ...]
+    validated: tuple[ExperimentRecord, ...]
+    remaining: tuple[SorryTarget, ...]
+    exhausted: tuple[SorryTarget, ...]
+    total_tokens: int
+
+    def __post_init__(self) -> None:
+        require_number(
+            self.elapsed_seconds,
+            "session duration must be finite and non-negative",
+            minimum=0,
+        )
+        require_int(
+            self.total_tokens,
+            "session token count must be non-negative",
+            minimum=0,
+        )
+        collections = (
+            self.proved,
+            self.validated,
+            self.remaining,
+            self.exhausted,
+        )
+        if not all(isinstance(values, tuple) for values in collections):
+            raise ValueError("session report collections must be tuples")
+        if not all(isinstance(record, ExperimentRecord) for record in self.proved):
+            raise ValueError("proved results must be experiment records")
+        if not all(isinstance(record, ExperimentRecord) for record in self.validated):
+            raise ValueError("validated results must be experiment records")
+        targets = (*self.remaining, *self.exhausted)
+        if not all(isinstance(target, SorryTarget) for target in targets):
+            raise ValueError("session targets must be sorry targets")
 
 
 class AutoLeanAgent:
@@ -272,6 +386,9 @@ class AutoLeanAgent:
         self,
         program_path: Path,
         *,
+        model: str | None = None,
+        backend: str | None = None,
+        effort: str | None = None,
         dry_run: bool = False,
         verbose: bool = False,
         resume: bool = False,
@@ -283,7 +400,7 @@ class AutoLeanAgent:
         self.dry_run = dry_run
         self.verbose = verbose
         self.resume = resume
-        self.target_filter = target_filter  # Only process targets matching this decl_name
+        self.target_filter = target_filter
         self.target_file = target_file.resolve() if target_file is not None else None
         self._interrupted = False
         self._accepting = False
@@ -291,24 +408,25 @@ class AutoLeanAgent:
         self._consecutive_llm_errors = 0
         self._environment_sha256 = ""
         self._model_router = EscalationRouter(confirm_escalation)
+        self._logging_handle: LoggingHandle | None = None
 
-        # Parse program.md
         self.config = parse_program(self.program_path)
+        if model is not None:
+            self.config.model = model
+        if backend is not None:
+            self.config.backend = backend
+        if effort is not None:
+            self.config.effort = effort
+        llm_config = self.config.llm_config()
 
-        # Resolve lean project path (relative to program.md location)
         lean_root = self.program_path.parent / self.config.lean_project_path
         self.project = LeanProject(lean_root)
 
-        # Backend chosen by program.md; overridable by the caller afterwards.
-        self.llm: LLMBackend = create_llm_client(self.config.llm_config())
-
-        # Initialize tracker
         self.tracker = ExperimentTracker(
             project_root=self.project.root,
             persist=not self.dry_run,
         )
 
-        # Track attempts per target
         self._attempts: dict[str, int] = {}
         self._failed_proofs: dict[str, list[str]] = {}
         self._last_error: dict[str, tuple[ErrorCategory, str]] = {}
@@ -326,6 +444,7 @@ class AutoLeanAgent:
         self._evidence = AttemptEvidence()
         # An epoch of nothing but skips would reset into the same skips.
         self._epoch_reached_lean = False
+        self._epoch = 1
         self.structure = LeanStructureProvider()
         self.proof_context = ProofContextBuilder(self.project.root, self._step)
 
@@ -343,6 +462,7 @@ class AutoLeanAgent:
             skills_dir=self.project.root / "skills",
             persist=not self.dry_run,
         )
+        self.llm: LLMBackend = create_llm_client(llm_config)
 
     def close(self) -> None:
         """Release the backend owned by this agent."""
@@ -378,7 +498,7 @@ class AutoLeanAgent:
                 cycle = int(row.get("cycle", "0") or "0")
 
                 self._attempts[tid] = max(self._attempts.get(tid, 0), attempt)
-                self.tracker._cycle = max(self.tracker._cycle, cycle)
+                self.tracker.resume_cycle(cycle)
 
                 if outcome == "success":
                     self._proved_ids.add(tid)
@@ -387,6 +507,34 @@ class AutoLeanAgent:
             f"[dim]  Loaded {len(self._proved_ids)} proved, "
             f"{len(self._attempts)} attempted from previous session.[/]"
         )
+
+    def _resolve_legacy_target_ids(self, targets: list[SorryTarget]) -> None:
+        """Map a column-free persisted ID when it names exactly one target."""
+        by_legacy_id: dict[str, list[SorryTarget]] = {}
+        for target in targets:
+            by_legacy_id.setdefault(target.legacy_id, []).append(target)
+
+        ambiguous = 0
+        for legacy_id, matches in by_legacy_id.items():
+            if legacy_id not in self._attempts and legacy_id not in self._proved_ids:
+                continue
+            if len(matches) != 1:
+                ambiguous += 1
+                continue
+            target_id = matches[0].id
+            if legacy_id in self._attempts:
+                self._attempts[target_id] = max(
+                    self._attempts.get(target_id, 0),
+                    self._attempts[legacy_id],
+                )
+            if legacy_id in self._proved_ids:
+                self._proved_ids.add(target_id)
+
+        if ambiguous:
+            console.print(
+                f"[yellow]{ambiguous} earlier target ID(s) match several "
+                "same-line placeholders and cannot be resumed safely.[/]"
+            )
 
     # -- File health --------------------------------------------------------
 
@@ -399,7 +547,7 @@ class AutoLeanAgent:
         """
         if not self.target_filter:
             return True
-        return self.target_filter in (target.decl_name, target.id)
+        return self.target_filter in (target.decl_name, target.id, target.legacy_id)
 
     def _check_file_health(self, lean_file: Path, content: str) -> str | None:
         """Check if a file has non-sorry structural errors.
@@ -432,13 +580,34 @@ class AutoLeanAgent:
         history = self._error_history.get(target_id, [])
         if len(history) < MAX_REPEATED_ERRORS:
             return False
-        # Check if the last N errors are all the same category
         recent = history[-MAX_REPEATED_ERRORS:]
         return len(set(recent)) == 1
 
     def _record_error_category(self, target_id: str, category: ErrorCategory) -> None:
         """Track error category for repeated-error detection."""
         self._error_history.setdefault(target_id, []).append(category)
+
+    def _refresh_changed_targets(
+        self,
+        target: SorryTarget,
+        targets: list[SorryTarget],
+    ) -> list[SorryTarget] | None:
+        """Rescan one file when its bytes differ from the selected target."""
+        if not target.source_sha256:
+            return None
+        current = self.project.read_file(target.file)
+        if sha256_text(current) == target.source_sha256:
+            return None
+
+        self._step(f"Source changed since scan; rescanning {target.file.name}", "yellow")
+        stale_ids = {item.id for item in targets if item.file == target.file}
+        for target_id in stale_ids:
+            self._goal_cache.pop(target_id, None)
+            self.proof_context.invalidate_target(target_id)
+        retained = [item for item in targets if item.file != target.file]
+        rescanned = scan_file(target.file, project_root=self.project.root)
+        retained.extend(item for item in rescanned if self._in_scope(item))
+        return prioritize_targets(retained)
 
     def _consider_model_escalation(
         self,
@@ -448,7 +617,7 @@ class AutoLeanAgent:
         """Offer or perform one evidence-backed model switch."""
         route = self._model_router.route(
             target_id=target.id,
-            outcome=record.outcome.value,
+            outcome=record.outcome,
             category=record.error_category,
             policy=self.config.escalation_policy,
             current_model=self.llm.config.model,
@@ -509,113 +678,157 @@ class AutoLeanAgent:
     # -- Core loop ----------------------------------------------------------
 
     def run(self) -> AgentRunResult:
-        """Main entry point — the autonomous loop."""
-        from autolean.tracker import setup_logging
+        """Run with process signal handlers scoped to this invocation."""
+        received_signals = (signal.SIGINT, signal.SIGTERM)
+        previous = {received: signal.getsignal(received) for received in received_signals}
+        installed: list[signal.Signals] = []
+        try:
+            for received in received_signals:
+                signal.signal(received, self._handle_interrupt)
+                installed.append(received)
+        except ValueError:
+            for received in installed:
+                signal.signal(received, previous[received])
+            installed.clear()
+        try:
+            return self._run()
+        finally:
+            if self._logging_handle is not None:
+                self._logging_handle.close()
+                self._logging_handle = None
+            for received in installed:
+                signal.signal(received, previous[received])
 
-        for received in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(received, self._handle_interrupt)
-
+    def _initialize_run(self) -> AgentRunResult | None:
+        """Validate and preflight every resource required by a proof run."""
         try:
             self.config.validate()
-        except ValueError as e:
-            message = f"Invalid agent configuration: {e}"
-            console.print(f"[red]{message}[/]")
-            return AgentRunResult(False, message)
-
+        except ValueError as error:
+            return self._run_failure(f"Invalid agent configuration: {error}")
         try:
             environment = self.project.proof_environment()
-        except (OSError, ProofEnvironmentError) as e:
-            message = f"Proof environment identification failed: {e}"
-            console.print(f"[red]{message}[/]")
-            return AgentRunResult(False, message)
+        except (OSError, ProofEnvironmentError) as error:
+            return self._run_failure(f"Proof environment identification failed: {error}")
         self._environment_sha256 = environment.sha256
-
         if not self.dry_run:
-            setup_logging(self.project.root / "logs", verbose=self.verbose)
+            self._logging_handle = setup_logging(
+                self.project.root / "logs",
+                verbose=self.verbose,
+            )
+        self._show_run_identity(environment.sha256)
+        return self._preflight_provider() or self._prepare_git_branch()
+
+    @staticmethod
+    def _run_failure(message: str) -> AgentRunResult:
+        """Display and return one terminal run failure."""
+        console.print(f"[red]{message}[/]")
+        return AgentRunResult(False, message)
+
+    def _show_run_identity(self, environment_sha256: str) -> None:
+        """Display and log the complete execution identity."""
         llm_cfg = self.llm.config
+        remote_search = self.config.remote_search_enabled(llm_cfg)
+        location = inference_location(llm_cfg).value
+        provider = provider_name(llm_cfg.backend)
         log.info(
-            "Config: model=%s backend=%s retries=%d timeout=%ds",
+            "Config: model=%s provider=%s inference=%s retries=%d timeout=%ds",
             llm_cfg.model,
-            llm_cfg.backend,
+            provider,
+            location,
             self.config.max_retries_per_sorry,
             self.config.cycle_timeout_seconds,
         )
-
         console.print(
             Panel(
                 f"[bold]AutoLean Agent[/]\n"
                 f"Mode:             {self.config.mode}\n"
-                f"Model:            {llm_cfg.model}  [dim]({llm_cfg.backend})[/dim]\n"
+                f"Model:            {llm_cfg.model}\n"
+                f"Provider:         {provider}\n"
+                f"Inference:        {location}\n"
+                f"Remote research:  {'enabled' if remote_search else 'disabled'}\n"
                 f"Project:          {self.project.root}\n"
-                f"Environment:      sha256:{environment.sha256[:16]}\n"
+                f"Environment:      sha256:{environment_sha256[:16]}\n"
                 f"Max retries:      {self.config.max_retries_per_sorry}\n"
                 f"Max cycles:       {self.config.max_cycles or '∞'}\n"
-                f"Self-correction:  [green]ON[/green] (error-informed retries)\n"
-                f"Data collection:  [green]ON[/green] (SFT + DPO for fine-tuning)\n"
-                f"Skill learning:   [green]ON[/green] ({len(self.skill_memory.skills)} skills loaded)",
+                f"Skills:           {len(self.skill_memory.skills)} loaded",
                 title="Starting",
                 border_style="green",
             )
         )
 
+    def _preflight_provider(self) -> AgentRunResult | None:
+        """Require one responsive provider before any recorded work."""
+        llm_cfg = self.llm.config
         try:
             with ui.status(f"Preflighting {llm_cfg.backend}..."):
                 connected = self.llm.ping()
-        except LLMError as e:
-            message = f"Backend preflight failed: {e}"
-            console.print(f"[red]{message}[/]")
-            return AgentRunResult(False, message)
+        except LLMError as error:
+            return self._run_failure(f"Provider preflight failed: {error}")
         if not connected:
-            message = f"Backend '{llm_cfg.backend}' did not pass preflight for model '{llm_cfg.model}'."
-            console.print(f"[red]{message}[/]")
+            message = (
+                f"Provider '{provider_name(llm_cfg.backend)}' did not pass "
+                f"preflight for model '{llm_cfg.model}'."
+            )
+            result = self._run_failure(message)
             console.print("  Run [cyan]autolean models[/] to see what is ready.")
-            return AgentRunResult(False, message)
+            return result
+        console.print("[green]Provider preflight passed.[/]")
+        return None
 
-        console.print("[green]Backend preflight passed.[/]")
+    def _prepare_git_branch(self) -> AgentRunResult | None:
+        """Create the run branch when proof acceptance is enabled."""
+        if self.dry_run:
+            return None
+        try:
+            self.tracker.setup_branch()
+        except GitError as error:
+            return self._run_failure(f"Git branch setup failed: {error}")
+        return None
 
-        # Setup git branch
-        if not self.dry_run:
-            try:
-                self.tracker.setup_branch()
-            except GitError as e:
-                message = f"Git branch setup failed: {e}"
-                console.print(f"[red]{message}[/]")
-                return AgentRunResult(False, message)
-
-        # Rescan only a file whose accepted source changes.
-        targets = scan_project(self.project.root)
-        targets = prioritize_targets(targets)
-
-        # Apply target filter (from `prove` command or --target flag)
+    def _select_targets(self) -> list[SorryTarget]:
+        """Resolve scope, resume state, and priority for this invocation."""
+        targets = prioritize_targets(scan_project(self.project.root))
         if self.target_filter:
-            targets = [t for t in targets if self._in_scope(t)]
+            targets = [target for target in targets if self._in_scope(target)]
             console.print(
                 f"\n[cyan]Target filter:[/] '{self.target_filter}' — {len(targets)} matching target(s)."
             )
         if self.target_file is not None:
             targets = [target for target in targets if target.file.resolve() == self.target_file]
             console.print(f"\n[cyan]Target file:[/] {self.target_file.name} — {len(targets)} target(s).")
-
-        # Ahead of any recorded work: the pre-search below writes result rows,
-        # and they continue an earlier run's numbering rather than restart it.
         if self.resume:
             self._load_resume_state()
-            proved_ids = {tid for tid, attempts in self._attempts.items() if tid in self._proved_ids}
-            targets = [t for t in targets if t.id not in proved_ids]
+            self._resolve_legacy_target_ids(targets)
+            # A placeholder present in current source requires a new proof,
+            # even when an earlier source at that position was accepted.
+            reopened = {target.id for target in targets if target.id in self._proved_ids}
+            self._proved_ids.difference_update(reopened)
+            for target_id in reopened:
+                self._attempts.pop(target_id, None)
             console.print(
-                f"[cyan]Resumed:[/] {len(proved_ids)} already proved, "
-                f"{len(targets)} remaining, cycle {self.tracker.cycle}"
+                f"[cyan]Resumed:[/] {len(targets)} remaining, "
+                f"{len(reopened)} reopened, cycle {self.tracker.cycle}"
             )
-
         self._initial_sorry_count = len(targets)
         console.print(f"\n[bold]Found {len(targets)} sorry target(s).[/]")
+        return targets
 
-        if not targets:
-            console.print("[green]No sorries found — nothing to do![/]")
-            return AgentRunResult(True)
+    def _validate_target_paths(self, targets: Sequence[SorryTarget]) -> AgentRunResult | None:
+        """Require every accepted source path to be committable."""
+        if self.dry_run:
+            return None
+        for lean_file in sorted({target.file.resolve() for target in targets}):
+            reason = rejected_proof_path(self.project.root, lean_file)
+            if reason is not None:
+                return self._run_failure(
+                    f"Accepted proofs cannot be committed: {reason}. "
+                    "Prove inside a project created by `autolean init lean`, "
+                    "or stop ignoring the path in this project."
+                )
+        return None
 
-        # Every target source is elaborated inside the generated-code sandbox.
-        # Direct Lean invocation writes compiler artifacts only to scratch.
+    def _sandbox_target_files(self, targets: Sequence[SorryTarget]) -> AgentRunResult | None:
+        """Elaborate every target source inside the generated-code sandbox."""
         target_files = sorted({target.file.resolve() for target in targets})
         ui.phase("Initial sandboxed Lean check")
         for target_file in target_files:
@@ -633,295 +846,330 @@ class AutoLeanAgent:
                     f"Sandboxed Lean check failed for {target_file.name}: {detail[:300]}",
                 )
         console.print(f"[green]{len(target_files)} target file(s) checked.[/]")
+        return None
 
-        for t in targets[:10]:
-            mode_label = "tactic" if t.tactic_mode else "term"
-            console.print(f"  • {t} [{mode_label}]")
+    @staticmethod
+    def _show_targets(targets: Sequence[SorryTarget]) -> None:
+        """Display a bounded preview of the selected source targets."""
+        for target in targets[:10]:
+            mode_label = "tactic" if target.tactic_mode else "term"
+            console.print(f"  • {target} [{mode_label}]")
         if len(targets) > 10:
             console.print(f"  ... and {len(targets) - 10} more")
 
-        # -- Deterministic tactic pre-search --------------------------------
-        # Standard tactics run before any model request; trivial goals close
-        # here. Fast tactics precede the more expensive compound tactics.
-        extra_standard = [t for t in STANDARD_TACTICS if t not in FAST_TACTICS]
-        all_presearch = [*FAST_TACTICS, *extra_standard, *COMPOUND_TACTICS]
+    def _tactic_presearch(
+        self,
+        targets: list[SorryTarget],
+    ) -> tuple[list[SorryTarget], AgentRunResult | None]:
+        """Run the deterministic tactic vocabulary before model inference."""
+        extra_standard = [tactic for tactic in STANDARD_TACTICS if tactic not in FAST_TACTICS]
+        tactics = [*FAST_TACTICS, *extra_standard, *COMPOUND_TACTICS]
         if self.dry_run:
-            # Pre-search keeps whatever it proves, which a dry run must not do.
             console.print("\n[yellow]DRY RUN — skipping tactic pre-search.[/]")
-            all_presearch = []
+            tactics = []
         else:
             ui.phase(
-                f"Tactic pre-search ({len(all_presearch)} tactics: "
+                f"Tactic pre-search ({len(tactics)} tactics: "
                 f"{len(FAST_TACTICS)} fast + {len(extra_standard)} standard + "
                 f"{len(COMPOUND_TACTICS)} compound)"
             )
-        presearch_proved = 0
-        presearch_targets = (
-            [target for target in targets if target.qualified_decl_name] if all_presearch else []
-        )
-        for t in presearch_targets:
+        searched = [target for target in targets if target.qualified_decl_name] if tactics else []
+        proved_files: set[Path] = set()
+        proved = 0
+        for target in searched:
             if self._interrupted:
                 break
-            self._step(f"Trying {len(all_presearch)} tactics on {t.decl_name}...")
-            tactic = self.project.try_tactics_fast(
-                t.file,
-                t.line,
-                t.col,
-                tactics=all_presearch,
-                timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
-            )
-            if tactic:
-                # Apply the winning tactic permanently
-                original = self.project.read_file(t.file)
-                new_content = self.project.replace_sorry_at(
-                    t.file,
-                    t.line,
-                    tactic,
-                    original_content=original,
-                    col=t.col,
-                )
-                audit = self.project.validate_candidate(
-                    t.file,
-                    new_content,
-                    timeout=self.config.cycle_timeout_seconds,
-                    declaration=t.qualified_decl_name,
-                    declaration_line=t.line,
-                    expected_environment=self._environment_sha256,
-                )
-                if not audit.success:
-                    detail = audit.stderr or (
-                        audit.errors[0].message if audit.errors else "axiom audit failed"
-                    )
-                    self._step(f"Tactic proof rejected: {detail[:160]}", "red")
-                    continue
-                # Read the goal while the placeholder is still in the file: a
-                # training example carrying a proof and no goal teaches an
-                # answer to an unstated question.
-                goal_state = self._goal_cache.get(t.id) or self.project.get_goal_via_hole_punch(
-                    t.file,
-                    t.line,
-                    t.col,
-                    timeout=self.config.cycle_timeout_seconds,
-                )
-                # Record as success
-                cycle = self.tracker.next_cycle()
-                record = ExperimentRecord(
-                    cycle=cycle,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    target_id=t.id,
-                    decl_name=t.decl_name,
-                    file=str(t.file.relative_to(self.project.root)),
-                    line=t.line,
-                    outcome=Outcome.SUCCESS,
-                    attempt=0,  # 0 = tactic search, not LLM
-                    duration_seconds=0.0,
-                    llm_tokens=0,
-                    llm_tok_per_sec=0.0,
-                    proof_length=len(tactic.splitlines()),
-                    environment_sha256=self._environment_sha256,
-                    proof_sha256=sha256_text(tactic),
-                    axioms=",".join(audit.axioms) if audit.axioms else "none",
-                    model="deterministic-tactic-search",
-                    backend="lean",
-                )
-                self._accepting = True
-                try:
-                    self.project.write_file(
-                        t.file,
-                        new_content,
-                        expected_content=original,
-                    )
-                    self.tracker.commit_success(record)
-                except (GitError, OSError) as e:
-                    self._accepting = False
-                    try:
-                        self.project.write_file(
-                            t.file,
-                            original,
-                            expected_content=new_content,
-                        )
-                    except OSError as restore_error:
-                        message = f"Could not accept tactic proof: {e}; rollback stopped: {restore_error}"
-                        console.print(f"[red]{message}[/]")
-                        return AgentRunResult(False, message)
-                    message = f"Could not accept tactic proof: {e}"
-                    console.print(f"[red]{message}[/]")
-                    return AgentRunResult(False, message)
-                presearch_proved += 1
-                self.tracker.log(record)
-                self._accepting = False
-                console.print(
-                    f"  [bold green]PROVED (tactic search):[/bold green] "
-                    f"[green]{t.decl_name}[/green] — [cyan]{tactic}[/cyan]"
-                )
-
-                self.collector.set_context(t.id, goal_state or "", t.context_before)
-                self.collector.record_attempt(record, tactic)
-                self.skill_memory.learn_from_proof(
-                    theorem_name=t.decl_name,
-                    theorem_statement=t.context_before[:200],
-                    proof=tactic,
-                )
-
-                # Remove from targets
-                targets = [x for x in targets if x.id != t.id]
-
-        if presearch_proved:
-            console.print(f"\n[green]Tactic pre-search proved {presearch_proved} target(s).[/green]")
-            # Rescan affected files
-            affected_files = {t.file for t in presearch_targets if t.id not in {x.id for x in targets}}
-            for f in affected_files:
-                targets = [t for t in targets if t.file != f]
-                from autolean.scanner import scan_file
-
-                new_targets = scan_file(f, project_root=self.project.root)
-                targets.extend(t for t in new_targets if self._in_scope(t))
-            targets = prioritize_targets(targets)
-            self._initial_sorry_count = len(targets) + presearch_proved
-        else:
+            accepted, failure = self._try_tactic_presearch(target, tactics)
+            if failure is not None:
+                return targets, failure
+            if accepted:
+                proved += 1
+                proved_files.add(target.file)
+                targets = [candidate for candidate in targets if candidate.id != target.id]
+        if not proved:
             console.print("[dim]  No targets solved by standard tactics.[/dim]")
+            return targets, None
+        console.print(f"\n[green]Tactic pre-search proved {proved} target(s).[/green]")
+        targets = self._rescan_files(targets, proved_files)
+        self._initial_sorry_count = len(targets) + proved
+        return targets, None
 
+    def _try_tactic_presearch(
+        self,
+        target: SorryTarget,
+        tactics: list[str],
+    ) -> tuple[bool, AgentRunResult | None]:
+        """Attempt and accept one deterministic tactic proof."""
+        self._step(f"Trying {len(tactics)} tactics on {target.decl_name}...")
+        tactic = self.project.try_tactics_fast(
+            target.file,
+            target.line,
+            target.col,
+            tactics=tactics,
+            timeout_per_tactic=min(self.config.cycle_timeout_seconds, 15),
+        )
+        if not tactic:
+            return False, None
+        original = self.project.read_file(target.file)
+        new_content = self.project.replace_sorry_at(
+            target.file,
+            target.line,
+            tactic,
+            original_content=original,
+            col=target.col,
+        )
+        audit = self.project.validate_candidate(
+            target.file,
+            new_content,
+            timeout=self.config.cycle_timeout_seconds,
+            declaration=target.qualified_decl_name,
+            declaration_line=target.line,
+            expected_environment=self._environment_sha256,
+        )
+        if not audit.success:
+            detail = audit.stderr or (audit.errors[0].message if audit.errors else "axiom audit failed")
+            self._step(f"Tactic proof rejected: {detail[:160]}", "red")
+            return False, None
+        goal_state = self._goal_cache.get(target.id) or self.project.get_goal_via_hole_punch(
+            target.file,
+            target.line,
+            target.col,
+            timeout=self.config.cycle_timeout_seconds,
+        )
+        record = self._tactic_record(target, tactic, audit)
+        record = record.bind_source(original, new_content)
+        failure = self._accept_source(target.file, new_content, original, record)
+        if failure is not None:
+            message = f"Could not accept tactic proof: {failure[1]}"
+            console.print(f"[red]{message}[/]")
+            return False, AgentRunResult(False, message)
+        self.tracker.log(record)
+        self._accepting = False
+        console.print(
+            f"  [bold green]PROVED (tactic search):[/bold green] "
+            f"[green]{target.decl_name}[/green] — [cyan]{tactic}[/cyan]"
+        )
+        self.collector.set_context(target.id, goal_state or "", target.context_before)
+        self.collector.record_attempt(record, tactic)
+        self.skill_memory.learn_from_proof(
+            theorem_name=target.decl_name,
+            theorem_statement=target.context_before[:200],
+            proof=tactic,
+        )
+        return True, None
+
+    def _tactic_record(
+        self,
+        target: SorryTarget,
+        tactic: str,
+        audit: BuildResult,
+    ) -> ExperimentRecord:
+        """Build the canonical record for one deterministic proof."""
+        return ExperimentRecord(
+            cycle=self.tracker.next_cycle(),
+            timestamp=datetime.now(UTC).isoformat(),
+            target_id=target.id,
+            decl_name=target.decl_name,
+            file=str(target.file.relative_to(self.project.root)),
+            line=target.line,
+            outcome=Outcome.SUCCESS,
+            attempt=0,
+            duration_seconds=0.0,
+            llm_tokens=0,
+            llm_tok_per_sec=0.0,
+            proof_length=len(tactic.splitlines()),
+            environment_sha256=self._environment_sha256,
+            proof_sha256=sha256_text(tactic),
+            axioms=",".join(audit.axioms) if audit.axioms else "none",
+            model="deterministic-tactic-search",
+            backend="lean",
+        )
+
+    def _rescan_files(
+        self,
+        targets: list[SorryTarget],
+        changed_files: set[Path],
+    ) -> list[SorryTarget]:
+        """Replace stale target coordinates after accepted source changes."""
+        for changed_file in changed_files:
+            targets = [target for target in targets if target.file != changed_file]
+            new_targets = scan_file(changed_file, project_root=self.project.root)
+            targets.extend(target for target in new_targets if self._in_scope(target))
+        return prioritize_targets(targets)
+
+    def _autonomous_loop(
+        self,
+        targets: list[SorryTarget],
+        session_start: float,
+    ) -> list[SorryTarget]:
+        """Run bounded proof attempts until completion or a terminal policy."""
+        run_cycles = 0
+        while not self._interrupted:
+            if self.config.max_cycles > 0 and run_cycles >= self.config.max_cycles:
+                console.print(f"\n[yellow]Reached max_cycles ({self.config.max_cycles}). Stopping.[/]")
+                break
+            active = self._active_targets(targets)
+            if not active:
+                if self._renew_epoch(targets):
+                    continue
+                break
+            cycle = self.tracker.next_cycle()
+            run_cycles += 1
+            target = active[0]
+            refreshed = self._refresh_changed_targets(target, targets)
+            if refreshed is not None:
+                targets = refreshed
+                continue
+            attempt = self._attempts.get(target.id, 0) + 1
+            self._attempts[target.id] = attempt
+            console.rule(
+                f"Cycle {cycle} | {target.decl_name} | attempt {attempt}/{self.config.max_retries_per_sorry}"
+            )
+            record = self._try_fill_sorry(cycle, target, attempt)
+            self._record_cycle(target, record, attempt)
+            targets = self._refresh_accepted_targets(targets, target, record)
+            self._show_cycle_progress(targets, record, session_start)
+            self._consider_model_escalation(target, record)
+        return targets
+
+    def _active_targets(self, targets: Sequence[SorryTarget]) -> list[SorryTarget]:
+        """Return targets whose retry budget remains in the current epoch."""
+        return [
+            target
+            for target in targets
+            if self._attempts.get(target.id, 0) < self.config.max_retries_per_sorry
+        ]
+
+    def _renew_epoch(self, targets: Sequence[SorryTarget]) -> bool:
+        """Renew exhausted overnight budgets after an epoch reached Lean."""
+        if self.config.max_cycles != 0 or not targets:
+            console.print("\n[green]All targets either proved or exhausted retries. Done![/]")
+            return False
+        if not self._epoch_reached_lean:
+            console.print(
+                "\n[yellow]Every target in the last epoch was skipped before "
+                "reaching Lean. Another pass would repeat it.[/]"
+            )
+            return False
+        self._epoch_reached_lean = False
+        self._epoch += 1
+        console.print(
+            f"\n[cyan]Epoch {self._epoch}:[/] All retries exhausted. "
+            f"Resetting {len(targets)} targets for another pass..."
+        )
+        for target in targets:
+            self._attempts[target.id] = 0
+            self._error_history.pop(target.id, None)
+            self._goal_cache.pop(target.id, None)
+            rejected = self._failed_proofs.get(target.id)
+            if rejected:
+                del rejected[:-EPOCH_CANDIDATE_MEMORY]
+        return True
+
+    def _record_cycle(
+        self,
+        target: SorryTarget,
+        record: ExperimentRecord,
+        attempt: int,
+    ) -> None:
+        """Apply attempt-budget semantics and durably log one result."""
+        if record.outcome is Outcome.FAIL_PROVIDER:
+            self._attempts[target.id] = attempt - 1
+        elif record.outcome is not Outcome.SKIPPED:
+            self._epoch_reached_lean = True
+        self.tracker.log(record)
+        self._accepting = False
+
+    def _refresh_accepted_targets(
+        self,
+        targets: list[SorryTarget],
+        target: SorryTarget,
+        record: ExperimentRecord,
+    ) -> list[SorryTarget]:
+        """Refresh source coordinates after an accepted proof or definition."""
+        if record.outcome not in (Outcome.SUCCESS, Outcome.GAP_FILLED):
+            return targets
+        targets = self._rescan_files(targets, {target.file})
+        stale_ids = [key for key in self._goal_cache if target.file.name in key]
+        for key in stale_ids:
+            del self._goal_cache[key]
+        return targets
+
+    def _show_cycle_progress(
+        self,
+        targets: Sequence[SorryTarget],
+        record: ExperimentRecord,
+        session_start: float,
+    ) -> None:
+        """Display one result and the aggregate numeric run progress."""
+        presentation = {
+            Outcome.SUCCESS: (GLYPH_OK, "ok"),
+            Outcome.VALIDATED: (GLYPH_OK, "ok"),
+            Outcome.SKIPPED: (GLYPH_SKIP, "skip"),
+            Outcome.GAP_FILLED: (GLYPH_SKIP, "skip"),
+        }
+        icon, style = presentation.get(record.outcome, (GLYPH_FAIL, "fail"))
+        console.print(
+            f"  [{style}]{icon} {record.outcome.value}[/{style}]"
+            f"{f' [dim]({record.error_category})[/dim]' if record.error_category else ''}"
+            f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
+        )
+        self._show_record_error(record)
+        summary = self.tracker.summary()
+        proved = summary.get("success", 0)
+        remaining = len(self._active_targets(targets))
+        elapsed = time.monotonic() - session_start
+        rate = proved / (elapsed / 3600) if elapsed > 0 else 0
+        coverage = proved / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
+        stats = (
+            f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
+            f"({coverage:.0f}%) | {remaining} left | {rate:.1f}/hr | "
+            f"{elapsed / 60:.0f}m elapsed"
+        )
+        if console.is_terminal:
+            width = 30
+            filled = int(coverage / 100 * width) if self._initial_sorry_count else 0
+            stats = f"[{'█' * filled}{'░' * (width - filled)}] {stats}"
+        console.print(f"  {stats}")
+
+    @staticmethod
+    def _show_record_error(record: ExperimentRecord) -> None:
+        """Display a bounded diagnostic excerpt for one failed result."""
+        if not record.error_summary or record.outcome not in FAILURE_OUTCOMES:
+            return
+        lines = record.error_summary.strip().split("\n")
+        for line in lines[:4]:
+            console.print(f"    [dim red]{line[:120]}[/dim red]")
+        if len(lines) > 4:
+            console.print(f"    [dim]... ({len(lines) - 4} more lines)[/dim]")
+
+    def _run(self) -> AgentRunResult:
+        """Main entry point — the autonomous loop."""
+        failure = self._initialize_run()
+        if failure is not None:
+            return failure
+
+        targets = self._select_targets()
+        if not targets:
+            console.print("[green]No sorries found — nothing to do![/]")
+            return AgentRunResult(True)
+        failure = self._validate_target_paths(targets) or self._sandbox_target_files(targets)
+        if failure is not None:
+            return failure
+        self._show_targets(targets)
+
+        targets, failure = self._tactic_presearch(targets)
+        if failure is not None:
+            return failure
         if not targets:
             console.print("[green]All targets solved by tactic pre-search![/]")
             self._print_final_report(targets, time.monotonic())
             return AgentRunResult(True)
 
-        # Restore target state from a persisted session.
         # -- Main loop ------------------------------------------------------
         ui.phase("Autonomous loop")
         session_start = time.monotonic()
-
-        run_cycles = 0
-        while not self._interrupted:
-            # The cycle budget belongs to this invocation. The tracker keeps a
-            # monotonic experiment number across resumed runs.
-            if self.config.max_cycles > 0 and run_cycles >= self.config.max_cycles:
-                console.print(f"\n[yellow]Reached max_cycles ({self.config.max_cycles}). Stopping.[/]")
-                break
-            cycle = self.tracker.next_cycle()
-            run_cycles += 1
-
-            # Retry state filters the stable target set for this epoch.
-            active_targets = [
-                t for t in targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
-            ]
-
-            if not active_targets:
-                if self.config.max_cycles == 0 and targets:
-                    # Overnight mode resets bounded target histories for a new
-                    # experiment epoch. Backend sampling policy stays stable.
-                    if not self._epoch_reached_lean:
-                        console.print(
-                            "\n[yellow]Every target in the last epoch was skipped before "
-                            "reaching Lean. Another pass would repeat it.[/]"
-                        )
-                        break
-                    self._epoch_reached_lean = False
-                    epoch = max(self._attempts.values()) // self.config.max_retries_per_sorry + 1
-                    console.print(
-                        f"\n[cyan]Epoch {epoch}:[/] All retries exhausted. "
-                        f"Resetting {len(targets)} targets for another pass..."
-                    )
-                    for t in targets:
-                        # A new epoch renews the budget: the retry count and
-                        # the repeated-error bail-out that spends it. The
-                        # rejected candidates and the last diagnostic stay —
-                        # dropping them sends the first epoch's prompt again,
-                        # and Lean rejects the same proof again.
-                        self._attempts[t.id] = 0
-                        self._error_history.pop(t.id, None)
-                        self._goal_cache.pop(t.id, None)
-                        rejected = self._failed_proofs.get(t.id)
-                        if rejected:
-                            del rejected[:-EPOCH_CANDIDATE_MEMORY]
-                    continue
-                console.print("\n[green]All targets either proved or exhausted retries. Done![/]")
-                break
-
-            target = active_targets[0]
-            attempt_num = self._attempts.get(target.id, 0) + 1
-            self._attempts[target.id] = attempt_num
-
-            console.rule(
-                f"Cycle {cycle} | {target.decl_name} | "
-                f"attempt {attempt_num}/{self.config.max_retries_per_sorry}"
-            )
-
-            record = self._try_fill_sorry(cycle, target, attempt_num)
-            if record.outcome is Outcome.FAIL_PROVIDER:
-                # The request never reached Lean, so this target's budget was
-                # not spent on a proof. Consecutive provider failures still
-                # end the run, so refunding cannot spin.
-                self._attempts[target.id] = attempt_num - 1
-            elif record.outcome is not Outcome.SKIPPED:
-                self._epoch_reached_lean = True
-            self.tracker.log(record)
-            self._accepting = False
-
-            # Accepted proof and gap edits can shift every later source line.
-            if record.outcome in (Outcome.SUCCESS, Outcome.GAP_FILLED):
-                changed_file = target.file
-                # Remove ALL targets from the changed file
-                targets = [t for t in targets if t.file != changed_file]
-                # Rescan just that file for remaining sorrys
-                from autolean.scanner import scan_file
-
-                new_targets = scan_file(changed_file, project_root=self.project.root)
-                targets.extend(t for t in new_targets if self._in_scope(t))
-                targets = prioritize_targets(targets)
-                # Invalidate goal cache for targets in this file (lines shifted)
-                stale_ids = [k for k in self._goal_cache if changed_file.name in k]
-                for k in stale_ids:
-                    del self._goal_cache[k]
-
-            # -- Rich status output --
-            summary = self.tracker.summary()
-            proved = summary.get("success", 0)
-            remaining = len(
-                [t for t in targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry]
-            )
-            elapsed = time.monotonic() - session_start
-            rate = proved / (elapsed / 3600) if elapsed > 0 else 0
-            coverage = proved / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
-
-            # Outcome with color
-            if record.outcome in (Outcome.SUCCESS, Outcome.VALIDATED):
-                icon, style = GLYPH_OK, "ok"
-            elif record.outcome in (Outcome.SKIPPED, Outcome.GAP_FILLED):
-                icon, style = GLYPH_SKIP, "skip"
-            else:
-                icon, style = GLYPH_FAIL, "fail"
-
-            console.print(
-                f"  [{style}]{icon} {record.outcome.value}[/{style}]"
-                f"{f' [dim]({record.error_category})[/dim]' if record.error_category else ''}"
-                f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
-            )
-
-            if record.error_summary and record.outcome in FAILURE_OUTCOMES:
-                err_lines = record.error_summary.strip().split("\n")
-                for eline in err_lines[:4]:
-                    console.print(f"    [dim red]{eline[:120]}[/dim red]")
-                if len(err_lines) > 4:
-                    console.print(f"    [dim]... ({len(err_lines) - 4} more lines)[/dim]")
-
-            # Progress: the bar segment is animation, so logs keep only the
-            # numeric stats.
-            stats = (
-                f"[bold]{proved}[/bold]/{self._initial_sorry_count} "
-                f"({coverage:.0f}%) | "
-                f"{remaining} left | "
-                f"{rate:.1f}/hr | "
-                f"{elapsed / 60:.0f}m elapsed"
-            )
-            if console.is_terminal:
-                bar_width = 30
-                filled = int(coverage / 100 * bar_width) if self._initial_sorry_count else 0
-                bar = "█" * filled + "░" * (bar_width - filled)
-                stats = f"[{bar}] {stats}"
-            console.print(f"  {stats}")
-            self._consider_model_escalation(target, record)
-
+        targets = self._autonomous_loop(targets, session_start)
         # -- Session complete — full report -----------------------------------
         self._print_final_report(targets, session_start)
         if self._terminal_failure is not None:
@@ -934,53 +1182,82 @@ class AutoLeanAgent:
 
     def _step(self, msg: str, style: str = "dim") -> None:
         """Print a timestamped agent step."""
-        from datetime import datetime
-
         ts = datetime.now().strftime("%H:%M:%S")
         console.print(f"  [dim]{ts}[/dim] [{style}]{msg}[/{style}]")
 
-    def _try_fill_sorry(self, cycle: int, target: SorryTarget, attempt: int) -> ExperimentRecord:
-        """Try to fill a single sorry target. Returns the experiment record."""
-        self._evidence = AttemptEvidence()
-        t0 = time.monotonic()
-        file_path = target.file
-        original_content = self.project.read_file(file_path)
+    def _accept_source(
+        self,
+        file_path: Path,
+        new_content: str,
+        original_content: str,
+        record: ExperimentRecord,
+    ) -> tuple[Literal["write", "commit"], str] | None:
+        """Install accepted source and commit its record, or undo and report.
 
+        Returns None on success, else the failed stage and its description.
+        A "write" failure preserves the current source and the attempt may
+        retry. A "commit" failure is a
+        project condition no new candidate can change; the caller stops the
+        run. `_accepting` stays set on success until the caller records the
+        result, so an interrupt cannot separate an installed proof from its
+        record.
+        """
+        self._accepting = True
+        try:
+            self.project.write_file(file_path, new_content, expected_content=original_content)
+        except OSError as e:
+            self._accepting = False
+            return ("write", str(e))
+        try:
+            self.tracker.commit_success(record)
+        except GitError as e:
+            message = str(e)
+            try:
+                self.project.write_file(file_path, original_content, expected_content=new_content)
+            except OSError as restore_error:
+                message = f"{e}; rollback stopped: {restore_error}"
+            self._accepting = False
+            return ("commit", message)
+        return None
+
+    def _attempt_preflight(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        source: str,
+    ) -> ExperimentRecord | None:
+        """Return a skip record for an attempt that cannot reach proof search."""
         if not target.qualified_decl_name:
             self._attempts[target.id] = self.config.max_retries_per_sorry
             return self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.SKIPPED,
                 error_summary="A named declaration is required for the axiom audit",
                 error_category="axiom_audit_unavailable",
             )
-
-        # -- Pre-flight: structural error bail-out --------------------------
-        # A proof body cannot repair a structural error in its source file.
-        file_issue = self._check_file_health(file_path, original_content)
+        file_issue = self._check_file_health(target.file, source)
         if file_issue:
             self._step(f"SKIP: file has structural error: {file_issue[:80]}", "red")
-            # Exhaust retries so the loop moves on
             self._attempts[target.id] = self.config.max_retries_per_sorry
             return self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.SKIPPED,
                 error_summary=f"File structural error: {file_issue}",
                 error_category=classify_error(file_issue).value,
             )
-
-        # Repeated failures in one category exhaust this target early.
         if self._should_bail_repeated_error(target.id):
             history = self._error_history.get(target.id, [])
-            repeated_cat = history[-1].value if history else "unknown"
+            category = history[-1].value if history else "unknown"
             self._step(
-                f"SKIP: same error ({repeated_cat}) repeated {MAX_REPEATED_ERRORS}x — bailing out",
+                f"SKIP: {category} reached the {MAX_REPEATED_ERRORS}-failure threshold",
                 "red",
             )
             self._attempts[target.id] = self.config.max_retries_per_sorry
@@ -988,100 +1265,125 @@ class AutoLeanAgent:
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.SKIPPED,
-                error_summary=f"Repeated error bail-out: {repeated_cat} x{MAX_REPEATED_ERRORS}",
-                error_category=repeated_cat,
+                error_summary=(f"Repeated error threshold: {category} x{MAX_REPEATED_ERRORS}"),
+                error_category=category,
             )
+        return None
 
-        # -- Step 1: Build context for LLM ----------------------------------
-        self._step(f"Reading {file_path.name}:{target.line} ({target.decl_name})")
-        lines = original_content.split("\n")
+    def _source_context(
+        self,
+        target: SorryTarget,
+        source: str,
+    ) -> tuple[str, StructuralContext]:
+        """Render the bounded source and structural context for one target."""
+        self._step(f"Reading {target.file.name}:{target.line} ({target.decl_name})")
+        lines = source.split("\n")
         start = max(0, target.decl_line - 1)
         end = min(len(lines), target.line + 20)
-        file_context = "\n".join(f"{i + start + 1:4d} | {text}" for i, text in enumerate(lines[start:end]))
-
+        context = "\n".join(f"{index + start + 1:4d} | {text}" for index, text in enumerate(lines[start:end]))
         structural = self.structure.inspect(
-            file_path,
-            original_content,
+            target.file,
+            source,
             line=target.line,
             col=target.col,
             declaration_name=target.decl_name,
         )
-        structural_text = structural.render()
         self._evidence.structural_context_sha256 = structural.sha256
-        file_context += f"\n\n{structural_text}"
+        context += f"\n\n{structural.render()}"
         self._step(
             f"Structure: {structural.quality.value}, "
             f"{len(structural.referenced_declarations)} local references",
             "cyan" if structural.target is not None else "yellow",
         )
+        return context, structural
 
-        # Extract the goal once for this exact target source.
-        if target.id not in self._goal_cache:
-            self._step("Extracting goal state (hole-punch: sorry -> ?_)")
-            with ui.status("Extracting goal state..."):
-                self._goal_cache[target.id] = self.project.get_goal_via_hole_punch(
-                    file_path,
-                    target.line,
-                    target.col,
-                    timeout=self.config.cycle_timeout_seconds,
-                )
-            cached_goal = self._goal_cache[target.id]
-            if cached_goal:
-                self._step(f"Goal: {cached_goal.replace(chr(10), ' ')[:100]}", "cyan")
-            else:
-                self._step("Goal state unavailable (will infer from context)", "yellow")
-        else:
+    def _goal_state(self, target: SorryTarget) -> str:
+        """Return the cached goal for the target's exact source identity."""
+        if target.id in self._goal_cache:
             self._step("Goal state cached from previous attempt")
-        goal_state = self._goal_cache[target.id]
-
-        # Store context for training data collection
-        self.collector.set_context(target.id, goal_state or "", file_context)
-
-        # Failed candidates and diagnostics guide the next request.
-        prev_fails = self._failed_proofs.get(target.id, [])
-        if prev_fails:
-            self._step(f"Self-correction: {len(prev_fails)} previous failures inform this attempt", "yellow")
-            failed_parts = []
-            for i, p in enumerate(prev_fails[-3:]):  # last 3
-                failed_parts.append(f"Attempt {i + 1} (failed):\n```\n{p}\n```")
-            failed_str = "\n".join(failed_parts)
-            # Add error-informed hint from last failure
-            last_err = self._last_error.get(target.id)
-            if last_err:
-                category, msg = last_err
-                self._step(f"Last error: {category.value} — feeding hint to LLM", "yellow")
-                failed_str += f"\n\n{retry_hint_for(category, msg)}"
+            return self._goal_cache[target.id] or ""
+        self._step("Extracting goal state (hole-punch: sorry -> ?_)")
+        with ui.status("Extracting goal state..."):
+            goal = self.project.get_goal_via_hole_punch(
+                target.file,
+                target.line,
+                target.col,
+                timeout=self.config.cycle_timeout_seconds,
+            )
+        self._goal_cache[target.id] = goal
+        if goal:
+            self._step(f"Goal: {goal.replace(chr(10), ' ')[:100]}", "cyan")
         else:
-            failed_str = "(none)"
+            self._step("Goal state unavailable; source context will guide the attempt", "yellow")
+        return goal or ""
 
-        guidance: list[str] = []
+    def _failed_attempt_context(self, target: SorryTarget) -> str:
+        """Render the bounded rejected-candidate history for self-correction."""
+        failed = self._failed_proofs.get(target.id, [])
+        if not failed:
+            return "(none)"
+        self._step(
+            f"Self-correction: {len(failed)} previous failures inform this attempt",
+            "yellow",
+        )
+        parts = [
+            f"Attempt {index + 1} (failed):\n```\n{proof}\n```" for index, proof in enumerate(failed[-3:])
+        ]
+        last_error = self._last_error.get(target.id)
+        if last_error is not None:
+            category, message = last_error
+            self._step(f"Last error: {category.value} — feeding hint to LLM", "yellow")
+            parts.append(retry_hint_for(category, message))
+        return "\n".join(parts)
+
+    def _program_context(self, context: str) -> str:
+        """Append the configured goals, constraints, and strategy hints."""
+        sections: list[str] = []
         if self.config.goals:
             goals = "\n".join(f"- {goal}" for goal in self.config.goals)
-            guidance.append(f"## Program Goals\n{goals}")
+            sections.append(f"## Program Goals\n{goals}")
         if self.config.constraints:
             constraints = "\n".join(f"- {constraint}" for constraint in self.config.constraints)
-            guidance.append(f"## Program Constraints\n{constraints}")
-        if guidance:
-            file_context += "\n\n" + "\n\n".join(guidance)
+            sections.append(f"## Program Constraints\n{constraints}")
+        if self.config.strategy_hints:
+            hints = "\n".join(f"- {hint}" for hint in self.config.strategy_hints)
+            sections.append(f"## Strategy Hints\n{hints}")
+        return context + ("\n\n" + "\n\n".join(sections) if sections else "")
 
-        # Add strategy hints to context
-        hints = "\n".join(f"- {h}" for h in self.config.strategy_hints)
-        if hints:
-            file_context += f"\n\n## Strategy Hints\n{hints}"
+    def _skill_context(self, context: str, goal_state: str) -> str:
+        """Append relevant learned proof patterns."""
+        injection = self.skill_memory.get_prompt_injection(
+            goal_state or context,
+            max_skills=5,
+        )
+        if not injection:
+            return context
+        count = injection.count("**") // 2
+        self._step(f"Injecting {count} learned skills into prompt", "magenta")
+        return f"{context}\n\n{injection}"
 
-        # Reusable successful patterns augment the request context.
-        skill_injection = self.skill_memory.get_prompt_injection(goal_state or file_context, max_skills=5)
-        if skill_injection:
-            n_skills = skill_injection.count("**") // 2
-            self._step(f"Injecting {n_skills} learned skills into prompt", "magenta")
-            file_context += f"\n\n{skill_injection}"
-
+    def _build_attempt_prompt(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        source: str,
+    ) -> tuple[AttemptPrompt | None, ExperimentRecord | None]:
+        """Build and identify every context input for one model request."""
+        file_context, structural = self._source_context(target, source)
+        goal_state = self._goal_state(target)
+        self.collector.set_context(target.id, goal_state, file_context)
+        failed = self._failed_attempt_context(target)
+        file_context = self._skill_context(self._program_context(file_context), goal_state)
+        remote_search = self.config.remote_search_enabled(self.llm.config)
+        self._evidence.remote_search = remote_search
         try:
             enrichment = self.proof_context.build(
                 target,
-                goal_state or "",
+                goal_state,
                 structural_quality=structural.quality.value,
                 local_references=tuple(
                     declaration.qualified_name for declaration in structural.referenced_declarations
@@ -1089,530 +1391,831 @@ class AutoLeanAgent:
                 strategy_hints=tuple(self.config.strategy_hints),
                 llm_generate=self.llm.generate,
                 attempt=attempt,
+                remote_search=remote_search,
             )
         except ProofContextError as error:
             message = f"Model strategy failed: {error}"
             self._terminal_failure = message
             self._interrupted = True
             self._step(message, "red")
-            return self._make_record(
+            return None, self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.FAIL_PROVIDER,
                 error_summary=message,
                 error_category="strategy_generation",
             )
-        self._evidence.indexed_context_sha256 = enrichment.indexed_sha256
-        self._evidence.strategy_sha256 = enrichment.strategy_sha256
-        self._evidence.strategy_response_sha256 = enrichment.strategy_response_sha256
+        self._record_context_evidence(enrichment)
         file_context += f"\n\n{enrichment.text}"
-
-        # -- Step 2: Ask LLM -----------------------------------------------
-        user_prompt = SORRY_FILL_USER.format(
+        user = SORRY_FILL_USER.format(
             file_context=file_context,
             line=target.line,
             decl_name=target.decl_name,
-            goal_state=goal_state or "(goal state unavailable -- try to infer from context)",
-            failed_attempts=failed_str,
+            goal_state=(goal_state or "(goal state unavailable -- try to infer from context)"),
+            failed_attempts=failed,
         )
-        self._evidence.prompt_sha256 = sha256_text(f"{SYSTEM_PROMPT}\0{user_prompt}")
+        self._evidence.prompt_sha256 = sha256_text(f"{SYSTEM_PROMPT}\0{user}")
+        return AttemptPrompt(file_context, goal_state, user), None
 
-        # Sampling backends can diversify bounded retries. Deterministic and
-        # reasoning profiles retain their declared request configuration.
-        temp: float | None = None
-        configured_temperature = self.llm.config.temperature
-        if self.llm.capabilities.temperature and configured_temperature is not None:
-            retry_delta = (
-                (attempt - 1) * TEMP_ESCALATION_STEP if self.llm.capabilities.retry_temperature else 0.0
-            )
-            temp = min(configured_temperature + retry_delta, TEMP_MAX)
+    def _record_context_evidence(self, context: ProofContext) -> None:
+        """Copy accepted context identities into the attempt record builder."""
+        self._evidence.search_context_sha256 = context.search_sha256
+        self._evidence.indexed_context_sha256 = context.indexed_sha256
+        self._evidence.strategy_sha256 = context.strategy_sha256
+        self._evidence.strategy_response_sha256 = context.strategy_response_sha256
+        self._evidence.remote_search = context.remote_search
 
+    def _request_proof(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        prompt: AttemptPrompt,
+    ) -> tuple[LLMResponse | None, ExperimentRecord | None]:
+        """Request one proof or return its classified provider failure."""
+        temperature = self._retry_temperature(attempt)
         model = self.llm.config.model
-        knob = f" (temp={temp:.2f})" if temp is not None else ""
+        knob = f" (temp={temperature:.2f})" if temperature is not None else ""
         self._step(f"Querying {model}{knob}")
-
         try:
             with ui.status(f"Waiting for {model}..."):
                 response = self.llm.generate(
                     system=SYSTEM_PROMPT,
-                    user=user_prompt,
-                    temperature=temp,
+                    user=prompt.user,
+                    temperature=temperature,
                 )
-        except LLMError as e:
-            self._consecutive_llm_errors += 1
-            if isinstance(e, (LLMAuthenticationError, LLMRateLimitError)):
-                self._interrupted = True
-                provider_category = (
-                    "llm_authentication" if isinstance(e, LLMAuthenticationError) else "llm_rate_limit"
-                )
-                self._terminal_failure = f"Provider request failed: {e}"
-            elif isinstance(e, LLMTransientError):
-                provider_category = "llm_transient"
-                if self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
-                    self._interrupted = True
-                    self._terminal_failure = (
-                        f"Provider remained unavailable after {MAX_REPEATED_ERRORS} attempts: {e}"
-                    )
-                else:
-                    delay = min(2 ** (self._consecutive_llm_errors - 1), 8)
-                    self._step(f"Provider unavailable; retrying after {delay}s", "yellow")
-                    time.sleep(delay)
-            else:
-                provider_category = "llm_error"
-                if self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
-                    self._interrupted = True
-                    self._terminal_failure = (
-                        f"Provider failed for {MAX_REPEATED_ERRORS} consecutive requests: {e}"
-                    )
-            return self._make_record(
+        except LLMError as error:
+            return None, self._provider_failure(
                 cycle,
                 target,
                 attempt,
-                t0,
-                outcome=Outcome.FAIL_PROVIDER,
-                error_summary=f"LLM error: {e}",
-                error_category=provider_category,
+                started,
+                error,
             )
         self._evidence.input_tokens = response.input_tokens
         self._consecutive_llm_errors = 0
+        return response, None
 
-        # -- Step 3: Clean and apply proof ----------------------------------
+    def _retry_temperature(self, attempt: int) -> float | None:
+        """Return the bounded sampling temperature for one retry."""
+        require_int(attempt, "proof attempt must be positive", minimum=1)
+        configured = self.llm.config.temperature
+        if not self.llm.capabilities.temperature or configured is None:
+            return None
+        delta = (attempt - 1) * TEMP_ESCALATION_STEP if self.llm.capabilities.retry_temperature else 0.0
+        return min(configured + delta, TEMP_MAX)
+
+    def _provider_failure(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        error: LLMError,
+    ) -> ExperimentRecord:
+        """Apply provider retry policy and return its failed-attempt record."""
+        self._consecutive_llm_errors += 1
+        category = "llm_error"
+        if isinstance(error, (LLMAuthenticationError, LLMRateLimitError)):
+            self._interrupted = True
+            category = "llm_authentication" if isinstance(error, LLMAuthenticationError) else "llm_rate_limit"
+            self._terminal_failure = f"Provider request failed: {error}"
+        elif isinstance(error, LLMTransientError):
+            category = "llm_transient"
+            self._handle_transient_provider_failure(error)
+        elif self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
+            self._interrupted = True
+            self._terminal_failure = (
+                f"Provider failed for {MAX_REPEATED_ERRORS} consecutive requests: {error}"
+            )
+        return self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=Outcome.FAIL_PROVIDER,
+            error_summary=f"LLM error: {error}",
+            error_category=category,
+        )
+
+    def _handle_transient_provider_failure(self, error: LLMError) -> None:
+        """Stop a persistent outage or back off one bounded retry."""
+        if self._consecutive_llm_errors >= MAX_REPEATED_ERRORS:
+            self._interrupted = True
+            self._terminal_failure = (
+                f"Provider remained unavailable after {MAX_REPEATED_ERRORS} attempts: {error}"
+            )
+            return
+        delay = min(2 ** (self._consecutive_llm_errors - 1), 8)
+        self._step(f"Provider unavailable; retrying after {delay}s", "yellow")
+        time.sleep(delay)
+
+    def _prepare_proof_candidate(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        response: LLMResponse,
+        original_source: str,
+    ) -> tuple[ProofCandidate | None, ExperimentRecord | None]:
+        """Turn a model response into one bounded source candidate."""
         proof = clean_llm_proof(response.text, tactic_mode=target.tactic_mode)
         try:
             proof = validate_generated_proof(proof)
-        except GeneratedCodeError as e:
+        except GeneratedCodeError as error:
             self._failed_proofs.setdefault(target.id, []).append(response.text)
-            return self._make_record(
+            return None, self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.FAIL_SORRY_REMAINS,
                 llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
-                error_summary=f"Generated proof rejected: {e}",
+                error_summary=f"Generated proof rejected: {error}",
                 proof=response.text,
                 model=response.model,
             )
-
-        # Bound generated proof size before elaboration.
-        proof_lines = len(proof.splitlines())
-        if proof_lines > self.config.max_proof_lines:
+        if len(proof.splitlines()) > self.config.max_proof_lines:
             self._failed_proofs.setdefault(target.id, []).append(proof)
-            return self._make_record(
+            return None, self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.FAIL_BUILD,
                 llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
-                error_summary=f"Proof too long: {proof_lines} lines > {self.config.max_proof_lines} max",
-                proof_length=proof_lines,
+                error_summary=(
+                    f"Proof too long: {len(proof.splitlines())} lines > {self.config.max_proof_lines} max"
+                ),
+                proof_length=len(proof.splitlines()),
                 proof=proof,
                 model=response.model,
             )
-
-        if proof_lines <= 5 or self.verbose:
-            console.print(f"  [bold]Proof[/] ({proof_lines} lines):")
-            for pline in proof.splitlines()[:12]:
-                console.print(Text(f"    {pline}", style="cyan"))
-            if proof_lines > 12:
-                console.print(f"    [dim]... ({proof_lines - 12} more lines)[/]")
-        else:
-            first = proof.splitlines()[0].strip()
-            summary = Text("  Proof", style="bold")
-            summary.append(f" ({proof_lines} lines): ")
-            summary.append(first, style="cyan")
-            summary.append(" ...")
-            console.print(summary)
-
-        # Construct the candidate without changing the accepted source.
+        self._show_proof_candidate(proof)
         try:
-            new_content = self.project.replace_sorry_at(
-                file_path,
+            source = self.project.replace_sorry_at(
+                target.file,
                 target.line,
                 proof,
-                original_content=original_content,
+                original_content=original_source,
                 col=target.col,
             )
-        except (OSError, ValueError) as e:
-            return self._make_record(
+        except (OSError, ValueError) as error:
+            return None, self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.FAIL_BUILD,
                 llm_tokens=response.output_tokens,
                 llm_tok_per_sec=response.tokens_per_second,
-                error_summary=f"Replace error: {e}",
+                error_summary=f"Replace error: {error}",
                 proof=proof,
                 model=response.model,
             )
+        return ProofCandidate(response, proof, source), None
 
-        # -- Step 4: Build and check ----------------------------------------
+    def _show_proof_candidate(self, proof: str) -> None:
+        """Display one generated proof with bounded terminal output."""
+        lines = proof.splitlines()
+        if len(lines) <= 5 or self.verbose:
+            console.print(f"  [bold]Proof[/] ({len(lines)} lines):")
+            for line in lines[:12]:
+                console.print(Text(f"    {line}", style="cyan"))
+            if len(lines) > 12:
+                console.print(f"    [dim]... ({len(lines) - 12} more lines)[/]")
+            return
+        summary = Text("  Proof", style="bold")
+        summary.append(f" ({len(lines)} lines): ")
+        summary.append(lines[0].strip(), style="cyan")
+        summary.append(" ...")
+        console.print(summary)
+
+    def _check_proof_candidate(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        original_source: str,
+    ) -> tuple[ProofCandidate | None, ExperimentRecord | None]:
+        """Obtain the pinned-kernel verdict for one immutable candidate."""
         self._step("Verifying with the pinned Lean kernel...")
-
         try:
             with ui.status("Building..."):
-                build = self.project.validate_candidate(
-                    file_path,
-                    new_content,
-                    timeout=self.config.cycle_timeout_seconds,
-                    declaration=target.qualified_decl_name,
-                    declaration_line=target.line,
-                    expected_environment=self._environment_sha256,
+                checked, repairs = self._validate_with_tail_repair(
+                    target,
+                    candidate,
+                    original_source,
                 )
-                repairs = 0
-                while (
-                    repairs < MAX_REDUNDANT_TAIL_REPAIRS
-                    and len(proof.splitlines()) > 1
-                    and _has_redundant_tail(build)
-                ):
-                    proof = "\n".join(proof.splitlines()[:-1]).rstrip()
-                    proof_lines = len(proof.splitlines())
-                    new_content = self.project.replace_sorry_at(
-                        file_path,
-                        target.line,
-                        proof,
-                        original_content=original_content,
-                        col=target.col,
-                    )
-                    repairs += 1
-                    build = self.project.validate_candidate(
-                        file_path,
-                        new_content,
-                        timeout=self.config.cycle_timeout_seconds,
-                        declaration=target.qualified_decl_name,
-                        declaration_line=target.line,
-                        expected_environment=self._environment_sha256,
-                    )
-                if repairs and build.success:
-                    self._step(
-                        f"Removed {repairs} redundant trailing tactic(s); Lean accepted the prefix",
-                        "green",
-                    )
-        except (OSError, ValueError) as e:
-            return self._make_record(
+        except (OSError, ValueError) as error:
+            return None, self._make_record(
                 cycle,
                 target,
                 attempt,
-                t0,
+                started,
                 outcome=Outcome.FAIL_BUILD,
-                llm_tokens=response.output_tokens,
-                llm_tok_per_sec=response.tokens_per_second,
-                error_summary=f"Candidate validation failed: {e}",
-                proof=proof,
-                model=response.model,
+                llm_tokens=candidate.response.output_tokens,
+                llm_tok_per_sec=candidate.response.tokens_per_second,
+                error_summary=f"Candidate validation failed: {error}",
+                proof=candidate.proof,
+                model=candidate.response.model,
             )
-        duration = time.monotonic() - t0
-
-        # -- Step 5: Keep or revert -----------------------------------------
-        # Success removes exactly the selected placeholder from the candidate.
-        original_sorries = count_sorries(original_content)
-        candidate_sorries = count_sorries(new_content)
-        sorry_gone = build.success and candidate_sorries == original_sorries - 1
-        if self.dry_run and sorry_gone:
-            console.print(
-                f"  [bold green]VALIDATED[/bold green] [green]{target.decl_name}[/green] "
-                f"[dim]({build.duration_seconds:.1f}s sandboxed Lean; no project changes)[/dim]"
+        if repairs and checked.build is not None and checked.build.success:
+            self._step(
+                f"Removed {repairs} redundant trailing tactic(s); Lean accepted the prefix",
+                "green",
             )
-            return self._make_record(
-                cycle,
-                target,
-                attempt,
-                t0,
-                outcome=Outcome.VALIDATED,
-                llm_tokens=response.output_tokens,
-                llm_tok_per_sec=response.tokens_per_second,
-                proof_length=proof_lines,
-                build_duration_seconds=build.duration_seconds,
-                proof=proof,
-                axioms=(",".join(build.axioms) if build.axioms else "none"),
-                model=response.model,
+        return checked, None
+
+    def _validate_with_tail_repair(
+        self,
+        target: SorryTarget,
+        candidate: ProofCandidate,
+        original_source: str,
+    ) -> tuple[ProofCandidate, int]:
+        """Validate a candidate and remove bounded redundant tactic tails."""
+        build = self._validate_candidate_source(target, candidate.source)
+        repairs = 0
+        while (
+            repairs < MAX_REDUNDANT_TAIL_REPAIRS and candidate.line_count > 1 and _has_redundant_tail(build)
+        ):
+            proof = "\n".join(candidate.proof.splitlines()[:-1]).rstrip()
+            source = self.project.replace_sorry_at(
+                target.file,
+                target.line,
+                proof,
+                original_content=original_source,
+                col=target.col,
             )
-        if sorry_gone:
-            self._accepting = True
-            try:
-                self.project.write_file(
-                    file_path,
-                    new_content,
-                    expected_content=original_content,
-                )
-            except OSError as e:
-                self._accepting = False
-                return self._make_record(
-                    cycle,
-                    target,
-                    attempt,
-                    t0,
-                    outcome=Outcome.FAIL_BUILD,
-                    llm_tokens=response.output_tokens,
-                    llm_tok_per_sec=response.tokens_per_second,
-                    error_summary=f"Could not accept validated proof: {e}",
-                    proof=proof,
-                    model=response.model,
-                )
-            console.print(
-                f"  [bold green]PROVED![/bold green] "
-                f"[green]{target.decl_name}[/green] "
-                f"[dim]({build.duration_seconds:.1f}s build)[/dim]"
-            )
-            rel_path = str(file_path.relative_to(self.project.root))
-            record = ExperimentRecord(
-                cycle=cycle,
-                timestamp=datetime.now(UTC).isoformat(),
-                target_id=target.id,
-                decl_name=target.decl_name,
-                file=rel_path,
-                line=target.line,
-                outcome=Outcome.SUCCESS,
-                attempt=attempt,
-                duration_seconds=duration,
-                llm_tokens=response.output_tokens,
-                llm_tok_per_sec=response.tokens_per_second,
-                proof_length=proof_lines,
-                build_duration_seconds=build.duration_seconds,
-                environment_sha256=self._environment_sha256,
-                proof_sha256=sha256_text(proof),
-                axioms=",".join(build.axioms) if build.axioms else "none",
-                model=response.model,
-                backend=self.llm.config.backend,
-                llm_input_tokens=response.input_tokens,
-                prompt_sha256=self._evidence.prompt_sha256,
-                structural_context_sha256=self._evidence.structural_context_sha256,
-                indexed_context_sha256=self._evidence.indexed_context_sha256,
-                strategy_sha256=self._evidence.strategy_sha256,
-                strategy_response_sha256=self._evidence.strategy_response_sha256,
-                model_revision=self.llm.config.model_revision or "",
-                sampling_seed=self.llm.config.seed,
-                model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
-            )
-            try:
-                self.tracker.commit_success(record)
-            except GitError as e:
-                try:
-                    self.project.write_file(
-                        file_path,
-                        original_content,
-                        expected_content=new_content,
-                    )
-                except OSError as restore_error:
-                    e = GitError(f"{e}; rollback stopped: {restore_error}")
-                return self._make_record(
-                    cycle,
-                    target,
-                    attempt,
-                    t0,
-                    outcome=Outcome.FAIL_BUILD,
-                    llm_tokens=response.output_tokens,
-                    llm_tok_per_sec=response.tokens_per_second,
-                    error_summary=f"Git commit failed: {e}",
-                    proof=proof,
-                    model=response.model,
-                )
-            self._failed_proofs.pop(target.id, None)
-            self._last_error.pop(target.id, None)
-            self._error_history.pop(target.id, None)
+            candidate = ProofCandidate(candidate.response, proof, source)
+            build = self._validate_candidate_source(target, source)
+            repairs += 1
+        return ProofCandidate(
+            candidate.response,
+            candidate.proof,
+            candidate.source,
+            build,
+        ), repairs
 
-            self._step("Committing to git + collecting training data", "green")
-            self.collector.record_attempt(record, proof)
-            skill = self.skill_memory.learn_from_proof(
-                theorem_name=target.decl_name,
-                theorem_statement=target.context_before[:200],
-                proof=proof,
-            )
-            if skill:
-                self._step(f"Learned skill: {skill.name} ({skill.description[:60]})", "magenta")
-            return record
-
-        # Classify the rejected candidate for bounded retry policy.
-        self._step("Build failed — analyzing error...", "red")
-        error_summary = ""
-        error_category = ""
-        cat = ErrorCategory.OTHER
-        if build.errors:
-            # Classify the diagnostic Lean wrote; locating it adds the
-            # candidate's own text, which must not steer the category.
-            cat = classify_error(build.errors[0].message[:500])
-            error_category = cat.value
-            error_summary = _locate_in_candidate(build.errors, proof, target.line)
-            self._last_error[target.id] = (cat, error_summary)
-            self._record_error_category(target.id, cat)
-
-            # Structural error — exhaust retries immediately (LLM can't fix)
-            if cat in STRUCTURAL_ERRORS:
-                self._step(
-                    f"Structural error ({cat.value}) — skipping target",
-                    "red",
-                )
-                # The diagnostic came from elaborating this candidate, not the
-                # file on disk, which Lean accepted at the top of this attempt.
-                # Recording it against the file would skip every sibling target
-                # in source that is known good.
-                self._attempts[target.id] = self.config.max_retries_per_sorry
-
-            # Auto-detect missing definitions and try to fill gaps
-            # (only for non-structural errors, and with validation)
-            elif cat == ErrorCategory.UNKNOWN_IDENTIFIER and not self.dry_run:
-                from autolean.library import detect_missing_definitions, fill_gap
-
-                gaps = detect_missing_definitions(error_summary, file_context, str(file_path))
-                if gaps:
-                    for gap in gaps[:2]:  # max 2 gaps per attempt
-                        self._step(f"Detected missing: {gap.name} — attempting to define it", "yellow")
-                        try:
-                            generated = fill_gap(gap, self.llm.generate)
-                        except (LLMError, GeneratedCodeError) as e:
-                            self._step(f"Gap generation rejected: {e}", "red")
-                            generated = None
-                        if generated:
-                            definition = generated.code
-                            self._step(
-                                f"Generated definition for {gap.name} ({len(definition)} chars)",
-                                "cyan",
-                            )
-                            current = self.project.read_file(file_path)
-                            new_content_with_gap, declaration_line = _insert_gap_declaration(
-                                current, definition
-                            )
-                            try:
-                                check = self.project.validate_candidate(
-                                    file_path,
-                                    new_content_with_gap,
-                                    timeout=60,
-                                    declaration=gap.name,
-                                    declaration_line=declaration_line,
-                                    expected_environment=self._environment_sha256,
-                                )
-                            except OSError as e:
-                                self._step(f"Gap validation failed: {e}", "red")
-                                continue
-                            if not check.success:
-                                self._step(
-                                    f"Gap definition for {gap.name} did not compile",
-                                    "red",
-                                )
-                            else:
-                                gap_record = self._make_record(
-                                    cycle,
-                                    target,
-                                    attempt,
-                                    t0,
-                                    outcome=Outcome.GAP_FILLED,
-                                    llm_tokens=generated.response.output_tokens,
-                                    llm_tok_per_sec=generated.response.tokens_per_second,
-                                    error_summary=(
-                                        f"Added missing definition {gap.name}; proof target will be rescanned"
-                                    ),
-                                    error_category=error_category,
-                                    proof_length=len(definition.splitlines()),
-                                    build_duration_seconds=check.duration_seconds,
-                                    proof=definition,
-                                    axioms=(",".join(check.axioms) if check.axioms else "none"),
-                                    model=generated.response.model,
-                                    llm_input_tokens=generated.response.input_tokens,
-                                    prompt_sha256=generated.prompt_sha256,
-                                    target_id=(
-                                        f"{file_path.relative_to(self.project.root)}:"
-                                        f"{declaration_line}:{gap.name}"
-                                    ),
-                                    decl_name=gap.name,
-                                    line=declaration_line,
-                                )
-                                self._accepting = True
-                                try:
-                                    self.project.write_file(
-                                        file_path,
-                                        new_content_with_gap,
-                                        expected_content=current,
-                                    )
-                                    self.tracker.commit_success(gap_record)
-                                except (GitError, OSError) as e:
-                                    try:
-                                        self.project.write_file(
-                                            file_path,
-                                            current,
-                                            expected_content=new_content_with_gap,
-                                        )
-                                    except OSError as restore_error:
-                                        e = GitError(f"{e}; rollback stopped: {restore_error}")
-                                    return self._make_record(
-                                        cycle,
-                                        target,
-                                        attempt,
-                                        t0,
-                                        outcome=Outcome.FAIL_BUILD,
-                                        llm_tokens=generated.response.output_tokens,
-                                        llm_tok_per_sec=generated.response.tokens_per_second,
-                                        error_summary=f"Gap acceptance failed: {e}",
-                                        error_category=error_category,
-                                        proof_length=len(definition.splitlines()),
-                                        proof=definition,
-                                        model=generated.response.model,
-                                        llm_input_tokens=generated.response.input_tokens,
-                                        prompt_sha256=generated.prompt_sha256,
-                                        target_id=(
-                                            f"{file_path.relative_to(self.project.root)}:"
-                                            f"{declaration_line}:{gap.name}"
-                                        ),
-                                        decl_name=gap.name,
-                                        line=declaration_line,
-                                    )
-                                log.info("Auto-defined %s in %s", gap.name, file_path.name)
-                                self._failed_proofs.setdefault(target.id, []).append(proof)
-                                return gap_record
-        elif build.timed_out:
-            error_summary = build.stderr[:500] or "Build timed out"
-            error_category = ErrorCategory.TIMEOUT.value
-            self._record_error_category(target.id, ErrorCategory.TIMEOUT)
-        elif not build.success:
-            error_summary = build.stderr[:500] if build.stderr else "Build failed (unknown)"
-            error_category = ErrorCategory.OTHER.value
-            self._record_error_category(target.id, ErrorCategory.OTHER)
-        else:
-            error_summary = f"sorry still present after replacement at line {target.line}"
-            error_category = ErrorCategory.SORRY_REMAINS.value
-            self._record_error_category(target.id, ErrorCategory.SORRY_REMAINS)
-
-        self._failed_proofs.setdefault(target.id, []).append(proof)
-
-        fail_record = ExperimentRecord(
-            cycle=cycle,
-            timestamp=datetime.now(UTC).isoformat(),
-            target_id=target.id,
-            decl_name=target.decl_name,
-            file=str(file_path.relative_to(self.project.root)),
-            line=target.line,
-            outcome=_failure_outcome(build),
-            attempt=attempt,
-            duration_seconds=duration,
-            llm_tokens=response.output_tokens,
-            llm_tok_per_sec=response.tokens_per_second,
-            error_summary=error_summary,
-            error_category=error_category,
-            build_duration_seconds=build.duration_seconds,
-            environment_sha256=self._environment_sha256,
-            proof_sha256=sha256_text(proof),
-            model=response.model,
-            backend=self.llm.config.backend,
-            llm_input_tokens=response.input_tokens,
-            prompt_sha256=self._evidence.prompt_sha256,
-            structural_context_sha256=self._evidence.structural_context_sha256,
-            indexed_context_sha256=self._evidence.indexed_context_sha256,
-            strategy_sha256=self._evidence.strategy_sha256,
-            strategy_response_sha256=self._evidence.strategy_response_sha256,
-            model_revision=self.llm.config.model_revision or "",
-            sampling_seed=self.llm.config.seed,
-            model_artifact_sha256=self.llm.config.model_artifact_sha256 or "",
+    def _validate_candidate_source(
+        self,
+        target: SorryTarget,
+        source: str,
+    ) -> BuildResult:
+        """Validate source against the run's exact proof environment."""
+        return self.project.validate_candidate(
+            target.file,
+            source,
+            timeout=self.config.cycle_timeout_seconds,
+            declaration=target.qualified_decl_name,
+            declaration_line=target.line,
+            expected_environment=self._environment_sha256,
         )
 
-        # Collect failed attempt for DPO training data
-        self.collector.record_attempt(fail_record, proof)
+    def _finish_proof_candidate(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        original_source: str,
+        file_context: str,
+    ) -> ExperimentRecord:
+        """Accept a valid candidate or record its classified rejection."""
+        build = require_instance(
+            candidate.build,
+            BuildResult,
+            "a checked proof candidate requires a Lean verdict",
+        )
+        sorry_gone = build.success and (count_sorries(candidate.source) == count_sorries(original_source) - 1)
+        if sorry_gone and self.dry_run:
+            return self._validated_candidate_record(
+                cycle,
+                target,
+                attempt,
+                started,
+                candidate,
+            )
+        if sorry_gone:
+            return self._accept_proof_candidate(
+                cycle,
+                target,
+                attempt,
+                started,
+                candidate,
+                original_source,
+            )
+        return self._reject_proof_candidate(
+            cycle,
+            target,
+            attempt,
+            started,
+            candidate,
+            file_context,
+        )
 
-        return fail_record
+    def _validated_candidate_record(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+    ) -> ExperimentRecord:
+        """Report a dry-run candidate accepted by the pinned kernel."""
+        build = require_instance(
+            candidate.build,
+            BuildResult,
+            "a validated proof requires a Lean verdict",
+        )
+        console.print(
+            f"  [bold green]VALIDATED[/bold green] "
+            f"[green]{target.decl_name}[/green] "
+            f"[dim]({build.duration_seconds:.1f}s sandboxed Lean; "
+            "no project changes)[/dim]"
+        )
+        return self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=Outcome.VALIDATED,
+            llm_tokens=candidate.response.output_tokens,
+            llm_tok_per_sec=candidate.response.tokens_per_second,
+            proof_length=candidate.line_count,
+            build_duration_seconds=build.duration_seconds,
+            proof=candidate.proof,
+            axioms=",".join(build.axioms) if build.axioms else "none",
+            model=candidate.response.model,
+        )
+
+    def _accept_proof_candidate(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        original_source: str,
+    ) -> ExperimentRecord:
+        """Install, record, and learn from one kernel-accepted proof."""
+        build = require_instance(
+            candidate.build,
+            BuildResult,
+            "an accepted proof requires a Lean verdict",
+        )
+        record = self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=Outcome.SUCCESS,
+            llm_tokens=candidate.response.output_tokens,
+            llm_tok_per_sec=candidate.response.tokens_per_second,
+            proof_length=candidate.line_count,
+            build_duration_seconds=build.duration_seconds,
+            proof=candidate.proof,
+            axioms=",".join(build.axioms) if build.axioms else "none",
+            model=candidate.response.model,
+            llm_input_tokens=candidate.response.input_tokens,
+        )
+        record = record.bind_source(original_source, candidate.source)
+        failure = self._accept_source(
+            target.file,
+            candidate.source,
+            original_source,
+            record,
+        )
+        if failure is not None:
+            return self._proof_acceptance_failure(
+                cycle,
+                target,
+                attempt,
+                started,
+                candidate,
+                failure,
+            )
+        console.print(
+            f"  [bold green]PROVED![/bold green] "
+            f"[green]{target.decl_name}[/green] "
+            f"[dim]({build.duration_seconds:.1f}s build)[/dim]"
+        )
+        self._failed_proofs.pop(target.id, None)
+        self._last_error.pop(target.id, None)
+        self._error_history.pop(target.id, None)
+        self._step("Committing to git + collecting training data", "green")
+        self.collector.record_attempt(record, candidate.proof)
+        skill = self.skill_memory.learn_from_proof(
+            theorem_name=target.decl_name,
+            theorem_statement=target.context_before[:200],
+            proof=candidate.proof,
+        )
+        if skill:
+            self._step(
+                f"Learned skill: {skill.name} ({skill.description[:60]})",
+                "magenta",
+            )
+        return record
+
+    def _proof_acceptance_failure(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        failure: tuple[Literal["write", "commit"], str],
+    ) -> ExperimentRecord:
+        """Report a source-write or commit failure after validation."""
+        stage, detail = failure
+        outcome = Outcome.FAIL_BUILD
+        message = f"Could not accept validated proof: {detail}"
+        if stage == "commit":
+            outcome = Outcome.VALIDATED
+            message = f"Could not commit the accepted proof: {detail}"
+            self._terminal_failure = message
+            self._interrupted = True
+            self._step(message, "red")
+        return self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=outcome,
+            llm_tokens=candidate.response.output_tokens,
+            llm_tok_per_sec=candidate.response.tokens_per_second,
+            error_summary=message,
+            proof=candidate.proof,
+            model=candidate.response.model,
+        )
+
+    def _reject_proof_candidate(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        file_context: str,
+    ) -> ExperimentRecord:
+        """Classify a rejected proof and apply its bounded recovery policy."""
+        self._step("Build failed — analyzing error...", "red")
+        category, summary = self._candidate_diagnostic(target, candidate)
+        if category == ErrorCategory.UNKNOWN_IDENTIFIER and not self.dry_run:
+            gap_record = self._try_fill_candidate_gap(
+                cycle,
+                target,
+                attempt,
+                started,
+                candidate,
+                file_context,
+                summary,
+            )
+            if gap_record is not None:
+                return gap_record
+        self._failed_proofs.setdefault(target.id, []).append(candidate.proof)
+        build = require_instance(
+            candidate.build,
+            BuildResult,
+            "a rejected proof requires a Lean verdict",
+        )
+        record = self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=_failure_outcome(build),
+            llm_tokens=candidate.response.output_tokens,
+            llm_tok_per_sec=candidate.response.tokens_per_second,
+            error_summary=summary,
+            error_category=category.value,
+            build_duration_seconds=build.duration_seconds,
+            proof=candidate.proof,
+            model=candidate.response.model,
+            llm_input_tokens=candidate.response.input_tokens,
+        )
+        self.collector.record_attempt(record, candidate.proof)
+        return record
+
+    def _candidate_diagnostic(
+        self,
+        target: SorryTarget,
+        candidate: ProofCandidate,
+    ) -> tuple[ErrorCategory, str]:
+        """Classify one verdict and update the target's retry state."""
+        build = require_instance(
+            candidate.build,
+            BuildResult,
+            "a candidate diagnostic requires a Lean verdict",
+        )
+        if build.errors:
+            category = classify_error(build.errors[0].message[:500])
+            summary = _locate_in_candidate(
+                build.errors,
+                candidate.proof,
+                target.line,
+            )
+            self._last_error[target.id] = (category, summary)
+            self._record_error_category(target.id, category)
+            if category in STRUCTURAL_ERRORS:
+                self._step(
+                    f"Structural error ({category.value}) — skipping target",
+                    "red",
+                )
+                # The accepted source passed preflight. This verdict belongs
+                # only to the rejected candidate and exhausts this target.
+                self._attempts[target.id] = self.config.max_retries_per_sorry
+            return category, summary
+        if build.timed_out:
+            category = ErrorCategory.TIMEOUT
+            summary = build.stderr[:500] or "Build timed out"
+        elif not build.success:
+            category = ErrorCategory.OTHER
+            summary = build.stderr[:500] or "Build failed (unknown)"
+        else:
+            category = ErrorCategory.SORRY_REMAINS
+            summary = f"sorry still present after replacement at line {target.line}"
+        self._record_error_category(target.id, category)
+        return category, summary
+
+    def _try_fill_candidate_gap(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        file_context: str,
+        error_summary: str,
+    ) -> ExperimentRecord | None:
+        """Try at most two missing declarations reported by one candidate."""
+        gaps = detect_missing_definitions(
+            error_summary,
+            file_context,
+            str(target.file),
+        )
+        for gap in gaps[:2]:
+            record = self._try_fill_gap(
+                cycle,
+                target,
+                attempt,
+                started,
+                candidate,
+                gap,
+            )
+            if record is not None:
+                return record
+        return None
+
+    def _try_fill_gap(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        gap: MissingDefinition,
+    ) -> ExperimentRecord | None:
+        """Generate, validate, and accept one missing declaration."""
+        self._step(
+            f"Detected missing: {gap.name} — attempting to define it",
+            "yellow",
+        )
+        try:
+            generated = fill_gap(gap, self.llm.generate)
+        except (LLMError, GeneratedCodeError) as error:
+            self._step(f"Gap generation rejected: {error}", "red")
+            return None
+        if generated is None:
+            return None
+        self._step(
+            f"Generated definition for {gap.name} ({len(generated.code)} chars)",
+            "cyan",
+        )
+        current = self.project.read_file(target.file)
+        source, declaration_line = _insert_gap_declaration(current, generated.code)
+        try:
+            check = self.project.validate_candidate(
+                target.file,
+                source,
+                timeout=60,
+                declaration=gap.name,
+                declaration_line=declaration_line,
+                expected_environment=self._environment_sha256,
+            )
+        except OSError as error:
+            self._step(f"Gap validation failed: {error}", "red")
+            return None
+        if not check.success:
+            self._step(f"Gap definition for {gap.name} did not compile", "red")
+            return None
+        return self._accept_gap(
+            cycle,
+            target,
+            attempt,
+            started,
+            candidate,
+            gap,
+            generated,
+            check,
+            current,
+            source,
+            declaration_line,
+        )
+
+    def _accept_gap(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        candidate: ProofCandidate,
+        gap: MissingDefinition,
+        generated: GeneratedDefinition,
+        check: BuildResult,
+        original_source: str,
+        source: str,
+        declaration_line: int,
+    ) -> ExperimentRecord:
+        """Accept one validated missing declaration and record its identity."""
+        target_id = f"{target.file.relative_to(self.project.root)}:{declaration_line}:0:{gap.name}"
+        record = self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=Outcome.GAP_FILLED,
+            llm_tokens=generated.response.output_tokens,
+            llm_tok_per_sec=generated.response.tokens_per_second,
+            error_summary=(f"Added missing definition {gap.name}; proof target will be rescanned"),
+            error_category=ErrorCategory.UNKNOWN_IDENTIFIER.value,
+            proof_length=len(generated.code.splitlines()),
+            build_duration_seconds=check.duration_seconds,
+            proof=generated.code,
+            axioms=",".join(check.axioms) if check.axioms else "none",
+            model=generated.response.model,
+            llm_input_tokens=generated.response.input_tokens,
+            prompt_sha256=generated.prompt_sha256,
+            target_id=target_id,
+            decl_name=gap.name,
+            line=declaration_line,
+        )
+        record = record.bind_source(original_source, source)
+        failure = self._accept_source(
+            target.file,
+            source,
+            original_source,
+            record,
+        )
+        if failure is not None:
+            return self._gap_acceptance_failure(
+                cycle,
+                target,
+                attempt,
+                started,
+                gap,
+                generated,
+                declaration_line,
+                failure,
+            )
+        log.info("Auto-defined %s in %s", gap.name, target.file.name)
+        self._failed_proofs.setdefault(target.id, []).append(candidate.proof)
+        return record
+
+    def _gap_acceptance_failure(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+        started: float,
+        gap: MissingDefinition,
+        generated: GeneratedDefinition,
+        declaration_line: int,
+        failure: tuple[Literal["write", "commit"], str],
+    ) -> ExperimentRecord:
+        """Report a source-write or commit failure for a validated gap."""
+        stage, detail = failure
+        if stage == "commit":
+            message = f"Could not commit the accepted definition: {detail}"
+            self._terminal_failure = message
+            self._interrupted = True
+            self._step(message, "red")
+        target_id = f"{target.file.relative_to(self.project.root)}:{declaration_line}:0:{gap.name}"
+        return self._make_record(
+            cycle,
+            target,
+            attempt,
+            started,
+            outcome=Outcome.FAIL_BUILD,
+            llm_tokens=generated.response.output_tokens,
+            llm_tok_per_sec=generated.response.tokens_per_second,
+            error_summary=f"Gap acceptance failed: {detail}",
+            error_category=ErrorCategory.UNKNOWN_IDENTIFIER.value,
+            proof_length=len(generated.code.splitlines()),
+            proof=generated.code,
+            model=generated.response.model,
+            llm_input_tokens=generated.response.input_tokens,
+            prompt_sha256=generated.prompt_sha256,
+            target_id=target_id,
+            decl_name=gap.name,
+            line=declaration_line,
+        )
+
+    def _try_fill_sorry(
+        self,
+        cycle: int,
+        target: SorryTarget,
+        attempt: int,
+    ) -> ExperimentRecord:
+        """Run one explicit proof-attempt state machine."""
+        self._evidence = AttemptEvidence()
+        started = time.monotonic()
+        original_source = self.project.read_file(target.file)
+        record = self._attempt_preflight(
+            cycle,
+            target,
+            attempt,
+            started,
+            original_source,
+        )
+        if record is not None:
+            return record
+        prompt, record = self._build_attempt_prompt(
+            cycle,
+            target,
+            attempt,
+            started,
+            original_source,
+        )
+        if record is not None:
+            return record
+        prompt = require_instance(
+            prompt,
+            AttemptPrompt,
+            "a model request requires its proof context",
+        )
+        response, record = self._request_proof(
+            cycle,
+            target,
+            attempt,
+            started,
+            prompt,
+        )
+        if record is not None:
+            return record
+        response = require_instance(
+            response,
+            LLMResponse,
+            "a proof candidate requires a model response",
+        )
+        candidate, record = self._prepare_proof_candidate(
+            cycle,
+            target,
+            attempt,
+            started,
+            response,
+            original_source,
+        )
+        if record is not None:
+            return record
+        candidate = require_instance(
+            candidate,
+            ProofCandidate,
+            "proof validation requires a generated candidate",
+        )
+        candidate, record = self._check_proof_candidate(
+            cycle,
+            target,
+            attempt,
+            started,
+            candidate,
+            original_source,
+        )
+        if record is not None:
+            return record
+        candidate = require_instance(
+            candidate,
+            ProofCandidate,
+            "proof acceptance requires a checked candidate",
+        )
+        return self._finish_proof_candidate(
+            cycle,
+            target,
+            attempt,
+            started,
+            candidate,
+            original_source,
+            prompt.file_context,
+        )
 
     # -- Helpers ------------------------------------------------------------
 
@@ -1639,7 +2242,7 @@ class AutoLeanAgent:
         decl_name: str | None = None,
         line: int | None = None,
     ) -> ExperimentRecord:
-        """Helper to create an ExperimentRecord with common fields."""
+        """Create the experiment record carrying this attempt's identities."""
         return ExperimentRecord(
             cycle=cycle,
             timestamp=datetime.now(UTC).isoformat(),
@@ -1661,10 +2264,13 @@ class AutoLeanAgent:
             axioms=axioms,
             model=model or self.llm.config.model,
             backend=self.llm.config.backend,
+            inference_location=inference_location(self.llm.config),
             llm_input_tokens=(self._evidence.input_tokens if llm_input_tokens is None else llm_input_tokens),
             prompt_sha256=(self._evidence.prompt_sha256 if prompt_sha256 is None else prompt_sha256),
             structural_context_sha256=self._evidence.structural_context_sha256,
             indexed_context_sha256=self._evidence.indexed_context_sha256,
+            search_context_sha256=self._evidence.search_context_sha256,
+            remote_search=self._evidence.remote_search,
             strategy_sha256=self._evidence.strategy_sha256,
             strategy_response_sha256=self._evidence.strategy_response_sha256,
             model_revision=self.llm.config.model_revision or "",
@@ -1680,223 +2286,255 @@ class AutoLeanAgent:
         session_start: float,
     ) -> None:
         """Print the end-of-session report."""
-        from rich.table import Table
-
-        elapsed = time.monotonic() - session_start
-        proved = [r for r in self.tracker.records if r.outcome == Outcome.SUCCESS]
-        validated = [r for r in self.tracker.records if r.outcome == Outcome.VALIDATED]
-        total_tokens = sum(r.llm_tokens for r in self.tracker.records)
-        remaining = [
-            t for t in remaining_targets if self._attempts.get(t.id, 0) < self.config.max_retries_per_sorry
-        ]
-        exhausted = [
-            t for t in remaining_targets if self._attempts.get(t.id, 0) >= self.config.max_retries_per_sorry
-        ]
-
-        # ── Header panel ──
+        report = self._session_report(remaining_targets, session_start)
+        self._print_report_header(report)
+        self.tracker.print_summary(initial_count=self._initial_sorry_count)
+        self._print_proved_report(report)
+        self._print_remaining_report(report)
+        self._print_exhausted_report(report)
+        self._print_timing_report(report)
+        self._print_files_report(report)
+        stats = self._print_training_report()
+        self._log_final_report(report, stats)
         console.print()
-        header_lines = [
+
+    def _session_report(
+        self,
+        targets: list[SorryTarget],
+        session_start: float,
+    ) -> SessionReport:
+        """Compute the immutable facts used by every report view."""
+        records = self.tracker.records
+        return SessionReport(
+            elapsed_seconds=time.monotonic() - session_start,
+            proved=tuple(record for record in records if record.outcome == Outcome.SUCCESS),
+            validated=tuple(record for record in records if record.outcome == Outcome.VALIDATED),
+            remaining=tuple(
+                target
+                for target in targets
+                if self._attempts.get(target.id, 0) < self.config.max_retries_per_sorry
+            ),
+            exhausted=tuple(
+                target
+                for target in targets
+                if self._attempts.get(target.id, 0) >= self.config.max_retries_per_sorry
+            ),
+            total_tokens=sum(record.llm_tokens for record in records),
+        )
+
+    def _print_report_header(self, report: SessionReport) -> None:
+        """Render the session totals."""
+        lines = [
             "[bold]Session Complete[/bold]",
-            f"Duration:  {elapsed / 60:.1f} min ({elapsed / 3600:.1f} hr)",
+            f"Duration:  {report.elapsed_seconds / 60:.1f} min ({report.elapsed_seconds / 3600:.1f} hr)",
             f"Cycles:    {self.tracker.cycle}",
-            f"Proved:    [bold green]{len(proved)}[/bold green] / {self._initial_sorry_count}",
-            f"Remaining: [yellow]{len(remaining)}[/yellow]  Exhausted: [red]{len(exhausted)}[/red]",
-            f"Tokens:    {total_tokens:,}",
+            f"Proved:    [bold green]{len(report.proved)}[/bold green] / {self._initial_sorry_count}",
+            f"Remaining: [yellow]{len(report.remaining)}[/yellow]  "
+            f"Exhausted: [red]{len(report.exhausted)}[/red]",
+            f"Tokens:    {report.total_tokens:,}",
         ]
         if self.dry_run:
-            header_lines.insert(
+            lines.insert(
                 4,
-                f"Validated: [bold green]{len(validated)}[/bold green] dry-run candidate(s)",
+                f"Validated: [bold green]{len(report.validated)}[/bold green] dry-run candidate(s)",
             )
+        console.print()
         console.print(
             Panel(
-                "\n".join(header_lines),
+                "\n".join(lines),
                 title="AutoLean Report",
                 border_style="cyan",
                 width=70,
             )
         )
 
-        # ── Metrics tables (from tracker) ──
-        self.tracker.print_summary(initial_count=self._initial_sorry_count)
-
-        # ── Proved theorems table ──
-        if proved:
-            proved_table = Table(
-                title=f"Proved Theorems ({len(proved)})",
-                show_header=True,
-                header_style="bold green",
-                min_width=70,
+    @staticmethod
+    def _print_proved_report(report: SessionReport) -> None:
+        """Render accepted theorem records."""
+        if not report.proved:
+            return
+        table = Table(
+            title=f"Proved Theorems ({len(report.proved)})",
+            show_header=True,
+            header_style="bold green",
+            min_width=70,
+        )
+        table.add_column("Theorem", style="green", min_width=28)
+        table.add_column("File", style="dim", min_width=20)
+        table.add_column("Att", justify="right", min_width=4)
+        table.add_column("Time", justify="right", min_width=8)
+        table.add_column("Tokens", justify="right", min_width=8)
+        for record in report.proved:
+            table.add_row(
+                record.decl_name,
+                f"{record.file}:{record.line}",
+                str(record.attempt),
+                f"{record.duration_seconds:.1f}s",
+                f"{record.llm_tokens:,}",
             )
-            proved_table.add_column("Theorem", style="green", min_width=28)
-            proved_table.add_column("File", style="dim", min_width=20)
-            proved_table.add_column("Att", justify="right", min_width=4)
-            proved_table.add_column("Time", justify="right", min_width=8)
-            proved_table.add_column("Tokens", justify="right", min_width=8)
+        console.print(table)
 
-            for r in proved:
-                proved_table.add_row(
-                    r.decl_name,
-                    f"{r.file}:{r.line}",
-                    str(r.attempt),
-                    f"{r.duration_seconds:.1f}s",
-                    f"{r.llm_tokens:,}",
-                )
-            console.print(proved_table)
-
-        # ── Remaining targets table ──
-        if remaining:
-            rem_table = Table(
-                title=f"Remaining ({len(remaining)})",
-                show_header=True,
-                header_style="bold yellow",
-                min_width=70,
+    def _print_remaining_report(self, report: SessionReport) -> None:
+        """Render targets that retain retry budget."""
+        if not report.remaining:
+            return
+        table = Table(
+            title=f"Remaining ({len(report.remaining)})",
+            show_header=True,
+            header_style="bold yellow",
+            min_width=70,
+        )
+        table.add_column("Target", style="yellow", min_width=28)
+        table.add_column("File", style="dim", min_width=20)
+        table.add_column("Attempts", justify="right", min_width=10)
+        for target in report.remaining[:20]:
+            attempts = self._attempts.get(target.id, 0)
+            table.add_row(
+                target.decl_name,
+                f"{target.rel_path or target.file.name}:{target.line}",
+                f"{attempts}/{self.config.max_retries_per_sorry}",
             )
-            rem_table.add_column("Target", style="yellow", min_width=28)
-            rem_table.add_column("File", style="dim", min_width=20)
-            rem_table.add_column("Attempts", justify="right", min_width=10)
+        if len(report.remaining) > 20:
+            table.add_row(f"... +{len(report.remaining) - 20} more", "", "")
+        console.print(table)
 
-            for t in remaining[:20]:
-                attempts = self._attempts.get(t.id, 0)
-                rem_table.add_row(
-                    t.decl_name,
-                    f"{t.rel_path or t.file.name}:{t.line}",
-                    f"{attempts}/{self.config.max_retries_per_sorry}",
-                )
-            if len(remaining) > 20:
-                rem_table.add_row(f"... +{len(remaining) - 20} more", "", "")
-            console.print(rem_table)
-
-        # ── Exhausted targets table ──
-        if exhausted:
-            exh_table = Table(
-                title=f"Exhausted Retries ({len(exhausted)})",
-                show_header=True,
-                header_style="bold red",
-                min_width=70,
+    def _print_exhausted_report(self, report: SessionReport) -> None:
+        """Render targets whose retry budget is exhausted."""
+        if not report.exhausted:
+            return
+        table = Table(
+            title=f"Exhausted Retries ({len(report.exhausted)})",
+            show_header=True,
+            header_style="bold red",
+            min_width=70,
+        )
+        table.add_column("Target", style="red", min_width=28)
+        table.add_column("Last Error", style="dim", min_width=30)
+        for target in report.exhausted[:15]:
+            last_error = self._last_error.get(target.id)
+            table.add_row(
+                target.decl_name,
+                last_error[0].value if last_error else "unknown",
             )
-            exh_table.add_column("Target", style="red", min_width=28)
-            exh_table.add_column("Last Error", style="dim", min_width=30)
+        if len(report.exhausted) > 15:
+            table.add_row(f"... +{len(report.exhausted) - 15} more", "")
+        console.print(table)
 
-            for t in exhausted[:15]:
-                last_err = self._last_error.get(t.id)
-                err_text = last_err[0].value if last_err else "unknown"
-                exh_table.add_row(t.decl_name, err_text)
-            if len(exhausted) > 15:
-                exh_table.add_row(f"... +{len(exhausted) - 15} more", "")
-            console.print(exh_table)
-
-        # ── Timing panel ──
-        timing_lines = [
-            f"Wall time:      {elapsed / 60:.1f} min ({elapsed / 3600:.1f} hr)",
+    @staticmethod
+    def _print_timing_report(report: SessionReport) -> None:
+        """Render elapsed time and proof throughput."""
+        lines = [
+            f"Wall time:      {report.elapsed_seconds / 60:.1f} min ({report.elapsed_seconds / 3600:.1f} hr)",
         ]
-        if proved:
-            avg_time = sum(r.duration_seconds for r in proved) / len(proved)
-            rate = len(proved) / (elapsed / 3600) if elapsed > 0 else 0
-            timing_lines.append(f"Avg proof time: {avg_time:.1f}s")
-            timing_lines.append(f"Proof rate:     {rate:.1f}/hr")
-        timing_lines.append(f"Total tokens:   {total_tokens:,}")
-        if total_tokens > 0 and proved:
-            timing_lines.append(f"Tokens/proof:   {total_tokens / len(proved):,.0f}")
-
+        if report.proved:
+            average = sum(record.duration_seconds for record in report.proved) / len(report.proved)
+            rate = len(report.proved) / (report.elapsed_seconds / 3600) if report.elapsed_seconds > 0 else 0
+            lines.extend((f"Avg proof time: {average:.1f}s", f"Proof rate:     {rate:.1f}/hr"))
+        lines.append(f"Total tokens:   {report.total_tokens:,}")
+        if report.total_tokens > 0 and report.proved:
+            lines.append(f"Tokens/proof:   {report.total_tokens / len(report.proved):,.0f}")
         console.print(
             Panel(
-                "\n".join(timing_lines),
+                "\n".join(lines),
                 title="Timing",
                 border_style="dim",
                 width=70,
             )
         )
 
-        # ── Files & next steps ──
+    def _artifact_report_lines(self, report: SessionReport) -> list[str]:
+        """Return the files and dry-run state exposed by the report."""
         if self.dry_run:
-            files_lines = ["Dry run: no project files were written."]
-            if validated:
-                files_lines.extend(
+            lines = ["Dry run: no project files were written."]
+            if report.validated:
+                lines.extend(
                     (
                         "",
                         "Re-run the same command without --dry-run to accept a validated proof.",
                     )
                 )
-        else:
-            files_lines = [f"Results TSV:  {self.tracker.results_file}"]
-            log_file = self.project.root / "overnight.log"
-            if log_file.exists():
-                files_lines.append(f"Session log:  {log_file}")
-            log_dir = self.project.root / "logs"
-            if log_dir.exists():
-                latest = sorted(log_dir.glob("autolean_*.log"))
-                if latest:
-                    files_lines.append(f"Audit log:    {latest[-1]}")
+            return lines
+        lines = [f"Results TSV:  {self.tracker.results_file}"]
+        log_file = self.project.root / "overnight.log"
+        if log_file.exists():
+            lines.append(f"Session log:  {log_file}")
+        log_dir = self.project.root / "logs"
+        latest = sorted(log_dir.glob("autolean_*.log")) if log_dir.exists() else []
+        if latest:
+            lines.append(f"Audit log:    {latest[-1]}")
+        return lines
 
-        if not self.dry_run and (remaining or exhausted):
-            files_lines.append("")
-            files_lines.append("[bold]Next steps:[/bold]")
-            if remaining:
-                files_lines.append(f"  {ui.command()} solve --resume")
-            files_lines.append(f"  {ui.command()} changes")
-            files_lines.append(f"  {ui.command()} results")
-            if exhausted:
-                files_lines.append(f"  {ui.command()} solve --model deepseek-prover --resume")
-        elif not self.dry_run:
-            files_lines.append("")
-            files_lines.append("[bold green]All sorry targets resolved![/bold green]")
+    def _next_step_report_lines(self, report: SessionReport) -> list[str]:
+        """Return commands that follow from the session's terminal state."""
+        if self.dry_run:
+            return []
+        if not report.remaining and not report.exhausted:
+            return ["", "[bold green]All sorry targets resolved![/bold green]"]
+        lines = ["", "[bold]Next steps:[/bold]"]
+        if report.remaining:
+            lines.append(f"  {ui.command()} solve --resume")
+        lines.extend((f"  {ui.command()} changes", f"  {ui.command()} results"))
+        if report.exhausted:
+            lines.append(f"  {ui.command()} solve --model deepseek-prover --resume")
+        return lines
 
+    def _print_files_report(self, report: SessionReport) -> None:
+        """Render session artifacts and valid follow-up commands."""
+        lines = self._artifact_report_lines(report)
+        lines.extend(self._next_step_report_lines(report))
         console.print(
             Panel(
-                "\n".join(files_lines),
+                "\n".join(lines),
                 title="Files & Next Steps",
                 border_style="dim",
                 width=70,
             )
         )
 
-        # ── Export training data + fine-tuning trigger ──
+    def _print_training_report(self) -> dict[str, int]:
+        """Export and render collected examples when the run may write."""
         stats = self.collector.stats()
-        if not self.dry_run and stats["total_examples"] > 0:
-            exported = self.collector.export_all()
-            data_lines = [
-                f"Total examples:    {stats['total_examples']}",
-                f"Positive (SFT):    {stats['positive']}",
-                f"Negative (DPO):    {stats['negative']}",
-                f"Unique theorems:   {stats['unique_theorems']}",
-            ]
-            for fmt, path in (exported or {}).items():
-                data_lines.append(f"  {fmt}: {path}")
-
-            ft_status = check_finetune_readiness(self.project.root / "training_data")
-            if ft_status.ready:
-                data_lines.append("")
-                data_lines.append(
-                    f"[bold magenta]Fine-tuning data ready:[/bold magenta] "
-                    f"{ft_status.positive_examples} accepted proofs exported"
-                )
-                trigger_local_finetune(self.project.root / "training_data")
-            elif stats["positive"] > 0:
-                until_finetune = FINETUNE_THRESHOLD - ft_status.positive_examples
-                data_lines.append(f"  ({until_finetune} more proofs until auto fine-tuning)")
-
-            console.print(
-                Panel(
-                    "\n".join(data_lines),
-                    title="Training data",
-                    border_style="note",
-                    width=70,
-                )
+        if self.dry_run or stats["total_examples"] == 0:
+            return stats
+        lines = [
+            f"Total examples:    {stats['total_examples']}",
+            f"Positive (SFT):    {stats['positive']}",
+            f"Negative (DPO):    {stats['negative']}",
+            f"Unique theorems:   {stats['unique_theorems']}",
+        ]
+        for format_name, path in self.collector.export_all().items():
+            lines.append(f"  {format_name}: {path}")
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title="Training data",
+                border_style="note",
+                width=70,
             )
+        )
+        return stats
 
-        # ── Log the final summary to structured log ──
+    def _log_final_report(
+        self,
+        report: SessionReport,
+        stats: dict[str, int],
+    ) -> None:
+        """Write the report facts to the structured session log."""
+        completion = len(report.proved) / self._initial_sorry_count * 100 if self._initial_sorry_count else 0
         log.info(
             "SESSION COMPLETE: proved=%d/%d (%.1f%%) cycles=%d time=%.1fm tokens=%d training_examples=%d",
-            len(proved),
+            len(report.proved),
             self._initial_sorry_count,
-            len(proved) / self._initial_sorry_count * 100 if self._initial_sorry_count else 0,
+            completion,
             self.tracker.cycle,
-            elapsed / 60,
-            total_tokens,
+            report.elapsed_seconds / 60,
+            report.total_tokens,
             stats.get("total_examples", 0),
         )
-        for r in proved:
-            log.info("  PROVED: %s (attempt %d, %.1fs)", r.decl_name, r.attempt, r.duration_seconds)
-
-        console.print()
+        for record in report.proved:
+            log.info(
+                "  PROVED: %s (attempt %d, %.1fs)",
+                record.decl_name,
+                record.attempt,
+                record.duration_seconds,
+            )

@@ -1,17 +1,22 @@
 # Choose and switch models
 
-AutoLean gives every model backend the same narrow job: return text for a
+AutoLean gives every model provider the same narrow job: return text for a
 bounded request. Lean validation is identical across providers.
 
 ## Inspect local readiness
 
 ```bash
 autolean models
+autolean models codex
+autolean models codex-terra
+autolean models codex --json
 ```
 
-The command lists profiles, their backends, capabilities, setup commands, and
-the readiness AutoLean can observe. Use a profile name with any model-aware
-workflow:
+The catalog lists every profile and the readiness AutoLean can observe. Pass a
+provider name to compare only its models, or a profile name to see its exact
+provider model, inference placement, setup, and selection command. `--json`
+emits the same selected catalog with provider capabilities for scripts. Use a
+profile with any model-aware workflow:
 
 ```bash
 autolean plan "every prime greater than two is odd" --model opus
@@ -26,28 +31,35 @@ installed AutoLean version.
 ## Use the machine default
 
 `model: auto` selects an authenticated subscription CLI first, followed by a
-configured hosted API. Claude is the stable tie-breaker when both Claude and
-Codex subscriptions are ready. The selected provider always receives its
-strongest tuned profile and `max` reasoning effort:
+configured hosted API. Subscription priority is Codex, Claude, then Grok;
+hosted API priority is OpenAI, then Anthropic. Codex selects GPT-6 Astra at
+`max` reasoning effort. Each provider selects its tuned default profile:
 
-- Claude CLI: `fable`
-- Codex CLI: `gpt-5.6-sol`
-- Anthropic API: `claude-fable-5`
-- OpenAI API: `gpt-5.6-sol`
+- Claude CLI: `fable` at `max`
+- Codex CLI: `gpt-6-astra` at `max`
+- Grok CLI: `grok-4.6` at `xhigh`
+- Anthropic API: `claude-fable-5` at `max`
+- OpenAI API: `gpt-6-astra` at `max`
 
-The mappings follow Anthropic's
+The provider names are `claude`, `codex`, `grok`, `anthropic`, `openai`,
+`ollama`, `compatible`, and `muse`. The mappings follow Anthropic's
 [model guidance](https://platform.claude.com/docs/en/about-claude/models/choosing-a-model)
 and [effort control](https://platform.claude.com/docs/en/build-with-claude/effort),
-and OpenAI's [model catalog](https://developers.openai.com/api/docs/models).
+and OpenAI's
+[GPT-6 Astra contract](https://developers.openai.com/api/docs/models/gpt-6-astra).
+`grok models` lists the Grok CLI's live catalog.
 
-Choose a provider while retaining its strongest model with `--backend`:
+Choose a provider while retaining its strongest model with `--provider`:
 
 ```bash
-autolean doctor --backend codex_cli
-autolean prove "1 + 1 = 2" --backend anthropic
+autolean doctor --provider grok
+autolean prove "1 + 1 = 2" --provider anthropic
+autolean --provider grok prove "the Pythagorean theorem"
 ```
 
-Select the exact model for local and self-hosted backends.
+Local and self-hosted providers require an exact model profile or model ID.
+The [CLI reference](../reference/cli.md#shared-model-options) records the
+provider names used by configuration and automation.
 
 ## Set the project default
 
@@ -61,7 +73,7 @@ model: sonnet
 ```
 
 A command-line `--model` selects a model for that invocation. The session
-records the resolved profile, backend, and provider model.
+records the resolved provider and provider model.
 
 ## Choose interactively
 
@@ -74,14 +86,18 @@ continuing a proof session.
 
 ## Use a subscription
 
-`claude_cli` uses a Claude subscription authenticated by the Claude CLI.
-`codex_cli` uses a ChatGPT subscription authenticated by the Codex CLI.
+The `claude` provider uses a Claude subscription authenticated by the Claude
+CLI. The `codex` provider uses a ChatGPT subscription authenticated by the
+Codex CLI. The `grok` provider uses a SuperGrok or X Premium+ subscription
+authenticated by the Grok CLI.
 
 ```bash
 claude                    # enter /login
 codex login
+grok login
 autolean doctor --model opus
 autolean doctor --model codex
+autolean doctor --model grok
 ```
 
 Subscription subprocesses run in temporary directories with provider tools,
@@ -120,10 +136,16 @@ For llama.cpp, vLLM, or another OpenAI-compatible server, put the endpoint in
 ## LLM Configuration
 
 model: my-local-model
-backend: openai_compat
+provider: compatible
 endpoint: http://127.0.0.1:8080
+search_scope: local
 temperature: 0
 ```
+
+`localhost` and loopback IP endpoints are local. Any other explicit endpoint
+is remote. With `search_scope: auto`, local inference also keeps theorem and
+goal searches local; `search_scope: remote` composes local inference with
+Loogle, LeanSearch, and arXiv.
 
 The `muse-glimmer` profiles add the reasoning controls and stop-token semantics
 required by Muse Glimmer. `autolean models` prints the qualified model revision,

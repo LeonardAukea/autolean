@@ -11,7 +11,7 @@ sorry-elimination
 
 ## Lean Project Path
 
-<!-- Absolute path to the Lean 4 project root (must contain lakefile.lean) -->
+<!-- Lean project path, absolute or relative to this file; contains lakefile.lean -->
 workspace
 
 ## Goals
@@ -42,12 +42,12 @@ workspace
 ## LLM Configuration
 
 <!--
-`auto` selects the strongest profile for an authenticated provider. Run
-`autolean models` for profiles and setup state; docs/reference/program.md
-defines every key.
+`auto` prefers GPT-6 Astra at max reasoning through Codex. Run
+`autolean models` for profiles and setup state. The selection rules live
+in docs/how-to/choose-a-model.md; docs/reference/program.md defines each key.
 -->
 model: auto
-temperature: 0.0
+search_scope: auto
 max_retries_per_sorry: 5
 escalation_policy: ask
 escalation_after_failures: 2

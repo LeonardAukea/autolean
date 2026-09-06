@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.record_paper_demo import _clear_runtime_state, recording_environment
+from scripts.lean_workspace import clear_runtime_state
 from scripts.record_prove_demo import _assert_compiles, _assert_export, _assert_generated
 
 
@@ -28,10 +28,11 @@ def _write_export(root: Path) -> Path:
         encoding="utf-8",
     )
     (project / "lakefile.lean").write_text("import Lake\n", encoding="utf-8")
-    source.write_text(
-        "import Mathlib\n\ntheorem pythagorean : True := by\n  trivial\n",
-        encoding="utf-8",
-    )
+    text = "import Mathlib\n\ntheorem pythagorean : True := by\n  trivial\n"
+    source.write_text(text, encoding="utf-8")
+    (project / ".lake").mkdir()
+    if not (root / "workspace" / "AutoLean" / "Generated").exists():
+        _write_generated(root, text)
     return source
 
 
@@ -54,7 +55,7 @@ def test_generated_source_with_a_placeholder_is_rejected(tmp_path: Path) -> None
         _assert_generated(tmp_path)
 
 
-def test_generated_source_is_compiled_in_its_project(
+def test_exported_source_is_compiled_in_its_own_project(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -62,6 +63,7 @@ def test_generated_source_is_compiled_in_its_project(
         tmp_path,
         "import Mathlib\n\ntheorem pythagorean : True := by\n  trivial\n",
     )
+    _write_export(tmp_path)
     observed: dict[str, object] = {}
 
     def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
@@ -79,7 +81,7 @@ def test_generated_source_is_compiled_in_its_project(
         "lean",
         str(source.relative_to(tmp_path / "workspace")),
     ]
-    assert observed["cwd"] == tmp_path / "workspace"
+    assert observed["cwd"] == tmp_path / "pythagorean-artifact" / "project"
     assert observed["timeout"] == 300
 
 
@@ -97,6 +99,7 @@ def test_lean_diagnostics_are_reported(
 
     monkeypatch.setattr("scripts.record_prove_demo.subprocess.run", run)
 
+    _write_export(tmp_path)
     with pytest.raises(SystemExit, match="unknown identifier"):
         _assert_compiles(tmp_path)
 
@@ -147,19 +150,6 @@ def test_the_word_sorry_in_a_comment_is_not_a_placeholder(tmp_path: Path) -> Non
     assert _assert_generated(tmp_path).name == "PythagoreanTheorem.lean"
 
 
-def test_the_recording_environment_keeps_terminal_color(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setenv("CLICOLOR", "0")
-
-    environment = recording_environment(AUTOLEAN_DEMO_ROOT="/demo")
-
-    assert "NO_COLOR" not in environment
-    assert "CLICOLOR" not in environment
-    assert environment["AUTOLEAN_DEMO_ROOT"] == "/demo"
-
-
 def test_demo_workspace_removes_generated_lean_sources(tmp_path: Path) -> None:
     autolean = tmp_path / "AutoLean"
     autolean.mkdir()
@@ -175,7 +165,7 @@ def test_demo_workspace_removes_generated_lean_sources(tmp_path: Path) -> None:
     for path in generated:
         path.write_text("theorem generated : True := by trivial\n", encoding="utf-8")
 
-    _clear_runtime_state(tmp_path)
+    clear_runtime_state(tmp_path)
 
     assert curated.is_file()
     assert all(not path.exists() for path in generated)

@@ -6,8 +6,8 @@ Only source-faithful formalizations can enter the proof loop.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from typing import Literal
 
 from rich.table import Table
@@ -15,7 +15,7 @@ from rich.table import Table
 from autolean.ui import console
 
 
-@dataclass
+@dataclass(frozen=True)
 class OpenProblem:
     """An open problem with a formalized statement or labeled scaffold."""
 
@@ -27,9 +27,57 @@ class OpenProblem:
     lean_statement: str  # Lean 4 theorem statement with sorry
     formalization_status: Literal["formalized", "scaffold"] = "formalized"
     limitations: str = ""
-    sub_results: list[str] = dataclass_field(default_factory=list)
-    references: list[str] = dataclass_field(default_factory=list)
-    tags: list[str] = dataclass_field(default_factory=list)
+    sub_results: Sequence[str] = ()
+    references: Sequence[str] = ()
+    tags: Sequence[str] = ()
+
+    def __post_init__(self) -> None:
+        text_values = (
+            self.id,
+            self.name,
+            self.field,
+            self.difficulty,
+            self.description,
+            self.lean_statement,
+            self.formalization_status,
+            self.limitations,
+        )
+        if any(not isinstance(value, str) for value in text_values):
+            raise ValueError("open-problem fields must be text")
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]*", self.id) is None:
+            raise ValueError("open-problem ID must be a slug")
+        if any(
+            not value.strip()
+            for value in (
+                self.name,
+                self.field,
+                self.description,
+                self.lean_statement,
+            )
+        ):
+            raise ValueError(f"open-problem identity is incomplete: {self.id}")
+        if self.difficulty not in {
+            "accessible",
+            "hard",
+            "very-hard",
+            "millennium",
+        }:
+            raise ValueError(f"open-problem difficulty is invalid: {self.id}")
+        if self.formalization_status not in {"formalized", "scaffold"}:
+            raise ValueError(f"open-problem formalization status is invalid: {self.id}")
+        if self.formalization_status == "scaffold" and not self.limitations.strip():
+            raise ValueError(f"open-problem scaffold needs a boundary: {self.id}")
+        for name in ("sub_results", "references", "tags"):
+            values = getattr(self, name)
+            if isinstance(values, list):
+                object.__setattr__(self, name, tuple(values))
+                values = getattr(self, name)
+            if (
+                not isinstance(values, tuple)
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+                or len(set(values)) != len(values)
+            ):
+                raise ValueError(f"open-problem {name} must contain unique non-empty text")
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +349,7 @@ theorem erdos_straus (n : Nat) (hn : n ≥ 2) :
 
 def print_problems_table(filter_field: str | None = None, filter_difficulty: str | None = None) -> None:
     """Print the open problems collection as a Rich table."""
-    problems = OPEN_PROBLEMS
-    if filter_field:
-        problems = [p for p in problems if filter_field.lower() in p.field.lower()]
-    if filter_difficulty:
-        problems = [p for p in problems if p.difficulty == filter_difficulty]
+    problems = search_problems(field=filter_field, difficulty=filter_difficulty)
 
     diff_styles = {
         "accessible": "green",

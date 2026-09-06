@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.record_paper_demo import _assert_export, recording_environment
+from scripts.record_paper_demo import _assert_compiles, _assert_export, recording_environment
 
 
 def _write_export(root: Path) -> Path:
@@ -13,6 +14,7 @@ def _write_export(root: Path) -> Path:
     project = export / "project"
     paper = project / "AutoLean" / "Paper_arxiv_2506_18616v5.lean"
     paper.parent.mkdir(parents=True)
+    (project / ".lake").mkdir()
     (export / "manifest.json").write_text(
         json.dumps({"schema": "autolean.project-export.v1"}),
         encoding="utf-8",
@@ -46,6 +48,15 @@ def test_demo_export_rejects_an_unrelated_lean_source(tmp_path: Path) -> None:
         _assert_export(tmp_path)
 
 
+def test_demo_export_ignores_the_lean_build_cache(tmp_path: Path) -> None:
+    project = _write_export(tmp_path)
+    dependency = project / ".lake" / "packages" / "mathlib" / "Mathlib" / "Cache.lean"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("theorem cached : True := by trivial\n", encoding="utf-8")
+
+    _assert_export(tmp_path)
+
+
 def test_recording_environment_keeps_terminal_color(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -63,3 +74,67 @@ def test_recording_environment_keeps_terminal_color(
     assert "CLICOLOR_FORCE" not in environment
     assert environment["AUTOLEAN_DEMO_ROOT"] == str(tmp_path)
     assert environment["AUTOLEAN_DEMO_PDF"] == str(tmp_path / "paper.pdf")
+
+
+def test_paper_source_is_compiled_in_its_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _write_export(tmp_path)
+    source = project / "AutoLean" / "Paper_arxiv_2506_18616v5.lean"
+    observed: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        observed.append((command, options))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("scripts.record_paper_demo.subprocess.run", run)
+
+    _assert_compiles(tmp_path)
+
+    assert [command for command, _options in observed] == [
+        [
+            "lake",
+            "env",
+            "lean",
+            str(source.relative_to(project)),
+        ],
+    ]
+    assert observed[0][1]["cwd"] == project
+    assert observed[0][1]["timeout"] == 300
+
+
+def test_paper_export_receives_an_independent_dependency_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _write_export(tmp_path)
+    (project / ".lake").rmdir()
+    observed: list[tuple[Path, Path]] = []
+
+    def copy(source: Path, destination: Path) -> None:
+        observed.append((source, destination))
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("scripts.record_paper_demo.copy_workspace", copy)
+    monkeypatch.setattr("scripts.record_paper_demo.subprocess.run", run)
+
+    _assert_compiles(tmp_path)
+    assert observed == [(tmp_path / "workspace" / ".lake", project / ".lake")]
+
+
+def test_paper_lean_diagnostics_are_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_export(tmp_path)
+
+    def run(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, "", "unknown declaration")
+
+    monkeypatch.setattr("scripts.record_paper_demo.subprocess.run", run)
+
+    with pytest.raises(SystemExit, match="unknown declaration"):
+        _assert_compiles(tmp_path)

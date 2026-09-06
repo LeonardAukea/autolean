@@ -4,13 +4,53 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from autolean.scanner import (
-    _find_enclosing_decl,
+    _find_enclosing_decl_details,
     _is_tactic_mode,
     count_sorries,
+    lean_source_files,
     prioritize_targets,
     scan_file,
+    scan_project,
 )
+
+
+def test_project_scan_prunes_dependencies_and_shares_the_lean_source_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from autolean.lean_interface import LeanProject
+
+    (tmp_path / "lakefile.lean").write_text("import Lake\n")
+    source = "theorem pending : True := by\n  sorry\n"
+    expected = [tmp_path / "A.lean", tmp_path / "Nested" / "B.lean"]
+    ignored = {".lake", "lake-packages", "build", "workspace", ".git", ".autolean", ".codedb"}
+    for path in [*expected, *(tmp_path / name / "Ignored.lean" for name in ignored)]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    scandir = os.scandir
+
+    def guarded_scan(path: str) -> object:
+        assert not ignored.intersection(Path(path).relative_to(tmp_path).parts)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scan)
+    assert lean_source_files(tmp_path) == expected
+    assert LeanProject(tmp_path).lean_files() == expected
+    assert [target.file for target in scan_project(tmp_path)] == expected
+
+
+def test_project_scan_reports_unreadable_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable(_path: str) -> object:
+        raise PermissionError("source is unreadable")
+
+    monkeypatch.setattr("os.scandir", unreadable)
+    with pytest.raises(PermissionError, match="source is unreadable"):
+        scan_project(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # scan_file
@@ -129,12 +169,27 @@ class TestSorryTargetId:
     def test_id_uses_rel_path_when_set(self, lean_file_one_sorry: Path, tmp_path: Path) -> None:
         targets = scan_file(lean_file_one_sorry, project_root=tmp_path)
         t = targets[0]
-        assert t.id == "One.lean:2:foo"
+        assert t.id == "One.lean:2:2:foo"
 
     def test_id_uses_filename_when_no_rel_path(self, lean_file_one_sorry: Path) -> None:
         targets = scan_file(lean_file_one_sorry)
         t = targets[0]
-        assert t.id == "One.lean:2:foo"
+        assert t.id == "One.lean:2:2:foo"
+
+    def test_same_line_placeholders_have_distinct_ids(self, tmp_path: Path) -> None:
+        source = tmp_path / "Pair.lean"
+        source.write_text(
+            "theorem pair : True ∧ True := ⟨sorry, sorry⟩\n",
+            encoding="utf-8",
+        )
+
+        first, second = scan_file(source, project_root=tmp_path)
+
+        assert first.line == second.line
+        assert first.decl_name == second.decl_name
+        assert first.col != second.col
+        assert first.id != second.id
+        assert first.legacy_id == second.legacy_id
 
     def test_id_collision_safe_with_subdirs(self, tmp_path: Path) -> None:
         """Two files named Foo.lean in different subdirs get different IDs."""
@@ -194,7 +249,7 @@ class TestIsTacticMode:
 
 
 # ---------------------------------------------------------------------------
-# _find_enclosing_decl
+# _find_enclosing_decl_details
 # ---------------------------------------------------------------------------
 
 
@@ -203,19 +258,19 @@ class TestFindEnclosingDecl:
 
     def test_theorem(self) -> None:
         lines = ["theorem foo : True := by", "  sorry"]
-        name, line = _find_enclosing_decl(lines, 2)
+        name, _qualified, line = _find_enclosing_decl_details(lines, 2)
         assert name == "foo"
         assert line == 1
 
     def test_lemma(self) -> None:
         lines = ["lemma bar : False := by", "  sorry"]
-        name, line = _find_enclosing_decl(lines, 2)
+        name, _qualified, line = _find_enclosing_decl_details(lines, 2)
         assert name == "bar"
         assert line == 1
 
     def test_def(self) -> None:
         lines = ["def baz : Nat := sorry"]
-        name, line = _find_enclosing_decl(lines, 1)
+        name, _qualified, line = _find_enclosing_decl_details(lines, 1)
         assert name == "baz"
         assert line == 1
 
@@ -224,13 +279,13 @@ class TestFindEnclosingDecl:
             "instance myInst : Decidable True := by",
             "  sorry",
         ]
-        name, line = _find_enclosing_decl(lines, 2)
+        name, _qualified, line = _find_enclosing_decl_details(lines, 2)
         assert name == "myInst"
         assert line == 1
 
     def test_unknown_when_no_decl(self) -> None:
         lines = ["sorry"]
-        name, _line = _find_enclosing_decl(lines, 1)
+        name, _qualified, _line = _find_enclosing_decl_details(lines, 1)
         assert name == "<unknown>"
 
     def test_picks_closest_decl(self) -> None:
@@ -241,7 +296,7 @@ class TestFindEnclosingDecl:
             "theorem b : True := by",
             "  sorry",
         ]
-        name, line = _find_enclosing_decl(lines, 5)
+        name, _qualified, line = _find_enclosing_decl_details(lines, 5)
         assert name == "b"
         assert line == 4
 

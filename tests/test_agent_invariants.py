@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,9 @@ from autolean.llm import (
 )
 from autolean.provenance import ProofEnvironment, sha256_text
 from autolean.routing import EscalationPolicy
-from autolean.scanner import SorryTarget
-from autolean.tracker import FAILURE_OUTCOMES, TSV_FIELDS, ExperimentRecord, Outcome
+from autolean.scanner import SorryTarget, scan_file
+from autolean.search import LemmaSearchReport
+from autolean.tracker import FAILURE_OUTCOMES, TSV_FIELDS, ExperimentRecord, GitError, Outcome
 
 
 class FakeBackend(BaseBackend):
@@ -114,6 +116,29 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+def test_explicit_model_is_resolved_before_automatic_provider_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autolean.cli_runtime import agent_for
+
+    program, _, _ = _project(tmp_path)
+    program.write_text(program.read_text().replace("model: gemma4:26b", "model: auto"))
+    constructed: list[LLMConfig] = []
+
+    def create(config: LLMConfig) -> FakeBackend:
+        constructed.append(config)
+        return FakeBackend(config)
+
+    def no_probe(_backend: str) -> None:
+        pytest.fail("explicit local selection must resolve without a subscription probe")
+
+    monkeypatch.setattr("autolean.agent.create_llm_client", create)
+    monkeypatch.setattr("autolean.llm.subscription.probe_subscription_backend", no_probe)
+    with agent_for(program, model="gemma4", dry_run=True) as agent:
+        assert agent.llm.config.model == "gemma4:26b"
+        assert len(constructed) == 1
+
+
 def _prepare_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -123,7 +148,10 @@ def _prepare_agent(
     monkeypatch.setattr("autolean.agent.create_llm_client", lambda config: backend)
     monkeypatch.setattr("autolean.agent.scan_project", lambda root: [target])
     monkeypatch.setattr("autolean.agent.prioritize_targets", lambda targets: targets)
-    monkeypatch.setattr("autolean.search.search_relevant_lemmas", lambda goal, name: [])
+    monkeypatch.setattr(
+        "autolean.search.search_relevant_lemmas",
+        lambda goal, name: LemmaSearchReport(()),
+    )
     agent = AutoLeanAgent(program, dry_run=True)
     monkeypatch.setattr(
         agent.project,
@@ -174,12 +202,24 @@ def test_dry_run_preserves_the_complete_project_tree(
     assert agent.tracker.records[-1].environment_sha256 == "a" * 64
 
 
+def test_agent_run_restores_process_signal_handlers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    before = {received: signal.getsignal(received) for received in (signal.SIGINT, signal.SIGTERM)}
+
+    agent.run()
+
+    assert {received: signal.getsignal(received) for received in (signal.SIGINT, signal.SIGTERM)} == before
+
+
 def test_cycle_budget_is_fresh_when_an_experiment_resumes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent, backend = _prepare_agent(tmp_path, monkeypatch)
-    agent.tracker._cycle = 10
+    agent.tracker.resume_cycle(10)
 
     result = agent.run()
 
@@ -415,7 +455,7 @@ def test_gap_record_is_bound_to_the_definition_request(
 
     assert record.outcome == Outcome.GAP_FILLED
     assert record.decl_name == "Missing"
-    assert record.target_id == "AutoLean/Target.lean:3:Missing"
+    assert record.target_id == "AutoLean/Target.lean:3:0:Missing"
     assert record.line == 3
     assert record.model == "gap-model"
     assert record.llm_input_tokens == 77
@@ -445,6 +485,154 @@ theorem target : True := by sorry
 
     assert updated.index("def Missing") < updated.index("theorem before")
     assert updated.splitlines()[declaration_line - 1].startswith("def Missing")
+
+
+def _acceptance_record() -> ExperimentRecord:
+    return ExperimentRecord(
+        cycle=1,
+        timestamp="2026-08-20T00:00:00+00:00",
+        target_id="AutoLean/Target.lean:2:target",
+        decl_name="target",
+        file="AutoLean/Target.lean",
+        line=2,
+        outcome=Outcome.SUCCESS,
+        attempt=1,
+        duration_seconds=0.1,
+        llm_tokens=1,
+        llm_tok_per_sec=1.0,
+    )
+
+
+def test_a_failed_proof_commit_restores_the_installed_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proof whose commit fails may not stay installed without a record."""
+    agent, _backend = _prepare_agent(tmp_path, monkeypatch)
+    source = tmp_path / "workspace" / "AutoLean" / "Target.lean"
+    original = source.read_text(encoding="utf-8")
+    proved = original.replace("sorry", "trivial")
+
+    def failing_commit(record: ExperimentRecord) -> None:
+        raise GitError("nothing to commit")
+
+    monkeypatch.setattr(agent.tracker, "commit_success", failing_commit)
+
+    failure = agent._accept_source(source, proved, original, _acceptance_record())
+
+    assert failure == ("commit", "nothing to commit")
+    assert source.read_text(encoding="utf-8") == original
+    assert agent._accepting is False
+
+
+def test_an_editor_save_between_validation_and_installation_stops_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compare-and-swap write must not overwrite a concurrent edit."""
+    agent, _backend = _prepare_agent(tmp_path, monkeypatch)
+    source = tmp_path / "workspace" / "AutoLean" / "Target.lean"
+    original = source.read_text(encoding="utf-8")
+    proved = original.replace("sorry", "trivial")
+    edited = original + "-- user edit\n"
+    source.write_text(edited, encoding="utf-8")
+
+    committed: list[ExperimentRecord] = []
+    monkeypatch.setattr(agent.tracker, "commit_success", committed.append)
+
+    failure = agent._accept_source(source, proved, original, _acceptance_record())
+
+    assert failure is not None and failure[0] == "write"
+    assert "changed during validation" in failure[1]
+    assert committed == []
+    assert source.read_text(encoding="utf-8") == edited
+    assert agent._accepting is False
+
+
+def _prepare_git_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AutoLeanAgent, FakeBackend, Path]:
+    """An agent with acceptance enabled inside a real Git repository."""
+    program, source, target = _project(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    backend = FakeBackend(LLMConfig(model="test", backend="ollama"))
+    monkeypatch.setattr("autolean.agent.create_llm_client", lambda config: backend)
+    monkeypatch.setattr("autolean.agent.scan_project", lambda root: [target])
+    monkeypatch.setattr("autolean.agent.prioritize_targets", lambda targets: targets)
+    monkeypatch.setattr(
+        "autolean.search.search_relevant_lemmas",
+        lambda goal, name: LemmaSearchReport(()),
+    )
+    agent = AutoLeanAgent(program, dry_run=False)
+    monkeypatch.setattr(agent.tracker, "setup_branch", lambda branch_name=None: "autolean/test")
+    monkeypatch.setattr(
+        agent.project,
+        "proof_environment",
+        lambda **kwargs: ProofEnvironment(
+            sha256="a" * 64,
+            lean_version="Lean 4.33.0",
+            lean_toolchain="leanprover/lean4:v4.33.0",
+            manifest_sha256="b" * 64,
+            artifact_count=1,
+            dependencies=(),
+        ),
+    )
+    return agent, backend, source
+
+
+def test_an_ignored_target_path_stops_before_any_model_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target Git refuses to commit fails fast, before Lean or the model."""
+    agent, backend, _source = _prepare_git_agent(tmp_path, monkeypatch)
+    (tmp_path / ".gitignore").write_text("workspace/AutoLean/\n")
+
+    def must_not_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the run must stop before Lean work")
+
+    monkeypatch.setattr(agent.project, "check_file", must_not_run)
+    monkeypatch.setattr(agent.project, "try_tactics_fast", must_not_run)
+
+    result = agent.run()
+
+    assert result.successful is False
+    assert "ignore rules" in result.message
+    assert "autolean init lean" in result.message
+    assert backend.calls == 0
+
+
+def test_a_refused_proof_commit_stops_the_run_after_one_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit the project refuses is terminal; no retry can change it."""
+    agent, backend, source = _prepare_git_agent(tmp_path, monkeypatch)
+    original = source.read_text(encoding="utf-8")
+    agent.config.max_cycles = 5
+    agent.config.max_retries_per_sorry = 5
+
+    monkeypatch.setattr(agent.project, "check_file", lambda *a, **k: BuildResult(success=True))
+    monkeypatch.setattr(agent.project, "try_tactics_fast", lambda *a, **k: None)
+    monkeypatch.setattr(agent.project, "get_goal_via_hole_punch", lambda *a, **k: "⊢ True")
+    monkeypatch.setattr(
+        agent.project,
+        "validate_candidate",
+        lambda *a, **k: BuildResult(success=True, duration_seconds=0.1, axioms=()),
+    )
+
+    def refuse(record: ExperimentRecord) -> None:
+        raise GitError("'workspace/AutoLean/Target.lean' is excluded by the project's ignore rules")
+
+    monkeypatch.setattr(agent.tracker, "commit_success", refuse)
+
+    result = agent.run()
+
+    assert result.successful is False
+    assert "Could not commit the accepted proof" in result.message
+    assert backend.proof_calls == 1
+    assert source.read_text(encoding="utf-8") == original
 
 
 def test_healthy_file_checks_compile_once_per_content(
@@ -543,11 +731,11 @@ def test_a_skipped_attempt_records_no_prompt_it_never_sent(
     assert unnamed.llm_input_tokens == 0
 
 
-def test_resuming_remembers_which_targets_are_already_proved(
+def test_resuming_loads_prior_proof_outcomes_and_attempts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A resumed run must not re-attempt a target a previous run proved."""
+    """Resume loads history before comparing it with current source."""
     agent, _ = _prepare_agent(tmp_path, monkeypatch)
     proved = "AutoLean/Target.lean:2:target"
     attempted = "AutoLean/Target.lean:9:other"
@@ -568,10 +756,28 @@ def test_resuming_remembers_which_targets_are_already_proved(
     agent._attempts.clear()
     agent._load_resume_state()
 
-    assert proved in agent._proved_ids, "a proved target must not be attempted again"
+    assert proved in agent._proved_ids
     assert attempted not in agent._proved_ids
     assert agent._attempts[attempted] == 5, "the retry budget must survive a resume"
-    assert agent.tracker._cycle == 4
+    assert agent.tracker.cycle == 4
+
+
+def test_resume_retries_a_placeholder_at_a_previously_proved_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    target = scan_file(agent.project.root / "AutoLean" / "Target.lean", project_root=agent.project.root)[0]
+    row = {"cycle": "3", "target_id": target.id, "outcome": "success", "attempt": "5"}
+    agent.tracker.results_file.write_text(
+        "\t".join(TSV_FIELDS) + "\n" + "\t".join(row.get(field, "") for field in TSV_FIELDS) + "\n"
+    )
+    agent.resume = True
+
+    selected = agent._select_targets()
+
+    assert [item.id for item in selected] == [target.id]
+    assert target.id not in agent._proved_ids
+    assert agent._attempts.get(target.id, 0) == 0
 
 
 def test_an_overnight_run_stops_when_every_target_is_unattemptable(
@@ -682,6 +888,7 @@ class TestBoundedWork:
                 _StubPlan(),  # type: ignore[arg-type]
                 never_compiles,
                 AlwaysRejects(),  # type: ignore[arg-type]
+                llm_config=LLMConfig(model="test", backend="ollama"),
                 max_repairs=2,
             )
 
@@ -752,6 +959,28 @@ class TestRunScope:
         agent.target_filter = one.id
 
         assert agent._in_scope(one)
+
+    def test_changed_source_is_rescanned_before_an_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent, _ = _prepare_agent(tmp_path, monkeypatch)
+        source = agent.project.root / "AutoLean" / "Target.lean"
+        target = scan_file(source, project_root=agent.project.root)[0]
+        agent._goal_cache[target.id] = "stale goal"
+        source.write_text(
+            "-- concurrent edit\n" + source.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        refreshed = agent._refresh_changed_targets(target, [target])
+
+        assert refreshed is not None
+        assert len(refreshed) == 1
+        assert refreshed[0].line == target.line + 1
+        assert refreshed[0].source_sha256 != target.source_sha256
+        assert target.id not in agent._goal_cache
 
 
 def test_a_rejected_candidate_does_not_condemn_the_file(

@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from autolean.validation import require_int, require_texts
 
 log = logging.getLogger("autolean")
 
@@ -24,7 +28,7 @@ LEANSEARCH_URL = "https://leansearch.net/search"  # POST, query as list
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 
 
-@dataclass
+@dataclass(frozen=True)
 class SearchResult:
     """A single lemma search result."""
 
@@ -32,9 +36,47 @@ class SearchResult:
     type_sig: str  # e.g., "∀ (n : Nat), 0 + n = n"
     source: str  # "loogle" | "leansearch"
 
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value.strip() for value in (self.name, self.type_sig)):
+            raise ValueError("search result identity must be complete")
+        if self.source not in {"loogle", "leansearch"}:
+            raise ValueError("search result source is invalid")
+
+
+@dataclass(frozen=True)
+class LemmaSearchReport:
+    """Lemma candidates and observable remote-service failures."""
+
+    results: tuple[SearchResult, ...]
+    unavailable: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.results, tuple) or any(
+            not isinstance(result, SearchResult) for result in self.results
+        ):
+            raise ValueError("lemma search report contains invalid results")
+        if not isinstance(self.unavailable, tuple) or any(
+            not isinstance(reason, str) or not reason.strip() for reason in self.unavailable
+        ):
+            raise ValueError("lemma search failures must be non-empty text")
+
 
 class SearchPayloadError(ValueError):
     """A search service returned a response outside its documented shape."""
+
+
+def _validate_search_request(query: str, max_results: int, timeout: float) -> None:
+    if not isinstance(query, str) or not query.strip() or len(query) > 2_000:
+        raise ValueError("search query must contain at most 2000 characters")
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 50:
+        raise ValueError("search result limit must be between 1 and 50")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("search timeout must be finite and positive")
 
 
 def _json_payload(response: httpx.Response) -> Any:
@@ -44,7 +86,13 @@ def _json_payload(response: httpx.Response) -> Any:
         raise SearchPayloadError(f"search response is not JSON: {e}") from e
 
 
-def search_loogle(query: str, max_results: int = 5, timeout: float = 10.0) -> list[SearchResult]:
+def search_loogle(
+    query: str,
+    max_results: int = 5,
+    timeout: float = 10.0,
+    *,
+    on_unavailable: Callable[[str], None] | None = None,
+) -> list[SearchResult]:
     """Search mathlib by type pattern via Loogle.
 
     Examples:
@@ -53,6 +101,9 @@ def search_loogle(query: str, max_results: int = 5, timeout: float = 10.0) -> li
         "(?a → ?b) → List ?a → List ?b"  — polymorphic pattern
         "List.reverse"           — partial name
     """
+    _validate_search_request(query, max_results, timeout)
+    if on_unavailable is not None and not callable(on_unavailable):
+        raise ValueError("search failure observer must be callable")
     try:
         resp = httpx.get(
             LOOGLE_URL,
@@ -80,10 +131,18 @@ def search_loogle(query: str, max_results: int = 5, timeout: float = 10.0) -> li
 
     except (httpx.HTTPError, SearchPayloadError) as e:
         log.debug("Loogle search failed: %s", e)
+        if on_unavailable is not None:
+            on_unavailable(f"Loogle unavailable: {type(e).__name__}")
         return []
 
 
-def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -> list[SearchResult]:
+def search_leansearch(
+    query: str,
+    max_results: int = 5,
+    timeout: float = 10.0,
+    *,
+    on_unavailable: Callable[[str], None] | None = None,
+) -> list[SearchResult]:
     """Search mathlib by natural language via LeanSearch (POST API).
 
     Examples:
@@ -91,6 +150,9 @@ def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -
         "reverse of reversed list is identity"
         "Cauchy-Schwarz inequality"
     """
+    _validate_search_request(query, max_results, timeout)
+    if on_unavailable is not None and not callable(on_unavailable):
+        raise ValueError("search failure observer must be callable")
     try:
         resp = httpx.post(
             LEANSEARCH_URL,
@@ -99,45 +161,66 @@ def search_leansearch(query: str, max_results: int = 5, timeout: float = 10.0) -
         )
         resp.raise_for_status()
         data = _json_payload(resp)
-        if not isinstance(data, list):
-            raise SearchPayloadError("LeanSearch response is not a list")
-
-        results = []
-        # Response is [[result1, result2, ...]] (list of lists)
-        items: list[Any] = data[0] if data and isinstance(data[0], list) else data
-        for hit in items[:max_results]:
-            if not isinstance(hit, dict):
-                raise SearchPayloadError("LeanSearch returned a malformed hit")
-            result = hit.get("result", hit)
-            if not isinstance(result, dict):
-                raise SearchPayloadError("LeanSearch result is not an object")
-            name_parts = result.get("name", [])
-            if isinstance(name_parts, list) and all(isinstance(part, str) for part in name_parts):
-                name = ".".join(name_parts)
-            elif isinstance(name_parts, str):
-                name = name_parts
-            else:
-                raise SearchPayloadError("LeanSearch name is not a string path")
-            type_sig = result.get("signature", "") or result.get("type", "")
-            if not isinstance(type_sig, str):
-                raise SearchPayloadError("LeanSearch signature is not a string")
-            if name:
-                results.append(SearchResult(name=name, type_sig=type_sig, source="leansearch"))
+        results = _parse_leansearch_results(data, max_results)
 
         log.debug("LeanSearch: %d results for '%s'", len(results), query)
         return results
 
     except (httpx.HTTPError, SearchPayloadError) as e:
         log.debug("LeanSearch failed: %s", e)
+        if on_unavailable is not None:
+            on_unavailable(f"LeanSearch unavailable: {type(e).__name__}")
         return []
 
 
-def search_arxiv(query: str, max_results: int = 3, timeout: float = 15.0) -> list[dict[str, str]]:
+def _parse_leansearch_results(data: Any, max_results: int) -> list[SearchResult]:
+    """Decode the two response envelopes exposed by LeanSearch."""
+    if not isinstance(data, list):
+        raise SearchPayloadError("LeanSearch response is not a list")
+    items: list[Any] = data[0] if data and isinstance(data[0], list) else data
+    return [result for hit in items[:max_results] if (result := _parse_leansearch_hit(hit)) is not None]
+
+
+def _parse_leansearch_hit(hit: Any) -> SearchResult | None:
+    """Decode one LeanSearch hit into the shared result vocabulary."""
+    if not isinstance(hit, dict):
+        raise SearchPayloadError("LeanSearch returned a malformed hit")
+    result = hit.get("result", hit)
+    if not isinstance(result, dict):
+        raise SearchPayloadError("LeanSearch result is not an object")
+    name = _leansearch_name(result.get("name", []))
+    type_sig = result.get("signature", "") or result.get("type", "")
+    if not isinstance(type_sig, str):
+        raise SearchPayloadError("LeanSearch signature is not a string")
+    if not name:
+        return None
+    return SearchResult(name=name, type_sig=type_sig, source="leansearch")
+
+
+def _leansearch_name(value: Any) -> str:
+    """Decode a dotted name from LeanSearch's string or segment form."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(part, str) for part in value):
+        return ".".join(value)
+    raise SearchPayloadError("LeanSearch name is not a string path")
+
+
+def search_arxiv(
+    query: str,
+    max_results: int = 3,
+    timeout: float = 15.0,
+    *,
+    on_unavailable: Callable[[str], None] | None = None,
+) -> list[dict[str, str]]:
     """Search arXiv for relevant papers to aid proof formulation.
 
     Returns paper metadata (title, abstract, authors, URL).
     This is a database lookup — no LLM involved.
     """
+    _validate_search_request(query, max_results, timeout)
+    if on_unavailable is not None and not callable(on_unavailable):
+        raise ValueError("search failure observer must be callable")
     try:
         resp = httpx.get(
             ARXIV_API_URL,
@@ -180,6 +263,8 @@ def search_arxiv(query: str, max_results: int = 3, timeout: float = 15.0) -> lis
 
     except (httpx.HTTPError, ET.ParseError) as e:
         log.debug("arXiv search failed: %s", e)
+        if on_unavailable is not None:
+            on_unavailable(f"arXiv unavailable: {type(e).__name__}")
         return []
 
 
@@ -202,7 +287,7 @@ def search_relevant_lemmas(
     goal_state: str,
     theorem_name: str = "",
     max_results: int = 8,
-) -> list[SearchResult]:
+) -> LemmaSearchReport:
     """Search for lemmas relevant to the current proof goal.
 
     Strategy:
@@ -210,53 +295,108 @@ def search_relevant_lemmas(
     2. Search by goal conclusion type pattern (Loogle)
     3. Search by natural language (LeanSearch)
     """
+    require_texts(
+        (goal_state, theorem_name),
+        "lemma search inputs must be text",
+        allow_empty=True,
+    )
+    require_int(
+        max_results,
+        "lemma search result limit must be between 1 and 50",
+        minimum=1,
+        maximum=50,
+    )
+    if not goal_state.strip() and not theorem_name.strip():
+        return LemmaSearchReport(())
     results: list[SearchResult] = []
+    unavailable: list[str] = []
     seen: set[str] = set()
 
-    # Strategy 1: Search by theorem name — often mathlib has exactly this
-    if theorem_name:
-        # Mathlib declarations use namespace-qualified dotted names.
-        parts = theorem_name.split("_")
-        # Try capitalized prefix: "list_reverse_append" -> "List.reverse_append"
-        if len(parts) >= 2:
-            mathlib_name = parts[0].capitalize() + "." + "_".join(parts[1:])
-            for r in search_loogle(mathlib_name, max_results=3):
-                if r.name not in seen:
-                    results.append(r)
-                    seen.add(r.name)
-
-    # Strategy 2: Search by goal conclusion type pattern (Loogle)
-    if goal_state:
-        goal_lines = goal_state.strip().split("\n")
-        conclusion = ""
-        for line in reversed(goal_lines):
-            stripped = line.strip()
-            if stripped.startswith("⊢") or stripped.startswith("|-"):
-                conclusion = stripped.lstrip("⊢|- ").strip()
-                break
-
-        if conclusion:
-            for r in search_loogle(conclusion, max_results=4):
-                if r.name not in seen:
-                    results.append(r)
-                    seen.add(r.name)
-
-    # LeanSearch: natural language query from theorem name + goal
-    nl_query = theorem_name.replace("_", " ")
-    if goal_state:
-        # Add goal context
-        nl_query += " " + goal_state[:200]
-
-    for r in search_leansearch(nl_query, max_results=4):
-        if r.name not in seen:
-            results.append(r)
-            seen.add(r.name)
+    _extend_unique(
+        results,
+        seen,
+        _search_theorem_name(theorem_name, unavailable.append),
+    )
+    _extend_unique(
+        results,
+        seen,
+        _search_goal_conclusion(goal_state, unavailable.append),
+    )
+    _extend_unique(
+        results,
+        seen,
+        search_leansearch(
+            _natural_language_query(theorem_name, goal_state),
+            max_results=4,
+            on_unavailable=unavailable.append,
+        ),
+    )
 
     log.info("Found %d relevant lemmas for %s", len(results), theorem_name or "goal")
-    return results[:max_results]
+    return LemmaSearchReport(
+        tuple(results[:max_results]),
+        tuple(dict.fromkeys(unavailable)),
+    )
 
 
-def format_search_results_for_prompt(results: list[SearchResult]) -> str:
+def _extend_unique(
+    results: list[SearchResult],
+    seen: set[str],
+    candidates: Sequence[SearchResult],
+) -> None:
+    """Append candidates by declaration identity while preserving rank."""
+    for result in candidates:
+        if result.name not in seen:
+            results.append(result)
+            seen.add(result.name)
+
+
+def _search_theorem_name(
+    theorem_name: str,
+    on_unavailable: Callable[[str], None],
+) -> list[SearchResult]:
+    """Map a snake-case declaration to a likely Mathlib dotted name."""
+    parts = theorem_name.split("_") if theorem_name else []
+    if len(parts) < 2:
+        return []
+    mathlib_name = (parts[0].capitalize() + "." + "_".join(parts[1:]))[:2_000]
+    return search_loogle(
+        mathlib_name,
+        max_results=3,
+        on_unavailable=on_unavailable,
+    )
+
+
+def _search_goal_conclusion(
+    goal_state: str,
+    on_unavailable: Callable[[str], None],
+) -> list[SearchResult]:
+    """Search the conclusion line of one Lean goal state."""
+    conclusion = _goal_conclusion(goal_state)
+    if not conclusion:
+        return []
+    return search_loogle(
+        conclusion[:2_000],
+        max_results=4,
+        on_unavailable=on_unavailable,
+    )
+
+
+def _goal_conclusion(goal_state: str) -> str:
+    """Return the final turnstile line from a Lean goal state."""
+    for line in reversed(goal_state.strip().splitlines()):
+        stripped = line.strip()
+        if stripped.startswith(("⊢", "|-")):
+            return stripped.lstrip("⊢|- ").strip()
+    return ""
+
+
+def _natural_language_query(theorem_name: str, goal_state: str) -> str:
+    """Build one bounded LeanSearch query from declaration and goal text."""
+    return f"{theorem_name.replace('_', ' ')[:1_799]} {goal_state[:200]}".strip()
+
+
+def format_search_results_for_prompt(results: Sequence[SearchResult]) -> str:
     """Format search results as a prompt section for the LLM.
 
     If a lemma looks like it directly closes the goal, highlight it
@@ -270,7 +410,6 @@ def format_search_results_for_prompt(results: list[SearchResult]) -> str:
     for r in results:
         sig = r.type_sig[:150] if r.type_sig else ""
         lines.append(f"- `{r.name}` : {sig}")
-        # Suggest concrete tactics for each lemma
         lines.append(f"  Try: `exact {r.name}` or `simp [{r.name}]` or `rw [{r.name}]`")
 
     return "\n".join(lines)

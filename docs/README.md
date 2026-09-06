@@ -15,8 +15,9 @@ How-to guides solve a named operational problem.
 - [Choose and switch models](how-to/choose-a-model.md)
 - [Run a research session](how-to/run-a-research-session.md)
 - [Verify a paper](how-to/verify-a-paper.md)
+- [Profile runtime and memory](how-to/profile.md)
 - [Qualify and publish a release](how-to/release.md)
-- [Open the repository](how-to/open-the-repository.md)
+- [Maintain public distribution](how-to/open-the-repository.md)
 
 ## Reference
 

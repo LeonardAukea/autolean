@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from autolean.llm.base import (
-    OPENAI_EFFORTS,
     BaseBackend,
     Capabilities,
     DocumentInput,
@@ -22,17 +21,10 @@ from autolean.llm.base import (
     LLMRefusalError,
     LLMResponse,
     LLMTransientError,
+    token_count,
 )
+from autolean.llm.capabilities import OPENAI_CAPABILITIES
 from autolean.ui import console
-
-# GPT-5-class reasoning models take depth from `reasoning.effort` and accept
-# their default sampling configuration. Responses has no stop-sequence field.
-_CAPABILITIES = Capabilities(
-    temperature=False,
-    effort_values=OPENAI_EFFORTS,
-    stop_sequences=False,
-    document_inputs=True,
-)
 
 
 def _require_sdk() -> Any:
@@ -83,7 +75,7 @@ def _response_text(response: Any, max_output_tokens: int) -> str:
 class OpenAIClient(BaseBackend):
     """GPT over the Responses API."""
 
-    capabilities: Capabilities = _CAPABILITIES
+    capabilities: Capabilities = OPENAI_CAPABILITIES
     _sdk_client: Any = field(default=None, repr=False)
 
     def _client(self) -> Any:
@@ -171,8 +163,8 @@ class OpenAIClient(BaseBackend):
         return LLMResponse(
             text=text,
             model=response.model,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            input_tokens=token_count(getattr(usage, "input_tokens", None)),
+            output_tokens=token_count(getattr(usage, "output_tokens", None)),
             duration_seconds=elapsed,
         )
 

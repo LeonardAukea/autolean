@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from autolean.files import read_source, walk_files
 
 # ---------------------------------------------------------------------------
 # Sorry Target
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class SorryTarget:
-    """A single sorry placeholder found in a Lean file."""
+    """One source-bound `sorry` placeholder."""
 
     file: Path
     line: int  # 1-indexed
@@ -25,14 +28,54 @@ class SorryTarget:
     tactic_mode: bool = True  # True if sorry is inside a `by` block
     rel_path: str = ""  # relative path from project root (set by scan_project)
     qualified_decl_name: str = ""  # source-qualified name used for axiom audits
+    source_sha256: str = ""  # source identity observed by the scanner
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.file, Path):
+            raise ValueError("target file must be a path")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (self.line, self.col, self.decl_line)
+        ):
+            raise ValueError("target positions must be integers")
+        if self.line < 1 or self.decl_line < 1 or self.decl_line > self.line:
+            raise ValueError("target lines must identify an enclosing declaration")
+        if self.col < 0:
+            raise ValueError("target column must be non-negative")
+        text_fields = (
+            self.decl_name,
+            self.context_before,
+            self.context_after,
+            self.rel_path,
+            self.qualified_decl_name,
+            self.source_sha256,
+        )
+        if any(not isinstance(value, str) for value in text_fields):
+            raise ValueError("target source fields must be text")
+        if not self.decl_name:
+            raise ValueError("target declaration name must not be empty")
+        if not isinstance(self.tactic_mode, bool):
+            raise ValueError("target tactic mode must be a boolean")
+        if self.rel_path and (
+            PurePosixPath(self.rel_path).is_absolute() or ".." in PurePosixPath(self.rel_path).parts
+        ):
+            raise ValueError("target path must be project-relative")
+        if self.source_sha256 and re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None:
+            raise ValueError("target source SHA-256 must be 64 lowercase hexadecimal characters")
 
     @property
     def id(self) -> str:
         """Unique identifier for this sorry target.
 
-        Uses rel_path (if set by scan_project) to avoid collisions
-        when two directories contain files with the same name.
+        Path, line, and column distinguish every placeholder in a scanned
+        project, including several placeholders in one declaration line.
         """
+        path_part = self.rel_path or self.file.name
+        return f"{path_part}:{self.line}:{self.col}:{self.decl_name}"
+
+    @property
+    def legacy_id(self) -> str:
+        """Return the column-free ID written by proof records before v0.5."""
         path_part = self.rel_path or self.file.name
         return f"{path_part}:{self.line}:{self.decl_name}"
 
@@ -53,12 +96,9 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
     the sorry is in tactic mode. If we find `:=` without a subsequent `by`,
     it is in term mode.
     """
-    # Check the sorry line itself — `sorry` might follow `by` on the same line
     target = lines[sorry_line - 1]
-    # Check for `by sorry` or `by\n  sorry` pattern
     stripped = target.strip()
     if stripped == "sorry":
-        # sorry is on its own line — look backward for `by`
         for j in range(sorry_line - 2, max(sorry_line - 20, -1), -1):
             if j < 0:
                 break
@@ -67,14 +107,11 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
             if re.search(r"\bby\s*$", prev):
                 return True
             if re.search(r":=\s*$", prev):
-                # Found `:=` without `by` — term mode
                 return False
-            # If we hit a declaration keyword, stop searching
             if re.match(r"\s*(theorem|lemma|def|instance|example|abbrev)\b", prev):
                 return False
         return True  # default to tactic mode (most common)
 
-    # Check if `by` appears before `sorry` on the same line
     sorry_idx = target.find("sorry")
     before_sorry = target[:sorry_idx] if sorry_idx >= 0 else ""
     if re.search(r"\bby\b", before_sorry):
@@ -100,16 +137,6 @@ _DECL_RE = re.compile(
 _NAMESPACE_RE = re.compile(r"^\s*namespace(?:\s+([^\s]+))?\s*$")
 _SECTION_RE = re.compile(r"^\s*section(?:\s+[^\s]+)?\s*$")
 _END_RE = re.compile(r"^\s*end(?:\s+[^\s]+)?\s*$")
-
-
-def _find_enclosing_decl(lines: list[str], sorry_line: int) -> tuple[str, int]:
-    """Find the declaration that encloses a sorry at the given line (1-indexed).
-
-    Returns (declaration_name, declaration_line_number).
-    """
-    masked = _mask_lean_noncode("\n".join(lines)).split("\n")
-    name, _qualified, line = _find_enclosing_decl_details(masked, sorry_line)
-    return name, line
 
 
 def _find_enclosing_decl_details(
@@ -175,63 +202,77 @@ def _mask_lean_noncode(source: str) -> str:
     line_comment = False
 
     while i < len(source):
-        char = source[i]
-        pair = source[i : i + 2]
-
         if line_comment:
-            if char == "\n":
-                line_comment = False
-            else:
-                result[i] = " "
-            i += 1
+            i, line_comment = _mask_line_comment(source, result, i)
             continue
-
         if block_depth:
-            if pair == "/-":
-                result[i] = result[i + 1] = " "
-                block_depth += 1
-                i += 2
-                continue
-            if pair == "-/":
-                result[i] = result[i + 1] = " "
-                block_depth -= 1
-                i += 2
-                continue
-            if char != "\n":
-                result[i] = " "
-            i += 1
+            i, block_depth = _mask_block_comment(source, result, i, block_depth)
             continue
-
         if in_string:
-            if char == "\\" and i + 1 < len(source):
-                result[i] = " "
-                if source[i + 1] != "\n":
-                    result[i + 1] = " "
-                i += 2
-                continue
-            if char == '"':
-                in_string = False
-            if char != "\n":
-                result[i] = " "
-            i += 1
+            i, in_string = _mask_string(source, result, i)
             continue
-
-        if pair == "--":
-            result[i] = result[i + 1] = " "
-            line_comment = True
-            i += 2
-            continue
-        if pair == "/-":
-            result[i] = result[i + 1] = " "
-            block_depth = 1
-            i += 2
-            continue
-        if char == '"':
-            result[i] = " "
-            in_string = True
-        i += 1
+        i, block_depth, in_string, line_comment = _mask_code(source, result, i)
 
     return "".join(result)
+
+
+def _mask_line_comment(source: str, result: list[str], index: int) -> tuple[int, bool]:
+    """Mask one character inside a line comment."""
+    if source[index] == "\n":
+        return index + 1, False
+    result[index] = " "
+    return index + 1, True
+
+
+def _mask_block_comment(
+    source: str,
+    result: list[str],
+    index: int,
+    depth: int,
+) -> tuple[int, int]:
+    """Mask one token inside a nested block comment."""
+    pair = source[index : index + 2]
+    if pair == "/-":
+        result[index] = result[index + 1] = " "
+        return index + 2, depth + 1
+    if pair == "-/":
+        result[index] = result[index + 1] = " "
+        return index + 2, depth - 1
+    if source[index] != "\n":
+        result[index] = " "
+    return index + 1, depth
+
+
+def _mask_string(source: str, result: list[str], index: int) -> tuple[int, bool]:
+    """Mask one token inside a Lean string literal."""
+    char = source[index]
+    if char == "\\" and index + 1 < len(source):
+        result[index] = " "
+        if source[index + 1] != "\n":
+            result[index + 1] = " "
+        return index + 2, True
+    if char != "\n":
+        result[index] = " "
+    return index + 1, char != '"'
+
+
+def _mask_code(
+    source: str,
+    result: list[str],
+    index: int,
+) -> tuple[int, int, bool, bool]:
+    """Advance through code or enter one non-code state."""
+    pair = source[index : index + 2]
+    if pair == "--":
+        result[index] = result[index + 1] = " "
+        return index + 2, 0, False, True
+    if pair == "/-":
+        result[index] = result[index + 1] = " "
+        return index + 2, 1, False, False
+    if source[index] == '"':
+        result[index] = " "
+        return index + 1, 0, True, False
+    return index + 1, 0, False, False
 
 
 def count_sorries(source: str) -> int:
@@ -252,12 +293,12 @@ def scan_file(
     If project_root is provided, SorryTarget.rel_path is populated
     for collision-safe IDs.
     """
-    content = path.read_text(encoding="utf-8")
+    content = read_source(path)
+    source_sha256 = hashlib.sha256(content.encode()).hexdigest()
     lines = content.split("\n")
     masked_lines = _mask_lean_noncode(content).split("\n")
     targets: list[SorryTarget] = []
 
-    # Compute relative path once
     rel_path = ""
     if project_root:
         try:
@@ -275,10 +316,8 @@ def scan_file(
                 line_num,
             )
 
-            # Determine if sorry is in tactic mode or term mode
             tactic = _is_tactic_mode(masked_lines, line_num)
 
-            # Extract context window
             ctx_start = max(0, decl_line - 1)  # from declaration start
             ctx_end = min(len(lines), i + context_lines + 1)
 
@@ -297,24 +336,36 @@ def scan_file(
                     tactic_mode=tactic,
                     rel_path=rel_path,
                     qualified_decl_name=qualified_name,
+                    source_sha256=source_sha256,
                 )
             )
 
     return targets
 
 
+_EXCLUDED_SOURCE_DIRECTORIES = frozenset(
+    {".lake", "lake-packages", "build", "workspace", ".git", ".autolean", ".codedb"}
+)
+
+
+def lean_source_files(project_root: Path) -> list[Path]:
+    """Enumerate project source in path order, pruning caches before descent.
+
+    An unreadable source directory fails the scan: a partial enumeration
+    cannot establish that a project has no remaining proof targets.
+    """
+
+    return sorted(
+        path
+        for path in walk_files(project_root, excluded=_EXCLUDED_SOURCE_DIRECTORIES)
+        if path.suffix == ".lean" and path.name != "lakefile.lean"
+    )
+
+
 def scan_project(project_root: Path) -> list[SorryTarget]:
-    """Scan all .lean files in a project for sorry targets."""
+    """Scan project source for every sorry target."""
     targets: list[SorryTarget] = []
-    for path in sorted(project_root.rglob("*.lean")):
-        parts = path.relative_to(project_root).parts
-        if ".lake" in parts or "lake-packages" in parts or "build" in parts:
-            continue
-        if path.name == "lakefile.lean":
-            continue
-        # Skip nested workspace copies (e.g., workspace/workspace/)
-        if "workspace" in parts:
-            continue
+    for path in lean_source_files(project_root):
         targets.extend(scan_file(path, project_root=project_root))
     return targets
 
@@ -344,16 +395,7 @@ def difficulty_score(t: SorryTarget) -> int:
 
 
 def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
-    """Sort targets by estimated difficulty — easy wins first.
-
-    Priority order:
-    1. Difficulty score (from file/name heuristics) — easiest first
-    2. File sorry count (fewer sorries = more likely to succeed)
-    3. Line number within file (top-to-bottom)
-
-    This ensures the agent gets quick wins on Trivial targets before
-    spending cycles on Gromov conjectures.
-    """
+    """Sort targets easiest-first, so quick wins precede hard conjectures."""
     file_counts: dict[Path, int] = {}
     for t in targets:
         file_counts[t.file] = file_counts.get(t.file, 0) + 1
@@ -364,5 +406,6 @@ def prioritize_targets(targets: list[SorryTarget]) -> list[SorryTarget]:
             difficulty_score(t),
             file_counts[t.file],
             t.line,
+            t.col,
         ),
     )

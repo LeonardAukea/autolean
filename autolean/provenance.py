@@ -6,15 +6,28 @@ import hashlib
 import json
 import re
 import subprocess
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any, Protocol
 
-#: One (path, size, mtime_ns) row per artifact the closure identity hashes.
-EnvironmentFingerprint = tuple[tuple[str, int, int], ...]
+from autolean.files import walk_files
+
+#: Digest of each artifact's path, size, and modification time.
+EnvironmentFingerprint = str
 
 _ENVIRONMENT_DOMAIN = b"autolean-proof-environment-v1\0"
-_LEAN_ARTIFACT_SUFFIXES = frozenset({".olean", ".so", ".dylib", ".dll"})
+_LEAN_ARTIFACT_SUFFIXES = (
+    ".olean",
+    ".olean.private",
+    ".olean.server",
+    ".ir",
+    ".ir.sig",
+    ".so",
+    ".dylib",
+    ".dll",
+)
 _PROJECT_CONFIGS = ("lean-toolchain", "lake-manifest.json", "lakefile.lean", "lakefile.toml")
 
 
@@ -36,6 +49,31 @@ class ProofEnvironment:
     manifest_sha256: str
     artifact_count: int
     dependencies: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        identities = (self.sha256, self.manifest_sha256)
+        if any(
+            not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            for digest in identities
+        ):
+            raise ValueError("proof environment digests must be 64 lowercase hexadecimal characters")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (self.lean_version, self.lean_toolchain)
+        ):
+            raise ValueError("proof environment version and toolchain are required")
+        if (
+            isinstance(self.artifact_count, bool)
+            or not isinstance(self.artifact_count, int)
+            or self.artifact_count < 1
+        ):
+            raise ValueError("proof environment artifact count must be positive")
+        if (
+            not isinstance(self.dependencies, tuple)
+            or any(not isinstance(dependency, str) or not dependency for dependency in self.dependencies)
+            or tuple(sorted(set(self.dependencies))) != self.dependencies
+        ):
+            raise ValueError("proof environment dependencies must be sorted unique pins")
 
     def as_dict(self) -> dict[str, Any]:
         """Return a stable JSON-compatible representation."""
@@ -78,7 +116,8 @@ def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironmen
         toolchain_root / "lib" / "lean",
     )
 
-    for root in _module_roots(project_root):
+    for root in compiled_module_paths(project_root):
+        root = root.parent
         label = f"project/{root.relative_to(project_root)}"
         artifact_count += _hash_tree(digest, label, root)
 
@@ -93,8 +132,7 @@ def capture_proof_environment(project_root: Path, lean: Path) -> ProofEnvironmen
 
 
 def environment_fingerprint(project_root: Path, lean: Path) -> EnvironmentFingerprint:
-    """Return a (path, size, mtime) stat identity for the same artifact set
-    hashed by capture_proof_environment.
+    """Stream a stat identity for the artifact set captured by provenance.
 
     A holder of a captured ProofEnvironment may reuse it while the
     fingerprint is unchanged: every change an on-disk build or editor can
@@ -104,19 +142,19 @@ def environment_fingerprint(project_root: Path, lean: Path) -> EnvironmentFinger
     """
     project_root = project_root.resolve()
     lean = lean.resolve()
-    files: list[Path] = [lean]
-    for name in _PROJECT_CONFIGS:
-        path = project_root / name
-        if path.is_file():
-            files.append(path)
-    files.extend(_tree_files(lean.parent.parent / "lib" / "lean"))
-    for root in _module_roots(project_root):
-        files.extend(_tree_files(root))
-    entries: list[tuple[str, int, int]] = []
+    configurations = (project_root / name for name in _PROJECT_CONFIGS)
+    roots = [lean.parent.parent / "lib" / "lean"]
+    roots.extend(root.parent for root in compiled_module_paths(project_root))
+    files = chain(
+        (lean,),
+        (path for path in configurations if path.is_file()),
+        chain.from_iterable(_artifact_files(root) for root in roots),
+    )
+    digest = hashlib.sha256(b"autolean-environment-stat-v1\0")
     for path in files:
         stat = path.stat()
-        entries.append((str(path), stat.st_size, stat.st_mtime_ns))
-    return tuple(entries)
+        _hash_value(digest, str(path), f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()
 
 
 def sha256_text(text: str) -> str:
@@ -171,7 +209,7 @@ def _dependency_pins(manifest: bytes) -> tuple[str, ...]:
     return tuple(sorted(pins))
 
 
-def _module_roots(project_root: Path) -> list[Path]:
+def compiled_module_paths(project_root: Path) -> list[Path]:
     """Compiled dependency roots importable by the pinned Lean."""
     return sorted(
         path.resolve() for path in project_root.rglob("lib/lean") if path.is_dir() and ".lake" in path.parts
@@ -179,11 +217,15 @@ def _module_roots(project_root: Path) -> list[Path]:
 
 
 def _tree_files(root: Path) -> list[Path]:
+    return sorted(_artifact_files(root))
+
+
+def _artifact_files(root: Path) -> Iterator[Path]:
     if not root.is_dir():
-        return []
-    return sorted(
-        path for path in root.rglob("*") if path.is_file() and path.suffix in _LEAN_ARTIFACT_SUFFIXES
-    )
+        return
+    for path in walk_files(root):
+        if path.name.endswith(_LEAN_ARTIFACT_SUFFIXES) and path.is_file():
+            yield path
 
 
 def _hash_tree(digest: _Digest, label: str, root: Path) -> int:

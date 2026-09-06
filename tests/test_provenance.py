@@ -87,6 +87,37 @@ def test_project_configuration_change_changes_environment_identity(tmp_path: Pat
     assert before.sha256 != after.sha256
 
 
+@pytest.mark.parametrize("suffix", [".olean.private", ".olean.server", ".ir", ".ir.sig"])
+def test_imported_module_parts_change_identity_and_fingerprint(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    project, lean = _environment(tmp_path)
+    part = lean.parent.parent / "lib" / "lean" / f"Init{suffix}"
+    part.write_bytes(b"imported-module-part")
+    before = capture_proof_environment(project, lean)
+    fingerprint = provenance.environment_fingerprint(project, lean)
+
+    part.write_bytes(b"changed-imported-module-part")
+
+    assert before.artifact_count == 4
+    assert capture_proof_environment(project, lean).sha256 != before.sha256
+    assert provenance.environment_fingerprint(project, lean) != fingerprint
+
+
+def test_dependency_native_library_changes_environment_identity(tmp_path: Path) -> None:
+    project, lean = _environment(tmp_path)
+    library = provenance.compiled_module_paths(project)[0].parent / "libMathlib.so"
+    library.write_bytes(b"native-code")
+    before = capture_proof_environment(project, lean)
+    fingerprint = provenance.environment_fingerprint(project, lean)
+
+    library.write_bytes(b"different-native-code")
+
+    assert before.sha256 != capture_proof_environment(project, lean).sha256
+    assert fingerprint != provenance.environment_fingerprint(project, lean)
+
+
 def test_manifest_requires_content_revisions(tmp_path: Path) -> None:
     project, lean = _environment(tmp_path, revision="main")
 

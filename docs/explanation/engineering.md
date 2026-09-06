@@ -30,8 +30,9 @@ whether state changed, and the next safe action when one exists.
 
 AutoLean records exact source, model, environment, and validation identities
 because a proof result without its conditions cannot be reproduced. Its
-compare-and-swap edits and immutable releases preserve the state that was
-actually checked.
+source comparisons, atomic edits, and immutable releases bind results to the
+state that was checked. The [trust boundary](trust-boundary.md) defines the
+required ownership of that state.
 
 ## Write for the next reader
 

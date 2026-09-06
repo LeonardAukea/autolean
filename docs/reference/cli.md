@@ -114,18 +114,49 @@ keeps the task-oriented surface small.
 ## Shared model options
 
 Model-aware commands accept a profile or raw model string through `--model`.
-`--backend` selects one transport:
+`--provider` selects a provider by its short user-facing name:
 
-- `claude_cli`
-- `codex_cli`
+- `claude`
+- `codex`
+- `grok`
 - `anthropic`
 - `openai`
 - `ollama`
-- `openai_compat`
-- `muse_glimmer`
+- `compatible`
+- `muse`
 
-The CLI value wins over `program.md`. A profile supplies its backend unless
-`--backend` is explicit.
+Providers with tuned defaults select their strongest model. Local and
+self-hosted providers require an explicit `--model`.
+
+`--backend` addresses the same setting and accepts the canonical backend IDs
+used in stored configuration:
+
+| Provider | Backend ID |
+|---|---|
+| `claude` | `claude_cli` |
+| `codex` | `codex_cli` |
+| `grok` | `grok_cli` |
+| `anthropic` | `anthropic` |
+| `openai` | `openai` |
+| `ollama` | `ollama` |
+| `compatible` | `openai_compat` |
+| `muse` | `muse_glimmer` |
+
+Run `autolean models PROVIDER` to compare one provider's models. Run
+`autolean models MODEL` to see one profile's provider model and setup command.
+Add `--json` to either form for the stable `autolean-model-catalog-v1`
+representation, including readiness, inference placement, and request
+capabilities.
+
+The CLI value wins over `program.md`. A named profile is one tuned
+model-provider binding. An explicit provider must agree with it; raw provider
+model IDs remain freely composable with `--provider`.
+
+`--provider` and `--model` may appear before the subcommand:
+
+```bash
+autolean --provider grok prove "the Pythagorean theorem"
+```
 
 Proof workflows also expose bounded model routing:
 

@@ -56,6 +56,16 @@ class SourceSpan:
     start_line: int
     end_line: int
 
+    def __post_init__(self) -> None:
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in (self.start_line, self.end_line)
+            )
+            or not 1 <= self.start_line <= self.end_line
+        ):
+            raise ValueError("source span must be an ordered positive line range")
+
     def as_dict(self) -> dict[str, int]:
         return {"start_line": self.start_line, "end_line": self.end_line}
 
@@ -69,6 +79,17 @@ class Declaration:
     qualified_name: str
     span: SourceSpan
     signature: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in _DECLARATION_KINDS:
+            raise ValueError(f"unsupported Lean declaration kind: {self.kind!r}")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (self.name, self.qualified_name, self.signature)
+        ):
+            raise ValueError("Lean declaration identity must be complete")
+        if not isinstance(self.span, SourceSpan):
+            raise ValueError("Lean declaration span must use SourceSpan")
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -97,6 +118,42 @@ class StructuralContext:
     following_declarations: tuple[Declaration, ...] = ()
     unavailable_reason: str = ""
 
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None:
+            raise ValueError("structural source SHA-256 must be 64 lowercase hexadecimal characters")
+        if not isinstance(self.parser, str) or not self.parser.strip():
+            raise ValueError("structural parser identity must not be empty")
+        if not isinstance(self.quality, ParseQuality):
+            raise ValueError("structural quality must use the ParseQuality vocabulary")
+        declaration_groups = (
+            self.referenced_declarations,
+            self.preceding_declarations,
+            self.following_declarations,
+        )
+        if (
+            not isinstance(self.error_spans, tuple)
+            or not isinstance(self.imports, tuple)
+            or not isinstance(self.syntax_path, tuple)
+            or any(not isinstance(group, tuple) for group in declaration_groups)
+        ):
+            raise ValueError("structural context collections must be tuples")
+        text_values = (
+            *self.imports,
+            self.namespace,
+            *self.syntax_path,
+            self.unavailable_reason,
+        )
+        if any(not isinstance(value, str) for value in text_values):
+            raise ValueError("structural context text values must be strings")
+        if any(not isinstance(span, SourceSpan) for span in self.error_spans) or any(
+            not isinstance(declaration, Declaration) for group in declaration_groups for declaration in group
+        ):
+            raise ValueError("structural context collections use invalid values")
+        if self.target is not None and not isinstance(self.target, Declaration):
+            raise ValueError("structural target must be a Declaration")
+        if (self.quality is ParseQuality.UNAVAILABLE) != bool(self.unavailable_reason):
+            raise ValueError("unavailable structural context must carry one reason")
+
     @property
     def sha256(self) -> str:
         """Identity of the exact structural text supplied to the model."""
@@ -121,7 +178,7 @@ class StructuralContext:
 
     def render(self, max_chars: int = DEFAULT_CONTEXT_CHARS) -> str:
         """Render deterministic, prompt-ready context within ``max_chars``."""
-        if max_chars <= 0:
+        if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars <= 0:
             raise ValueError("max_chars must be positive")
 
         lines = [
@@ -371,7 +428,6 @@ def _append_declarations(
 
 def _references(
     target_node: Node,
-    target: Declaration,
     declarations: tuple[tuple[Declaration, Node], ...],
     source: bytes,
 ) -> tuple[Declaration, ...]:
@@ -400,6 +456,7 @@ class LeanStructureProvider:
         self._cache_entries = cache_entries
         self._cache: OrderedDict[tuple[str, str], _ParsedSource] = OrderedDict()
         self._parser: Parser | None = None
+        # Keeps the grammar's CDLL alive for the parser's whole lifetime.
         self._grammar_handle: ctypes.CDLL | None = None
         self._parser_identity = parser_identity()
         self._unavailable_reason = ""
@@ -516,7 +573,7 @@ class LeanStructureProvider:
             target_index = parsed.declarations.index(target_pair)
             before = tuple(item[0] for item in parsed.declarations[max(0, target_index - 3) : target_index])
             after = tuple(item[0] for item in parsed.declarations[target_index + 1 : target_index + 3])
-            references = _references(target_pair[1], target_pair[0], parsed.declarations, parsed.source)
+            references = _references(target_pair[1], parsed.declarations, parsed.source)
 
         namespace = ""
         if target is not None and "." in target.qualified_name:

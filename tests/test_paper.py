@@ -11,22 +11,32 @@ from types import SimpleNamespace
 import pytest
 
 from autolean.generated_code import GeneratedCodeError
-from autolean.llm import Capabilities, DocumentInput, LLMResponse
+from autolean.llm import (
+    Capabilities,
+    DocumentInput,
+    InferenceLocation,
+    LLMConfig,
+    LLMResponse,
+)
 from autolean.paper import (
     Claim,
     ClaimDisposition,
+    DocumentExtractionReceipt,
+    ExtractionReceipt,
     PaperDocument,
     PdfEngine,
+    _document_input,
     _extract_arxiv_id,
     _fetch_arxiv_html_with_lightpanda,
     _parse_arxiv_html_theorems,
     _parse_page_selection,
+    _read_pdf,
     claim_disposition,
     extract_claims_from_markdown,
     extract_document_claims,
+    formalize_claim,
     materialize_paper,
     read_paper,
-    read_pdf,
 )
 from autolean.paper_evidence import (
     analyze_paper_structure,
@@ -40,12 +50,14 @@ from autolean.paper_profiles import IONESCU_TULCEA_V5, PaperProfileError
 from autolean.strategy import PlanAttempt, parse_proof_plan
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_materialized_paper_preserves_exact_text_and_pdf(
     tmp_path: Path,
+    newline: str,
 ) -> None:
     source = tmp_path / "source.pdf"
     source.write_bytes(b"%PDF exact fixture")
-    text = "First page.\n\n$e^{i\\pi} + 1 = 0$"
+    text = f"First page.{newline}{newline}$e^{{i\\pi}} + 1 = 0$"
     document = PaperDocument(
         title="Exact fixture",
         text=text,
@@ -62,7 +74,7 @@ def test_materialized_paper_preserves_exact_text_and_pdf(
     assert artifact.text_sha256 == hashlib.sha256(text.encode()).hexdigest()
     assert artifact.pdf_path is not None
     assert artifact.pdf_path.read_bytes() == source.read_bytes()
-    markdown = artifact.markdown_path.read_text(encoding="utf-8")
+    markdown = artifact.markdown_path.read_bytes().decode("utf-8")
     assert markdown.endswith(text + "\n")
     assert "Source SHA-256: `" + "a" * 64 + "`" in markdown
     assert artifact.pdf_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
@@ -106,6 +118,7 @@ def test_paper_plan_preserves_the_exact_model_response(tmp_path: Path) -> None:
         plan,
         model="opus",
         backend="claude_cli",
+        location=InferenceLocation.REMOTE,
         responses=(response,),
     )
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -113,15 +126,14 @@ def test_paper_plan_preserves_the_exact_model_response(tmp_path: Path) -> None:
     assert record["schema"] == "autolean.paper-plan.v2"
     assert record["responses"][0]["response"] == raw_response
     assert record["responses"][0]["response_sha256"] == response.response_sha256
+    assert record["inference_location"] == "remote"
     assert record["accepted_response_sha256"] == response.response_sha256
     assert len(record["trace_sha256"]) == 64
 
 
-def test_materialized_paper_rejects_non_digest_identity(tmp_path: Path) -> None:
-    document = PaperDocument(title="Fixture", text="paper", input_sha256="../../escape")
-
+def test_paper_document_rejects_non_digest_identity() -> None:
     with pytest.raises(ValueError, match="paper input SHA-256"):
-        materialize_paper(document, tmp_path / "project")
+        PaperDocument(title="Fixture", text="paper", input_sha256="../../escape")
 
 
 def test_document_claim_extraction_attaches_pdf_when_supported(tmp_path: Path) -> None:
@@ -130,6 +142,7 @@ def test_document_claim_extraction_attaches_pdf_when_supported(tmp_path: Path) -
     seen: list[DocumentInput] = []
 
     class Backend:
+        config = LLMConfig(model="fixture", backend="openai")
         capabilities = Capabilities(document_inputs=True)
 
         def generate(self, *args: object, **kwargs: object) -> LLMResponse:
@@ -160,6 +173,82 @@ def test_document_claim_extraction_attaches_pdf_when_supported(tmp_path: Path) -
     assert [claim.label for claim in claims] == ["Theorem 1"]
     assert len(seen) == 1
     assert seen[0].data == b"%PDF fixture"
+    assert document.extraction_receipt is not None
+    assert document.extraction_receipt.location is InferenceLocation.REMOTE
+    assert document.extraction_receipt.document_sha256 == hashlib.sha256(b"%PDF fixture").hexdigest()
+
+
+def test_document_input_contains_only_selected_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected: list[int] = []
+
+    class Pdf:
+        def __enter__(self) -> Pdf:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def __len__(self) -> int:
+            return 4
+
+        def select(self, pages: list[int]) -> None:
+            selected.extend(pages)
+
+        def tobytes(self, **kwargs: object) -> bytes:
+            assert kwargs == {"garbage": 4, "deflate": True}
+            return b"%PDF selected pages"
+
+    monkeypatch.setitem(sys.modules, "pymupdf", SimpleNamespace(open=lambda path: Pdf()))
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF all pages")
+    document = PaperDocument(
+        title="Fixture",
+        pdf_path=source,
+        pdf_pages=(0, 2),
+    )
+
+    attachment = _document_input(document)
+
+    assert selected == [0, 2]
+    assert attachment.filename == "paper-selected.pdf"
+    assert attachment.data == b"%PDF selected pages"
+
+
+def test_claim_formalization_records_model_content_and_placement() -> None:
+    class Backend:
+        config = LLMConfig(model="gpt-test", backend="openai")
+        capabilities = Capabilities()
+
+        def generate(self, system: str, user: str, **kwargs: object) -> LLMResponse:
+            del system, user, kwargs
+            return LLMResponse(
+                text="theorem generated : True := by\n  sorry",
+                model="gpt-test",
+                input_tokens=12,
+                output_tokens=8,
+                duration_seconds=0.5,
+            )
+
+    claim = Claim("Theorem 1", "Every proposition implies itself.")
+
+    formalize_claim(claim, Backend())  # type: ignore[arg-type]
+
+    assert claim.lean_code == "theorem generated : True := by\n  sorry"
+    assert claim.formalization_receipt is not None
+    assert claim.formalization_receipt.location is InferenceLocation.REMOTE
+    assert claim.formalization_receipt.backend == "openai"
+    assert claim.formalization_receipt.input_tokens == 12
+
+
+def test_paper_document_rejects_noncanonical_page_identity(tmp_path: Path) -> None:
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF fixture")
+
+    with pytest.raises(ValueError, match="unique zero-indexed"):
+        PaperDocument(title="Fixture", pdf_path=source, pdf_pages=(2, 1, 1))
 
 
 def test_verification_metadata_stays_inside_comments() -> None:
@@ -350,10 +439,38 @@ def test_paper_coverage_records_every_item_without_proving_conjectures(
     ]
     document = PaperDocument(title="Fixture", claims=claims, input_sha256="a" * 64)
     artifact = materialize_paper(document, tmp_path / "project")
+    receipt = ExtractionReceipt(
+        model="fixture",
+        backend="openai",
+        location=InferenceLocation.REMOTE,
+        request_sha256="b" * 64,
+        response_sha256="c" * 64,
+        input_tokens=100,
+        output_tokens=20,
+        duration_seconds=1.5,
+        document_sha256="d" * 64,
+        document_bytes=1024,
+        document_pages=(1, 3),
+    )
+    document_receipt = DocumentExtractionReceipt(
+        engine=PdfEngine.PADDLEOCR_VL,
+        location=InferenceLocation.REMOTE,
+        endpoint="https://ocr.example",
+        document_sha256="e" * 64,
+        document_bytes=2048,
+        document_pages=(1, 3),
+        result_sha256="f" * 64,
+    )
 
-    coverage = write_paper_coverage(artifact, claims)
+    coverage = write_paper_coverage(
+        artifact,
+        claims,
+        document_extraction_receipt=document_receipt,
+        extraction_receipt=receipt,
+    )
     analysis = analyze_paper_structure(claims)
     source = render_verification_source(claims)
+    record = json.loads(coverage.read_text(encoding="utf-8"))
 
     assert analysis["by_disposition"] == {
         "prove": 1,
@@ -363,6 +480,10 @@ def test_paper_coverage_records_every_item_without_proving_conjectures(
     }
     assert coverage.is_file()
     assert '"disposition": "open"' in coverage.read_text(encoding="utf-8")
+    assert record["model_extraction"]["location"] == "remote"
+    assert record["model_extraction"]["document_pages"] == [1, 3]
+    assert record["document_extraction"]["location"] == "remote"
+    assert record["document_extraction"]["document_bytes"] == 2048
     assert "theorem t" in source
     assert "Conjecture 1" in source
     assert "Recorded as a source boundary" in source
@@ -558,12 +679,22 @@ def test_pdf_reader_uses_layout_ocr_and_preserves_page_identity(
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"%PDF fixture")
 
-    text = read_pdf(source, pages="3,1")
+    text, pages, receipt = _read_pdf(
+        source,
+        pages="3,1",
+        engine=PdfEngine.HYBRID,
+        paddleocr_url=None,
+    )
 
+    assert pages == (0, 2)
     assert seen["pages"] == [0, 2]
     assert seen["use_ocr"] is True
     assert seen["force_ocr"] is False
     assert text == "--- Page 1 ---\nFirst page\n\n--- Page 3 ---\nThird page"
+    assert receipt.location is InferenceLocation.LOCAL
+    assert receipt.document_pages == (1, 3)
+    assert receipt.document_sha256 == hashlib.sha256(b"%PDF fixture").hexdigest()
+    assert receipt.result_sha256 == hashlib.sha256(text.encode()).hexdigest()
 
 
 def test_paddleocr_reader_sends_selected_pdf_once(
@@ -625,19 +756,25 @@ def test_paddleocr_reader_sends_selected_pdf_once(
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"%PDF fixture")
 
-    text = read_pdf(
+    text, pages, receipt = _read_pdf(
         source,
         pages="3,1",
         engine=PdfEngine.PADDLEOCR_VL,
-        paddleocr_url="http://127.0.0.1:8118",
+        paddleocr_url="https://ocr.example",
     )
 
+    assert pages == (0, 2)
     assert documents[1].selected == [0, 2]
     payload = seen["json"]
     assert isinstance(payload, dict)
     assert payload["file"] == "c2VsZWN0ZWQgcGRm"
-    assert seen["url"] == "http://127.0.0.1:8118/layout-parsing"
+    assert seen["url"] == "https://ocr.example/layout-parsing"
     assert text == "--- Page 1 ---\nThird page\n\n--- Page 3 ---\nFirst page"
+    assert receipt.location is InferenceLocation.REMOTE
+    assert receipt.endpoint == "https://ocr.example"
+    assert receipt.document_pages == (1, 3)
+    assert receipt.document_sha256 == hashlib.sha256(b"selected pdf").hexdigest()
+    assert receipt.document_bytes == len(b"selected pdf")
 
 
 def test_verification_source_records_extractor_input_identity() -> None:

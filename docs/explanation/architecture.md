@@ -21,7 +21,7 @@ flowchart TD
     end
     subgraph boundary["Proof boundary"]
         policy["generated_code:<br/>source policy"]
-        lean["lean_interface:<br/>sandbox, elaboration, audits,<br/>compare-and-swap install"]
+        lean["lean_interface:<br/>sandbox, elaboration, audits,<br/>source comparison and installation"]
         provenance["provenance:<br/>identity records"]
     end
 
@@ -61,11 +61,20 @@ The research loop is represented by small records and services:
 These modules exchange typed values. A model name, proof plan, paper identity,
 session, and accepted source remain distinct values across the pipeline.
 
+Provider selection and data placement are separate decisions. A model profile
+binds one provider model and its controls. Effective inference placement comes
+from that provider and any explicit endpoint. Search placement independently
+controls network research, so a local model can remain local or compose with
+remote research without changing the proof boundary. Native document transfer
+uses the selected page set and records its exact bytes in paper evidence. PDF
+extraction separately records the engine, endpoint placement, page set, exact
+input, and Markdown result.
+
 ## Proof boundary
 
 `generated_code` validates model-produced source before execution.
 `lean_interface` owns sandboxed compilation, declaration binding, axiom audit,
-and compare-and-swap installation. `provenance` identifies the source,
+and atomic source installation. `provenance` identifies the source,
 toolchain, dependency graph, artifacts, and accepted proof.
 
 The complete authority and threat model lives in

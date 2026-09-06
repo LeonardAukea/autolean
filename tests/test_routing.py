@@ -6,10 +6,12 @@ import pytest
 
 from autolean.routing import (
     EscalationPolicy,
+    EscalationRoute,
     FailureEvidence,
     decide_escalation,
     profile_for_model,
 )
+from autolean.tracker import Outcome
 
 
 def test_known_profile_routes_to_its_same_backend_sibling() -> None:
@@ -18,8 +20,8 @@ def test_known_profile_routes_to_its_same_backend_sibling() -> None:
         current_model="gpt-5.6-luna",
         current_backend="codex_cli",
         failures=(
-            FailureEvidence("fail_build", "type_mismatch"),
-            FailureEvidence("fail_build", "unknown_identifier"),
+            FailureEvidence(Outcome.FAIL_BUILD, "type_mismatch"),
+            FailureEvidence(Outcome.FAIL_BUILD, "unknown_identifier"),
         ),
         difficulty=5,
     )
@@ -43,7 +45,7 @@ def test_research_target_still_requires_one_kernel_failure() -> None:
         policy=EscalationPolicy.AUTO,
         current_model="sonnet",
         current_backend="claude_cli",
-        failures=(FailureEvidence("fail_build", "unsolved_goals"),),
+        failures=(FailureEvidence(Outcome.FAIL_BUILD, "unsolved_goals"),),
         difficulty=9,
     )
 
@@ -55,9 +57,9 @@ def test_research_target_still_requires_one_kernel_failure() -> None:
 @pytest.mark.parametrize(
     "evidence",
     [
-        FailureEvidence("fail_provider", "llm_rate_limit"),
-        FailureEvidence("fail_build", "file_structure_error"),
-        FailureEvidence("skipped", "duplicate_declaration"),
+        FailureEvidence(Outcome.FAIL_PROVIDER, "llm_rate_limit"),
+        FailureEvidence(Outcome.FAIL_BUILD, "file_structure_error"),
+        FailureEvidence(Outcome.SKIPPED, "duplicate_declaration"),
     ],
 )
 def test_provider_and_source_failures_do_not_authorize_escalation(
@@ -80,7 +82,7 @@ def test_never_policy_ignores_eligible_failures() -> None:
             policy=EscalationPolicy.NEVER,
             current_model="sonnet",
             current_backend="claude_cli",
-            failures=(FailureEvidence("fail_build", "type_mismatch"),) * 3,
+            failures=(FailureEvidence(Outcome.FAIL_BUILD, "type_mismatch"),) * 3,
             difficulty=9,
         )
         is None
@@ -92,7 +94,7 @@ def test_explicit_target_authorizes_a_cross_backend_route() -> None:
         policy=EscalationPolicy.ASK,
         current_model="gemma4:26b",
         current_backend="ollama",
-        failures=(FailureEvidence("fail_build", "type_mismatch"),) * 2,
+        failures=(FailureEvidence(Outcome.FAIL_BUILD, "type_mismatch"),) * 2,
         difficulty=4,
         explicit_target="opus",
     )
@@ -108,7 +110,7 @@ def test_route_rejects_the_active_model_as_its_target() -> None:
             policy=EscalationPolicy.AUTO,
             current_model="sonnet",
             current_backend="claude_cli",
-            failures=(FailureEvidence("fail_build", "type_mismatch"),),
+            failures=(FailureEvidence(Outcome.FAIL_BUILD, "type_mismatch"),),
             difficulty=9,
             explicit_target="sonnet",
         )
@@ -119,3 +121,8 @@ def test_profile_lookup_uses_both_model_and_backend() -> None:
 
     assert profile is not None
     assert profile.name == "gpt-luna-api"
+
+
+def test_route_rejects_values_outside_its_typed_vocabulary() -> None:
+    with pytest.raises(ValueError, match="routing decision"):
+        EscalationRoute(decision="opus")  # type: ignore[arg-type]

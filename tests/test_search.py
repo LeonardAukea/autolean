@@ -47,7 +47,10 @@ class TestFormatSearchResults:
 @respx.mock
 def test_loogle_validates_response_shape() -> None:
     respx.get(LOOGLE_URL).mock(return_value=httpx.Response(200, json=["wrong shape"]))
-    assert search_loogle("Nat.add_comm") == []
+    unavailable: list[str] = []
+
+    assert search_loogle("Nat.add_comm", on_unavailable=unavailable.append) == []
+    assert unavailable == ["Loogle unavailable: SearchPayloadError"]
 
 
 @respx.mock

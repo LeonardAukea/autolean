@@ -29,7 +29,7 @@ flowchart TD
     sandbox["sandbox-exec (macOS) / Bubblewrap (Linux)<br/>no network, minimal environment"]
     elab["pinned Lean elaboration"]
     audit["fresh declaration-range and axiom audit"]
-    install["compare-and-swap source installation"]
+    install["compare source and install atomically"]
     commit["exact-path proof commit"]
 
     target --> request --> policy --> scratch --> sandbox
@@ -86,13 +86,12 @@ looks like. The layers above the sandbox cannot carry this responsibility:
 
 The sandbox is the one layer whose guarantee does not depend on the
 candidate's content: no network, a minimal environment, and a filesystem view
-restricted to the scratch project, enforced by the operating system.
+enforced by the operating system. The sandbox permits reads of the pinned
+toolchain and compiled dependencies and confines writes to scratch outputs.
 
-Its cost does not match its weight. Wrapping the Lean process in
-`sandbox-exec` or Bubblewrap adds process-launch overhead of a few
-milliseconds; the elaboration it contains imports Mathlib and runs for
-seconds to minutes, dominated by work that would happen with or without the
-sandbox. Containment is effectively free relative to what it contains.
+Native compiler and sandbox costs require host-specific measurements. The
+[profiling guide](../how-to/profile.md) separates those subprocesses from
+Python runtime measurements.
 
 ## Declaration binding
 
@@ -102,9 +101,9 @@ contain the exact selected target line. The same process walks the
 declaration's transitive axioms.
 
 The source edit replaces one expected `sorry` and must reduce the file's
-placeholder count by one. The expected pre-edit hash prevents a concurrent
-editor save from being overwritten. Git verifies the prepared branch and
-commits only the accepted file.
+placeholder count by one. Git verifies the prepared branch and commits only
+the accepted file. The [source installation contract](../reference/environment.md#accepted-proof-record)
+defines the comparison and writer requirements.
 
 ## Structural context
 
@@ -121,8 +120,25 @@ state.
 
 Hosted and subscription models receive the selected declaration, nearby
 source, goal state, prior failures, guidance, skills, and bounded search
-results. Local profiles keep that data on infrastructure controlled by the
-operator.
+results. AutoLean labels effective inference as local or remote from the
+provider and any explicit endpoint.
+
+Advisory research has an independent placement. `search_scope: local` uses
+the project CodeDB index and sends no goal query to Loogle, LeanSearch, or
+arXiv. `search_scope: remote` permits those services, and `auto` follows model
+placement. Each proof attempt records whether remote research ran and the
+content hashes of remote and indexed evidence separately.
+
+Document-capable hosted providers receive the exact native PDF bytes admitted
+by `--pages`. The paper coverage ledger records the provider, inference
+placement, request and response identities, document identity and size, and
+the one-indexed pages transferred. Other providers receive bounded Markdown.
+
+PaddleOCR-VL receives a page-bounded PDF at the endpoint named by the user.
+The coverage ledger records whether that endpoint is local or remote, its URL,
+the exact request identity and size, the page set, and the Markdown result
+identity. Hybrid PDF extraction runs locally and records the same content
+identities without an endpoint.
 
 Provider credentials remain in the process environment. They do not enter
 `program.md`, prompts, session records, or exported artifacts. OpenAI hosted

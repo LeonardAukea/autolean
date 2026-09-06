@@ -4,19 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypedDict, TypeVar
 
 import click
 
 from autolean import ui
-from autolean.llm import BACKEND_NAMES, LLMBackend, LLMError, create_llm_client
+from autolean.llm import (
+    PROVIDER_NAMES,
+    LLMBackend,
+    LLMError,
+    create_llm_client,
+    inference_location,
+    provider_name,
+    resolve_backend_name,
+)
 from autolean.ui import console
 
 if TYPE_CHECKING:
     from autolean.agent import AgentRunResult, AutoLeanAgent
     from autolean.lean_interface import BuildResult
     from autolean.program import ProgramConfig
-    from autolean.routing import EscalationDecision
+    from autolean.routing import EscalationDecision, EscalationPolicy
     from autolean.session import ProofSession, SessionStore
 
 
@@ -27,12 +35,36 @@ model_option = click.option(
     default=None,
     help="Model profile or ID; auto selects the strongest authenticated provider.",
 )
-backend_option = click.option(
+
+
+class ProviderType(click.ParamType[str]):
+    """A user-facing provider name resolved to its canonical backend ID."""
+
+    name = "provider"
+
+    def convert(
+        self,
+        value: object,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> str:
+        if isinstance(value, str):
+            backend = resolve_backend_name(value.lower())
+            if backend is not None:
+                return backend
+        choices = ", ".join(PROVIDER_NAMES)
+        self.fail(f"unknown provider {value!r}; choose one of: {choices}", param, ctx)
+
+
+provider_option = click.option(
+    "--provider",
     "--backend",
     "-b",
-    type=click.Choice(BACKEND_NAMES),
+    "backend",
+    type=ProviderType(),
+    metavar="PROVIDER",
     default=None,
-    help="Select a provider; auto maps hosted providers to their strongest profile.",
+    help=f"Provider: {', '.join(PROVIDER_NAMES)}.",
 )
 program_option = click.option(
     "--program",
@@ -163,7 +195,9 @@ def connected_llm(
         llm = llm_for(model, backend, program_config, timeout=timeout)
     except (LLMError, ValueError) as error:
         raise click.ClickException(f"Model selection failed: {error}") from error
-    ui.kv("Model", f"{llm.config.model} [provenance]via {llm.config.backend}[/]")
+    ui.kv("Model", llm.config.model)
+    ui.kv("Provider", provider_name(llm.config.backend))
+    ui.kv("Inference", inference_location(llm.config).value)
     if llm.config.model_revision:
         ui.kv("Revision", llm.config.model_revision)
     if llm.config.model_artifact_sha256:
@@ -179,7 +213,7 @@ def connected_llm(
     if not reachable:
         llm.close()
         raise click.ClickException(
-            f"Backend '{llm.config.backend}' did not pass preflight. "
+            f"Provider '{provider_name(llm.config.backend)}' did not pass preflight. "
             "Run `autolean models` to see what is ready."
         )
     context = click.get_current_context(silent=True)
@@ -193,6 +227,7 @@ def agent_for(
     *,
     model: str | None = None,
     backend: str | None = None,
+    effort: str | None = None,
     dry_run: bool = False,
     verbose: bool = False,
     resume: bool = False,
@@ -206,6 +241,9 @@ def agent_for(
     try:
         agent = AutoLeanAgent(
             program_path=program,
+            model=model,
+            backend=backend,
+            effort=effort,
             dry_run=dry_run,
             verbose=verbose,
             resume=resume,
@@ -213,9 +251,6 @@ def agent_for(
             target_file=target_file,
             confirm_escalation=_confirm_model_escalation,
         )
-        if model is not None or backend is not None:
-            agent.llm.close()
-            agent.llm = llm_for(model, backend, agent.config)
         return agent
     except (LLMError, OSError, ValueError) as error:
         if agent is not None:
@@ -250,8 +285,37 @@ def _remaining_session_targets(store: SessionStore, session: ProofSession) -> in
 
     targets = scan_project(store.project_root)
     if session.target_filter:
-        targets = [target for target in targets if session.target_filter in (target.id, target.decl_name)]
+        targets = [
+            target
+            for target in targets
+            if session.target_filter in (target.id, target.legacy_id, target.decl_name)
+        ]
     return len(targets)
+
+
+class SessionSettings(TypedDict):
+    """Session fields that mirror the agent's resolved configuration."""
+
+    model: str
+    backend: str
+    effort: str | None
+    max_cycles: int
+    escalation_policy: EscalationPolicy
+    escalation_model: str
+    escalation_after_failures: int
+
+
+def session_settings(agent: AutoLeanAgent) -> SessionSettings:
+    """Collect the agent configuration a session record mirrors."""
+    return SessionSettings(
+        model=agent.llm.config.model,
+        backend=agent.llm.config.backend,
+        effort=agent.llm.config.effort,
+        max_cycles=agent.config.max_cycles,
+        escalation_policy=agent.config.escalation_policy,
+        escalation_model=agent.config.escalation_model or "",
+        escalation_after_failures=agent.config.escalation_after_failures,
+    )
 
 
 def run_session_agent(
@@ -273,6 +337,7 @@ def run_session_agent(
             status=SessionStatus.RUNNING,
             model=agent.llm.config.model,
             backend=agent.llm.config.backend,
+            effort=agent.llm.config.effort,
             message="",
         )
     )
@@ -287,6 +352,7 @@ def run_session_agent(
                 status=SessionStatus.FAILED,
                 model=agent.llm.config.model,
                 backend=agent.llm.config.backend,
+                effort=agent.llm.config.effort,
                 model_transitions=(*running.model_transitions, *agent.model_transitions),
                 message=str(error),
             )
@@ -301,6 +367,7 @@ def run_session_agent(
             status=status,
             model=agent.llm.config.model,
             backend=agent.llm.config.backend,
+            effort=agent.llm.config.effort,
             model_transitions=(*running.model_transitions, *agent.model_transitions),
             remaining_targets=remaining,
             message=result.message,

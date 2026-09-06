@@ -2,32 +2,41 @@
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
-from autolean.llm import LLMConfig, validate_backend_config, validate_endpoint
+from autolean.llm import (
+    InferenceLocation,
+    LLMConfig,
+    inference_location,
+    resolve_backend_name,
+    validate_endpoint,
+)
 from autolean.models import DEFAULT_PROFILE, resolve_llm_config
 from autolean.routing import DEFAULT_ESCALATION_AFTER, EscalationPolicy
+from autolean.validation import (
+    require_instance,
+    require_int,
+    require_optional_int,
+    require_optional_number,
+    require_optional_text,
+    require_text,
+    require_text_list,
+    require_texts,
+)
 
 DEFAULT_MAX_PROOF_LINES = 30
 DEFAULT_MAX_CYCLES = 5
 
 
-def _require_positive(name: str, value: int | float) -> None:
-    if value <= 0:
-        raise ValueError(f"{name} must be positive")
+class SearchScope(StrEnum):
+    """Where advisory research queries may run."""
 
-
-def _require_finite_range(name: str, value: float, lower: float, upper: float) -> None:
-    if not math.isfinite(value) or not lower <= value <= upper:
-        raise ValueError(f"{name} must be finite and between {lower:g} and {upper:g}")
-
-
-def _require_optional_finite_positive(name: str, value: float | None) -> None:
-    if value is not None and (not math.isfinite(value) or value <= 0):
-        raise ValueError(f"{name} must be finite and positive")
+    AUTO = "auto"
+    LOCAL = "local"
+    REMOTE = "remote"
 
 
 @dataclass
@@ -40,9 +49,10 @@ class ProgramConfig:
     backend: str | None = None
     endpoint: str | None = None
     effort: str | None = None
-    temperature: float = 0.4
+    temperature: float | None = None
     max_output_tokens: int | None = None
     llm_timeout_seconds: float | None = None
+    search_scope: SearchScope = SearchScope.AUTO
     max_retries_per_sorry: int = 5
     cycle_timeout_seconds: int = 120
     max_cycles: int = DEFAULT_MAX_CYCLES
@@ -56,25 +66,87 @@ class ProgramConfig:
 
     def validate(self) -> None:
         """Validate the complete program after parsing and overrides."""
+        require_texts(
+            (self.mode, self.lean_project_path, self.model),
+            "program mode, project path, and model must be text",
+            allow_empty=True,
+        )
         if self.mode != "sorry-elimination":
             raise ValueError(f"unsupported agent mode: {self.mode}")
-        if not self.lean_project_path.strip():
-            raise ValueError("lean_project_path must not be empty")
+        require_text(self.lean_project_path, "lean_project_path must not be empty")
+        require_text(self.model, "model must not be empty")
+        for value in (self.backend, self.endpoint, self.effort):
+            require_optional_text(
+                value,
+                "optional program settings must be text",
+                allow_empty=True,
+            )
+        require_instance(
+            self.search_scope,
+            SearchScope,
+            "search_scope must use the SearchScope vocabulary",
+        )
+        require_instance(
+            self.escalation_policy,
+            EscalationPolicy,
+            "escalation_policy must use the EscalationPolicy vocabulary",
+        )
         validate_endpoint(self.endpoint)
-        _require_positive("max_retries_per_sorry", self.max_retries_per_sorry)
-        _require_positive("cycle_timeout_seconds", self.cycle_timeout_seconds)
-        if self.max_cycles < 0:
-            raise ValueError("max_cycles must be non-negative")
-        _require_positive("max_proof_lines", self.max_proof_lines)
-        _require_positive("escalation_after_failures", self.escalation_after_failures)
-        if self.escalation_model is not None and not self.escalation_model.strip():
-            raise ValueError("escalation_model must not be empty")
-        _require_finite_range("temperature", self.temperature, 0, 2)
-        if self.max_output_tokens is not None:
-            _require_positive("max_output_tokens", self.max_output_tokens)
-        _require_optional_finite_positive("llm_timeout_seconds", self.llm_timeout_seconds)
+        require_int(
+            self.max_retries_per_sorry,
+            "max_retries_per_sorry must be positive",
+            minimum=1,
+        )
+        require_int(
+            self.cycle_timeout_seconds,
+            "cycle_timeout_seconds must be positive",
+            minimum=1,
+        )
+        require_int(self.max_cycles, "max_cycles must be non-negative", minimum=0)
+        require_int(self.max_proof_lines, "max_proof_lines must be positive", minimum=1)
+        require_int(
+            self.escalation_after_failures,
+            "escalation_after_failures must be positive",
+            minimum=1,
+        )
+        require_optional_text(
+            self.escalation_model,
+            "escalation_model must not be empty",
+        )
+        require_optional_number(
+            self.temperature,
+            "temperature must be finite and between 0 and 2",
+            minimum=0,
+            maximum=2,
+        )
+        require_optional_int(
+            self.max_output_tokens,
+            "max_output_tokens must be positive",
+            minimum=1,
+        )
+        require_optional_number(
+            self.llm_timeout_seconds,
+            "llm_timeout_seconds must be finite and positive",
+            minimum=0,
+            minimum_inclusive=False,
+        )
         if self.effort not in (None, "none", "low", "medium", "high", "xhigh", "max"):
             raise ValueError(f"unsupported reasoning effort: {self.effort}")
+        require_text_list(
+            self.goals,
+            "goals must contain unique non-empty text",
+            unique=True,
+        )
+        require_text_list(
+            self.constraints,
+            "constraints must contain unique non-empty text",
+            unique=True,
+        )
+        require_text_list(
+            self.strategy_hints,
+            "strategy_hints must contain unique non-empty text",
+            unique=True,
+        )
 
     def llm_config(self) -> LLMConfig:
         """Resolve the complete provider-neutral backend configuration."""
@@ -88,8 +160,15 @@ class ProgramConfig:
             max_output_tokens=self.max_output_tokens,
             effort=self.effort,
         )
-        validate_backend_config(config)
         return config
+
+    def remote_search_enabled(self, config: LLMConfig) -> bool:
+        """Resolve the effective network-search policy for one model."""
+        if self.search_scope is SearchScope.REMOTE:
+            return True
+        if self.search_scope is SearchScope.LOCAL:
+            return False
+        return inference_location(config) is InferenceLocation.REMOTE
 
 
 # HTML comments document each setting and are outside the configuration syntax.
@@ -128,74 +207,140 @@ def _section_list(sections: dict[str, str], heading: str) -> list[str]:
     return items
 
 
+def _program_value(content: str, key: str, default: str | None = None) -> str | None:
+    """Return one whitespace-delimited scalar from the configuration block."""
+    match = re.search(rf"^\s*{key}:\s*(\S+)", content, re.MULTILINE)
+    return match.group(1) if match else default
+
+
+def _program_integer(content: str, key: str, default: int) -> int:
+    """Decode one integer setting with its source name in failures."""
+    raw = _program_value(content, key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise ValueError(f"program.md: {key} must be an integer, got {raw!r}") from error
+
+
+def _program_float(content: str, key: str, default: float | None = None) -> float | None:
+    """Decode one optional numeric setting with its source name in failures."""
+    raw = _program_value(content, key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise ValueError(f"program.md: {key} must be numeric, got {raw!r}") from error
+
+
+def _program_provider(content: str) -> str | None:
+    """Resolve the public provider noun and its compatibility spelling."""
+    provider = _program_value(content, "provider")
+    backend = _program_value(content, "backend")
+    if provider is not None and backend is not None:
+        raise ValueError("program.md: choose one provider setting")
+    selection = provider or backend
+    if selection is None:
+        return None
+    resolved = resolve_backend_name(selection)
+    if resolved is None:
+        raise ValueError(f"program.md: unknown provider {selection!r}")
+    return resolved
+
+
+def _program_search_scope(content: str, default: SearchScope) -> SearchScope:
+    """Decode the remote-research placement policy."""
+    raw = _program_value(content, "search_scope", default.value) or default.value
+    try:
+        return SearchScope(raw)
+    except ValueError as error:
+        choices = ", ".join(scope.value for scope in SearchScope)
+        raise ValueError(f"program.md: search_scope must be one of {choices}, got {raw!r}") from error
+
+
+def _program_escalation_policy(
+    content: str,
+    default: EscalationPolicy,
+) -> EscalationPolicy:
+    """Decode the model-escalation policy."""
+    raw = _program_value(content, "escalation_policy", default.value) or default.value
+    try:
+        return EscalationPolicy(raw)
+    except ValueError as error:
+        choices = ", ".join(policy.value for policy in EscalationPolicy)
+        raise ValueError(f"program.md: escalation_policy must be one of {choices}, got {raw!r}") from error
+
+
+def _program_integer_alias(content: str, keys: tuple[str, ...]) -> int | None:
+    """Decode the first present spelling of one integer setting."""
+    for key in keys:
+        if _program_value(content, key) is not None:
+            return _program_integer(content, key, 0)
+    return None
+
+
+def _program_float_alias(content: str, keys: tuple[str, ...]) -> float | None:
+    """Decode the first present spelling of one numeric setting."""
+    for key in keys:
+        if _program_value(content, key) is not None:
+            return _program_float(content, key)
+    return None
+
+
 def parse_program(path: Path) -> ProgramConfig:
     """Parse and validate one `program.md` file."""
     content = _HTML_COMMENT.sub("", path.read_text(encoding="utf-8"))
     sections = _markdown_sections(content)
-    config = ProgramConfig()
-
-    config.mode = _section_value(sections, "Mode") or config.mode
-    config.lean_project_path = _section_value(sections, "Lean Project Path") or config.lean_project_path
-
-    def extract_value(key: str, default: str | None) -> str | None:
-        match = re.search(rf"^\s*{key}:\s*(\S+)", content, re.MULTILINE)
-        return match.group(1) if match else default
-
-    def extract_integer(key: str, default: int) -> int:
-        raw = extract_value(key, None)
-        if raw is None:
-            return default
-        try:
-            return int(raw)
-        except ValueError as error:
-            raise ValueError(f"program.md: {key} must be an integer, got {raw!r}") from error
-
-    def extract_float(key: str, default: float) -> float:
-        raw = extract_value(key, None)
-        if raw is None:
-            return default
-        try:
-            return float(raw)
-        except ValueError as error:
-            raise ValueError(f"program.md: {key} must be numeric, got {raw!r}") from error
-
-    config.model = extract_value("model", config.model) or config.model
-    config.backend = extract_value("backend", None)
-    config.endpoint = extract_value("endpoint", None)
-    config.effort = extract_value("effort", None)
-    config.temperature = extract_float("temperature", config.temperature)
-    config.max_retries_per_sorry = extract_integer("max_retries_per_sorry", config.max_retries_per_sorry)
-    config.cycle_timeout_seconds = extract_integer("cycle_timeout_seconds", config.cycle_timeout_seconds)
-    config.max_cycles = extract_integer("max_cycles", config.max_cycles)
-    config.max_proof_lines = extract_integer("max_proof_lines", config.max_proof_lines)
-    raw_escalation = (
-        extract_value("escalation_policy", config.escalation_policy.value) or config.escalation_policy.value
-    )
-    try:
-        config.escalation_policy = EscalationPolicy(raw_escalation)
-    except ValueError as error:
-        choices = ", ".join(policy.value for policy in EscalationPolicy)
-        raise ValueError(
-            f"program.md: escalation_policy must be one of {choices}, got {raw_escalation!r}"
-        ) from error
-    config.escalation_model = extract_value("escalation_model", None)
-    config.escalation_after_failures = extract_integer(
-        "escalation_after_failures",
-        config.escalation_after_failures,
+    defaults = ProgramConfig()
+    config = ProgramConfig(
+        mode=_section_value(sections, "Mode") or defaults.mode,
+        lean_project_path=(_section_value(sections, "Lean Project Path") or defaults.lean_project_path),
+        model=_program_value(content, "model", defaults.model) or defaults.model,
+        backend=_program_provider(content),
+        endpoint=_program_value(content, "endpoint"),
+        effort=_program_value(content, "effort"),
+        temperature=_program_float(content, "temperature"),
+        max_output_tokens=_program_integer_alias(
+            content,
+            ("max_output_tokens", "num_predict"),
+        ),
+        llm_timeout_seconds=_program_float_alias(
+            content,
+            ("llm_timeout_seconds", "timeout"),
+        ),
+        search_scope=_program_search_scope(content, defaults.search_scope),
+        max_retries_per_sorry=_program_integer(
+            content,
+            "max_retries_per_sorry",
+            defaults.max_retries_per_sorry,
+        ),
+        cycle_timeout_seconds=_program_integer(
+            content,
+            "cycle_timeout_seconds",
+            defaults.cycle_timeout_seconds,
+        ),
+        max_cycles=_program_integer(content, "max_cycles", defaults.max_cycles),
+        max_proof_lines=_program_integer(
+            content,
+            "max_proof_lines",
+            defaults.max_proof_lines,
+        ),
+        escalation_policy=_program_escalation_policy(
+            content,
+            defaults.escalation_policy,
+        ),
+        escalation_model=_program_value(content, "escalation_model"),
+        escalation_after_failures=_program_integer(
+            content,
+            "escalation_after_failures",
+            defaults.escalation_after_failures,
+        ),
+        goals=_section_list(sections, "Goals"),
+        constraints=_section_list(sections, "Constraints"),
+        strategy_hints=_section_list(sections, "Strategy Hints"),
     )
 
-    for key in ("max_output_tokens", "num_predict"):
-        if extract_value(key, None) is not None:
-            config.max_output_tokens = extract_integer(key, 0)
-            break
-
-    for key in ("llm_timeout_seconds", "timeout"):
-        if extract_value(key, None) is not None:
-            config.llm_timeout_seconds = extract_float(key, 0.0)
-            break
-
-    config.goals = _section_list(sections, "Goals")
-    config.constraints = _section_list(sections, "Constraints")
-    config.strategy_hints = _section_list(sections, "Strategy Hints")
     config.validate()
     return config

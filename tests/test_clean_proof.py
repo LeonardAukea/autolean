@@ -146,6 +146,21 @@ class TestTacticVocabulary:
 
         assert clean_llm_proof(raw, tactic_mode=True) == "simp [Nat.add_comm]"
 
+    def test_a_tactic_glued_to_a_sentence_is_peeled(self) -> None:
+        raw = "I'll locate the theorem and fill its proof.trivial"
+
+        assert clean_llm_proof(raw, tactic_mode=True) == "trivial"
+
+    def test_a_prefixed_theorem_wrapper_is_stripped(self) -> None:
+        raw = "I'll inspect the workspace.\ntheorem smoke : True := by\n  trivial"
+
+        assert clean_llm_proof(raw, tactic_mode=True) == "  trivial"
+
+    def test_a_dot_in_a_lemma_name_is_not_a_sentence_end(self) -> None:
+        raw = "exact True.intro"
+
+        assert clean_llm_proof(raw, tactic_mode=True) == "exact True.intro"
+
     def test_the_cleaner_and_the_prompt_share_one_vocabulary(self) -> None:
         """Two lists would let the prompt recommend what the cleaner deletes."""
         from autolean import agent

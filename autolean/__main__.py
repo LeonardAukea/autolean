@@ -14,7 +14,13 @@ from rich.text import Text
 from autolean import __version__, cli_runtime, ui
 from autolean.cli_sessions import register_commands as _register_session_commands
 from autolean.cli_workflows import register_commands as _register_workflow_commands
-from autolean.llm import LLMBackend, LLMError
+from autolean.llm import (
+    LLMBackend,
+    LLMError,
+    LLMRateLimitError,
+    inference_location,
+    provider_name,
+)
 from autolean.provenance import ProofEnvironmentError
 from autolean.ui import console
 
@@ -33,7 +39,7 @@ _connected_llm = cli_runtime.connected_llm
 _llm_for = cli_runtime.llm_for
 _run_agent = cli_runtime.run_agent
 _run_session_agent = cli_runtime.run_session_agent
-backend_option = cli_runtime.backend_option
+provider_option = cli_runtime.provider_option
 escalation_options = cli_runtime.escalation_options
 extract_only_option = cli_runtime.extract_only_option
 model_option = cli_runtime.model_option
@@ -79,10 +85,36 @@ DIFFICULTY_STYLES = {
 COMMAND_ALIASES = {
     "check": "doctor",
     "diff": "changes",
+    "model": "models",
     "run": "solve",
     "scan": "targets",
     "ui": "workbench",
 }
+_MODEL_FLAGS = frozenset({"--provider", "--backend", "-b", "--model", "-m"})
+
+
+def _hoist_model_flags(args: list[str]) -> None:
+    """Accept `--provider` / `--model` written before the subcommand name."""
+    moved: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if not token.startswith("-"):
+            break
+        name, separator, _value = token.partition("=")
+        if name not in _MODEL_FLAGS:
+            break
+        moved.append(token)
+        index += 1
+        if not separator and index < len(args):
+            moved.append(args[index])
+            index += 1
+    rest = args[index:]
+    if not moved or not rest:
+        return
+    args[:] = [rest[0], *moved, *rest[1:]]
+
+
 COMMAND_SECTIONS = (
     ("Interactive", ("workbench",)),
     (
@@ -112,6 +144,12 @@ class AutoLeanGroup(click.Group):
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         return super().get_command(ctx, COMMAND_ALIASES.get(cmd_name, cmd_name))
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # Group option parsing runs before command resolution, so `--provider`
+        # written before the subcommand is otherwise an unknown group option.
+        _hoist_model_flags(args)
+        return super().parse_args(ctx, args)
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         listed: set[str] = set()
@@ -148,11 +186,11 @@ def main(ctx: click.Context) -> None:
 
     \b
     Quick start:
-      autolean workbench                 # choose a model and proof target
-      autolean prove "1 + 1 = 2"       # prove a theorem
-      autolean problems work collatz    # continue an open-problem workspace
-      autolean verify <arxiv-url>       # verify a paper
-      autolean solve                    # prove all sorry targets
+      autolean workbench                  # choose a model and proof target
+      autolean prove "1 + 1 = 2"          # prove a theorem
+      autolean problems work collatz      # continue an open-problem workspace
+      autolean verify <arxiv-url>         # verify a paper
+      autolean solve                      # prove all sorry targets
 
     \b
     Open problems:
@@ -186,7 +224,7 @@ def workbench(program: Path) -> None:
 @click.option("--dry-run", "-n", is_flag=True, help="Query LLM but don't modify files.")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output.")
 @model_option
-@backend_option
+@provider_option
 @escalation_options
 @click.option(
     "--max-cycles", type=click.IntRange(min=0), default=None, help="Max experiment cycles (0 = unlimited)."
@@ -265,31 +303,18 @@ def solve(
         if agent.resume
         else None
     )
+    settings = cli_runtime.session_settings(agent)
     if session is None:
         title = f"Project target {target}" if target else f"Project {agent.project.root.name}"
         session = store.create(
             kind=SessionKind.PROJECT,
             title=title,
-            model=agent.llm.config.model,
-            backend=agent.llm.config.backend,
-            max_cycles=agent.config.max_cycles,
-            escalation_policy=agent.config.escalation_policy,
-            escalation_model=agent.config.escalation_model or "",
-            escalation_after_failures=agent.config.escalation_after_failures,
             target_filter=target or "",
             guidance=tuple(agent.config.strategy_hints),
+            **settings,
         )
     else:
-        session = store.save(
-            session.update(
-                model=agent.llm.config.model,
-                backend=agent.llm.config.backend,
-                max_cycles=agent.config.max_cycles,
-                escalation_policy=agent.config.escalation_policy,
-                escalation_model=agent.config.escalation_model or "",
-                escalation_after_failures=agent.config.escalation_after_failures,
-            )
-        )
+        session = store.save(session.update(**settings))
     _run_session_agent(agent, store, session)
 
 
@@ -402,7 +427,13 @@ def inspect_target(
     exact = [
         target
         for target in targets
-        if target_query in {target.id, target.decl_name, target.qualified_decl_name}
+        if target_query
+        in {
+            target.id,
+            target.legacy_id,
+            target.decl_name,
+            target.qualified_decl_name,
+        }
     ]
     matches = exact or [
         target
@@ -476,11 +507,21 @@ def inspect_target(
 
 
 @main.command()
-def models() -> None:
-    """List available model profiles and check installation status."""
-    from autolean.models import print_models_table
+@click.argument("model_or_provider", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def models(model_or_provider: str | None, as_json: bool) -> None:
+    """List models, or inspect one MODEL_OR_PROVIDER."""
+    import json
 
-    print_models_table()
+    from autolean.models import ModelSelectionError, model_catalog, print_models_table
+
+    try:
+        if as_json:
+            click.echo(json.dumps(model_catalog(model_or_provider), indent=2, sort_keys=True))
+            return
+        print_models_table(model_or_provider)
+    except ModelSelectionError as error:
+        raise click.ClickException(str(error)) from error
 
 
 # ---------------------------------------------------------------------------
@@ -538,14 +579,15 @@ def _doctor_model(
     from autolean.generated_code import GeneratedCodeError
 
     failures: list[str] = []
-    console.print("[bold]Checking the model backend...[/]")
+    console.print("[bold]Checking the model provider...[/]")
     try:
         llm = _llm_for(model, backend, config)
     except (LLMError, ValueError) as error:
         ui.fail(f"Configuration: {error}")
         return "", [f"model configuration: {error}"]
     console.print(f"  Model:   {llm.config.model}")
-    console.print(f"  Backend: {llm.config.backend}")
+    console.print(f"  Provider: {provider_name(llm.config.backend)}")
+    console.print(f"  Inference: {inference_location(llm.config).value}")
     if llm.config.base_url:
         console.print(f"  Endpoint: {llm.config.base_url}")
     if llm.config.model_revision:
@@ -564,7 +606,30 @@ def _doctor_model(
         except (GeneratedCodeError, LLMError) as error:
             failures.append(f"model generation: {error}")
             ui.fail(f"Generation: {error}")
+            if isinstance(error, LLMRateLimitError):
+                _doctor_rate_limit_hint(llm.config.backend)
             return "", failures
+
+
+def _doctor_rate_limit_hint(current_backend: str) -> None:
+    """Point at another ready subscription when this model is quota-blocked."""
+    from autolean.llm.subscription import probe_subscription_backend
+    from autolean.models import _AUTO_SUBSCRIPTION_BACKENDS
+
+    command = ui.command()
+    for backend in _AUTO_SUBSCRIPTION_BACKENDS:
+        if backend == current_backend:
+            continue
+        if probe_subscription_backend(backend).ready:
+            console.print(
+                "  [yellow]This model is at its usage limit. "
+                f"See `{command} models`, then retry with "
+                f"`{command} doctor --provider {provider_name(backend)}`.[/]"
+            )
+            return
+    console.print(
+        f"  [yellow]This model is at its usage limit. See `{command} models` for another ready provider.[/]"
+    )
 
 
 def _doctor_validate_proof(
@@ -574,14 +639,14 @@ def _doctor_validate_proof(
 ) -> str | None:
     """Validate and display the exact Lean source built from a model proof."""
     indented_proof = "\n".join(f"  {line}" for line in proof.splitlines())
-    smoke_source = f"import Mathlib\n\ntheorem AutoLeanBackendSmoke : True := by\n{indented_proof}\n"
+    smoke_source = f"theorem AutoLeanBackendSmoke : True := by\n{indented_proof}\n"
     console.print(Panel(Text(smoke_source), title="Lean kernel candidate", border_style="cyan"))
     smoke = project.validate_candidate(
         project.root / "AutoLeanBackendSmoke.lean",
         smoke_source,
         timeout=120,
         declaration="AutoLeanBackendSmoke",
-        declaration_line=3,
+        declaration_line=1,
         expected_environment=environment.sha256,
     )
     if smoke.success:
@@ -644,7 +709,7 @@ def _doctor_research_tools() -> list[str]:
 @main.command("doctor")
 @program_option
 @model_option
-@backend_option
+@provider_option
 def doctor(program: Path, model: str | None, backend: str | None) -> None:
     """Verify that the configured model and the Lean toolchain both work."""
     from autolean.program import parse_program
@@ -775,7 +840,6 @@ def results(file: Path, tail: int) -> None:
         console.print("[yellow]No experiments recorded yet.[/]")
         return
 
-    # Summary
     total = len(rows)
     successes = sum(1 for r in rows if r.get("outcome") == "success")
     console.print(
@@ -850,7 +914,7 @@ def _proof_plan(
 @main.command()
 @click.argument("statement")
 @model_option
-@backend_option
+@provider_option
 @click.option(
     "--guide",
     multiple=True,
@@ -886,7 +950,7 @@ def plan(
 @main.command()
 @click.argument("statement")
 @model_option
-@backend_option
+@provider_option
 @escalation_options
 @click.option(
     "--max-attempts",
@@ -967,10 +1031,19 @@ def prove(
     from autolean.lean_interface import LeanProject
     from autolean.program import parse_program
     from autolean.theorem import FormalizationError, formalize_theorem, generated_theorem_path
+    from autolean.tracker import ensure_proof_repository, rejected_proof_path
 
     cfg = parse_program(program)
     lean_root = program.parent / cfg.lean_project_path
     project = LeanProject(lean_root)
+
+    # The proof this command produces ends in a commit. Give an enclosing
+    # ignored tree its own Git identity, then refuse before any model work
+    # when the destination could still never receive one.
+    ensure_proof_repository(lean_root)
+    reason = rejected_proof_path(lean_root, lean_root / "AutoLean" / "Generated" / "Probe.lean")
+    if reason is not None:
+        raise click.ClickException(_prove_commit_error(reason, statement, model, backend))
 
     ui.phase("Plan")
     console.print(f"{statement}\n")
@@ -992,6 +1065,7 @@ def prove(
                     proof_plan,
                     llm.generate,
                     project,
+                    llm_config=llm.config,
                     max_repairs=formalization_repairs,
                 )
         except FormalizationError as error:
@@ -1039,6 +1113,7 @@ def prove(
         title=statement,
         model=agent.llm.config.model,
         backend=agent.llm.config.backend,
+        effort=agent.llm.config.effort,
         max_cycles=max_attempts,
         escalation_policy=agent.config.escalation_policy,
         escalation_model=agent.config.escalation_model or "",
@@ -1124,7 +1199,7 @@ def _prepare_paper(
     help="Review and optionally revise the paper strategy before formalization.",
 )
 @model_option
-@backend_option
+@provider_option
 @program_option
 def verify(
     source: str,
@@ -1180,9 +1255,10 @@ def verify(
         store = SessionStore(lean_root)
         session = store.create(
             kind=SessionKind.PAPER,
-            title=source,
+            title=prepared.title or source,
             model=prepared.model,
             backend=prepared.backend,
+            effort=prepared.effort,
             max_cycles=max_cycles,
             target_file=artifact,
             artifacts=paper_artifacts,
@@ -1215,9 +1291,10 @@ def verify(
     store = SessionStore(agent.project.root)
     session = store.create(
         kind=SessionKind.PAPER,
-        title=source,
+        title=prepared.title or source,
         model=agent.llm.config.model,
         backend=agent.llm.config.backend,
+        effort=agent.llm.config.effort,
         max_cycles=max_cycles,
         escalation_policy=agent.config.escalation_policy,
         escalation_model=agent.config.escalation_model or "",
@@ -1237,7 +1314,7 @@ def verify(
 @extract_only_option
 @paper_output_option
 @model_option
-@backend_option
+@provider_option
 @program_option
 def verify_paper(
     source: str,
@@ -1313,6 +1390,30 @@ def _render_example(project_name: str, *, mathlib: bool, cslib: bool) -> str:
     )
 
 
+def _prove_commit_error(
+    reason: str,
+    statement: str,
+    model: str | None,
+    backend: str | None,
+) -> str:
+    """Explain why this Lean project cannot record a proof commit."""
+    extra = ""
+    if backend is not None:
+        extra = f" --provider {provider_name(backend)}"
+    elif model is not None:
+        extra = f" --model {model}"
+    command = ui.command()
+    return (
+        f"Accepted proofs cannot be committed: {reason}.\n"
+        "The selected Lean project cannot record a proof commit. "
+        "Create a dedicated project, then retry:\n"
+        f"  mkdir ../autolean-work && cd ../autolean-work\n"
+        f"  {command} init lean\n"
+        f"  cd lean && lake update && lake exe cache get && cd ..\n"
+        f"  {command} prove {statement!r}{extra}"
+    )
+
+
 def _create_program(path: Path) -> bool:
     content = (
         "# AutoLean Program\n\n"
@@ -1322,6 +1423,7 @@ def _create_program(path: Path) -> bool:
         f"{path}\n\n"
         "## LLM Configuration\n\n"
         "model: auto\n"
+        "search_scope: auto\n"
         "max_output_tokens: 32768\n"
         "max_retries_per_sorry: 5\n"
         "escalation_policy: ask\n"
@@ -1379,14 +1481,18 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
         encoding="utf-8",
     )
     program_created = _create_program(path)
+    gitignore = path / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("/.lake/\n/build/\n", encoding="utf-8")
+    from autolean.tracker import ensure_proof_repository
+
+    ensure_proof_repository(path)
 
     console.print(f"[green]Initialized AutoLean project at {path}[/]")
     libraries = [name for enabled, name in ((mathlib, "Mathlib"), (cslib, "CSLib")) if enabled]
     console.print(f"  lakefile.lean ({', '.join(libraries) or 'Lean core'})")
-    if cslib:
-        console.print("  CSLib: enabled")
     console.print(f"  lean-toolchain: {toolchain}")
-    console.print(f"  {project_name}.lean (2 example sorry targets)")
+    console.print(f"  {project_name}.lean (example sorry targets)")
     if program_created:
         console.print("  program.md (created)")
     else:
@@ -1397,7 +1503,6 @@ def init(path: Path, mathlib: bool, cslib: bool, toolchain: str) -> None:
     console.print(f"    {ui.command()} solve")
 
 
-# ---------------------------------------------------------------------------
 _register_workflow_commands(main)
 _register_session_commands(main)
 

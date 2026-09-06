@@ -18,8 +18,7 @@ sandbox tools. Check the available model profiles:
 autolean models
 ```
 
-The automatic default uses an authenticated Claude or Codex subscription at
-maximum reasoning effort. Sign in to either CLI, then leave that session. See
+Sign in with `codex login` to use the automatic GPT-6 Astra default. See
 [Choose and switch models](../how-to/choose-a-model.md) for selection rules,
 API profiles, and local models.
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -10,9 +13,17 @@ from rich.panel import Panel
 
 from autolean import cli_runtime, ui
 from autolean.challenges import OpenProblem
-from autolean.llm import LLMError
-from autolean.provenance import ProofEnvironmentError
+from autolean.files import read_source
+from autolean.lean_interface import BuildResult, LeanProject
+from autolean.llm import LLMBackend, LLMError
+from autolean.provenance import ProofEnvironment, ProofEnvironmentError, sha256_text
+from autolean.scanner import (
+    _DECL_RE,
+    _find_enclosing_decl_details,
+    _mask_lean_noncode,
+)
 from autolean.ui import console
+from autolean.validation import require_instance, require_int, require_text, require_texts
 
 _accept_generated_source = cli_runtime.accept_generated_source
 _agent_for = cli_runtime.agent_for
@@ -20,7 +31,7 @@ _configure_escalation = cli_runtime.configure_escalation
 _connected_llm = cli_runtime.connected_llm
 _run_agent = cli_runtime.run_agent
 _run_session_agent = cli_runtime.run_session_agent
-backend_option = cli_runtime.backend_option
+provider_option = cli_runtime.provider_option
 escalation_options = cli_runtime.escalation_options
 model_option = cli_runtime.model_option
 program_option = cli_runtime.program_option
@@ -31,6 +42,7 @@ def extra_commands() -> None:
     """Own supplementary commands registered on the root CLI."""
 
 
+# ---------------------------------------------------------------------------
 # changes — show what the agent has changed
 # ---------------------------------------------------------------------------
 
@@ -110,29 +122,22 @@ def diff(project: Path) -> None:
     help="Path to Lean project root.",
 )
 def export_training(project: Path) -> None:
-    """Export training data from previous runs (SFT, ShareGPT, DPO).
+    """List the training data written by proof runs.
 
     \b
-    Uses results.tsv + cached proof data to generate:
-      - SFT JSONL (instruction tuning with successful proofs)
-      - ShareGPT JSONL (Hermes/Axolotl compatible)
-      - DPO JSONL (preference pairs: good proof vs bad proof)
-
-    \b
-    Use the exported data to fine-tune Gemma or other models:
-      pip install unsloth
-      # See workspace/training_data/finetune_config.yaml
+    The agent writes these during runs:
+      - SFT JSONL: instruction pairs from accepted proofs
+      - ShareGPT JSONL: the same pairs in Hermes/Axolotl chat form
+      - DPO JSONL: accepted-versus-rejected preference pairs
     """
     project = project.resolve()
 
-    # Read from existing training data files
     td = project / "training_data"
     if not td.exists() or not any(td.glob("*.jsonl")):
         console.print("[yellow]No training data found. Run the agent first:[/]")
         console.print(f"  {ui.command()} solve --max-cycles 20")
         return
 
-    # Show existing files
     console.print("[bold]Training data files:[/]\n")
     for f in sorted(td.glob("*.jsonl")):
         with open(f, encoding="utf-8") as handle:
@@ -140,152 +145,9 @@ def export_training(project: Path) -> None:
         size = f.stat().st_size / 1024
         console.print(f"  {f.name} ({lines} examples, {size:.1f} KB)")
 
-    # Show stats
-    console.print("\n[bold]Usage:[/]")
-    console.print("  Fine-tune with Unsloth:")
-    console.print(f"    unsloth train --data {td}/sft_*.jsonl --model gemma4:26b")
-    console.print("  Fine-tune with Axolotl:")
-    console.print(f"    axolotl train {td}/finetune_config.yaml")
-    console.print("  DPO training:")
-    console.print(f"    Use {td}/dpo_*.jsonl with TRL DPOTrainer")
-
-
-# ---------------------------------------------------------------------------
-# finetune-config — generate training configuration
-# ---------------------------------------------------------------------------
-
-
-@extra_commands.command("finetune-config", hidden=True)
-@click.option(
-    "--project",
-    "-d",
-    type=click.Path(exists=True, path_type=Path),
-    default="workspace",
-    help="Path to Lean project root.",
-)
-@click.option("--model", "-m", default="google/gemma-4-E2B", help="Base model for fine-tuning.")
-@click.option(
-    "--framework",
-    type=click.Choice(["unsloth", "axolotl", "trl"]),
-    default="axolotl",
-    help="Training framework.",
-)
-def finetune_config(project: Path, model: str, framework: str) -> None:
-    """Generate a fine-tuning config for Lean 4 proof models.
-
-    Writes a config file for the selected framework.
-    """
-    import yaml
-
-    project = project.resolve()
-    td = project / "training_data"
-    td.mkdir(parents=True, exist_ok=True)
-
-    sft_files = sorted(td.glob("sft_*.jsonl"))
-    dpo_files = sorted(td.glob("dpo_*.jsonl"))
-
-    if framework == "axolotl":
-        config = {
-            "base_model": model,
-            "model_type": "AutoModelForCausalLM",
-            "tokenizer_type": "AutoTokenizer",
-            "load_in_4bit": True,
-            "adapter": "qlora",
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "lora_dropout": 0.0,
-            "lora_target_modules": [
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
-            ],
-            "datasets": [
-                {
-                    "path": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
-                    "type": "sharegpt",
-                    "conversation": "chatml",
-                },
-            ],
-            "sequence_len": 8192,
-            "micro_batch_size": 1,
-            "gradient_accumulation_steps": 8,
-            "num_epochs": 3,
-            "learning_rate": 2e-4,
-            "lr_scheduler": "cosine",
-            "warmup_ratio": 0.1,
-            "optimizer": "adamw_8bit",
-            "bf16": True,
-            "gradient_checkpointing": True,
-            "output_dir": str(td / "output"),
-            "logging_steps": 10,
-            "save_strategy": "epoch",
-            "wandb_project": "autolean-finetune",
-        }
-        config_path = td / "axolotl_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated Axolotl config:[/] {config_path}")
-        console.print(f"\n  Run: accelerate launch -m axolotl.cli.train {config_path}")
-
-    elif framework == "unsloth":
-        config = {
-            "model_name": model,
-            "max_seq_length": 8192,
-            "load_in_4bit": True,
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "dataset": str(sft_files[-1]) if sft_files else "training_data/sft.jsonl",
-            "dataset_type": "messages",
-            "num_epochs": 3,
-            "learning_rate": 2e-4,
-            "batch_size": 1,
-            "gradient_accumulation": 8,
-            "output_dir": str(td / "output"),
-        }
-        config_path = td / "unsloth_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated Unsloth config:[/] {config_path}")
-        console.print("\n  pip install unsloth")
-        console.print(f"  python -m unsloth.train --config {config_path}")
-
-    elif framework == "trl":
-        config = {
-            "model_name": model,
-            "dataset_path": str(dpo_files[-1]) if dpo_files else "training_data/dpo.jsonl",
-            "lora_r": 64,
-            "lora_alpha": 64,
-            "beta": 0.1,
-            "num_epochs": 1,
-            "learning_rate": 5e-6,
-            "batch_size": 1,
-            "gradient_accumulation_steps": 8,
-            "output_dir": str(td / "dpo_output"),
-        }
-        config_path = td / "trl_dpo_config.yaml"
-        config_path.write_text(
-            yaml.dump(config, default_flow_style=False, sort_keys=False),
-            encoding="utf-8",
-        )
-        console.print(f"[green]Generated TRL DPO config:[/] {config_path}")
-        console.print("\n  pip install trl")
-        console.print(f"  Use DPOTrainer with config from {config_path}")
-
-    # Summary
-    console.print("\n[bold]Fine-tuning loop:[/]")
-    console.print(f"  1. Run agent:      {ui.command()} solve --overnight")
-    console.print(f"  2. Export data:     {ui.command()} export-training")
-    console.print(f"  3. Fine-tune:      {framework} train ...")
-    console.print("  4. Import model:   ollama create autolean-v1 -f Modelfile")
-    console.print(f"  5. Run again:      {ui.command()} solve --model autolean-v1")
+    console.print("\n[bold]Train from these files:[/]")
+    console.print("  The SFT and ShareGPT JSONL suit any chat fine-tuning framework.")
+    console.print(f"  Load {td}/dpo_*.jsonl preference pairs with TRL's DPOTrainer.")
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +165,7 @@ def finetune_config(project: Path, model: str, framework: str) -> None:
     help="Output path inside the configured Lean project.",
 )
 @model_option
-@backend_option
+@provider_option
 @click.option("--prove", is_flag=True, help="Immediately attempt proofs after generating.")
 @program_option
 def build_library(
@@ -328,15 +190,13 @@ def build_library(
       autolean build-library "finite automata"
       autolean build-library "tropical geometry"
     """
-    import re as _re
-
     from autolean.library import generate_library_source
     from autolean.program import parse_program
 
     cfg = parse_program(program)
     llm = _connected_llm(model, backend, cfg, timeout=600.0)
 
-    safe_topic = _re.sub(r"[^a-zA-Z0-9]", "", topic.title().replace(" ", ""))
+    safe_topic = re.sub(r"[^a-zA-Z0-9]", "", topic.title().replace(" ", ""))
     lean_root = program.parent / cfg.lean_project_path
     if output is None:
         output = lean_root / "AutoLean" / f"Lib{safe_topic}.lean"
@@ -357,8 +217,7 @@ def build_library(
 
     from autolean.scanner import count_sorries
 
-    # Count generated declarations and proof targets.
-    n_defs = len(_re.findall(r"\b(?:def|structure|class|instance|theorem|lemma)\b", content))
+    n_defs = len(re.findall(r"\b(?:def|structure|class|instance|theorem|lemma)\b", content))
     n_sorrys = count_sorries(content)
 
     console.print(f"[green]Generated {n_defs} definitions/theorems ({n_sorrys} sorry targets)[/]")
@@ -389,6 +248,279 @@ def build_library(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _ProofSlice:
+    """The exact tactic-proof slice selected for improvement."""
+
+    file_path: Path
+    source: str
+    lines: tuple[str, ...]
+    theorem_line: int
+    proof_start: int
+    proof_end: int
+    declaration: str
+    proof: str
+
+    def __post_init__(self) -> None:
+        require_instance(self.file_path, Path, "proof slice file must be a path")
+        require_text(self.source, "proof slice source must not be empty")
+        require_instance(self.lines, tuple, "proof slice lines must be a tuple")
+        require_texts(self.lines, "proof slice lines must be text", allow_empty=True)
+        for value in (self.theorem_line, self.proof_start, self.proof_end):
+            require_int(value, "proof slice positions must be non-negative", minimum=0)
+        if not self.theorem_line < self.proof_start <= self.proof_end <= len(self.lines):
+            raise ValueError("proof slice positions are inconsistent")
+        require_text(self.declaration, "proof slice declaration must not be empty")
+        require_text(self.proof, "proof slice tactic body must not be empty")
+
+
+@dataclass(frozen=True)
+class _ProofAudit:
+    """Kernel identity and source notation required for proof replacement."""
+
+    environment: ProofEnvironment
+    qualified_name: str
+    baseline: BuildResult
+    indent: str
+
+    def __post_init__(self) -> None:
+        require_instance(
+            self.environment,
+            ProofEnvironment,
+            "proof audit requires a typed environment",
+        )
+        require_text(self.qualified_name, "proof audit declaration must not be empty")
+        require_instance(self.baseline, BuildResult, "proof audit requires a build result")
+        require_text(self.indent, "proof audit indentation must be text", allow_empty=True)
+        if not self.baseline.success or not self.baseline.statement_sha256:
+            raise ValueError("proof audit baseline must identify an accepted statement")
+
+
+@dataclass(frozen=True)
+class _ImprovementCandidate:
+    """One generated proof and its complete replacement source."""
+
+    proof: str
+    lines: tuple[str, ...]
+    source: str
+
+    def __post_init__(self) -> None:
+        require_text(self.proof, "improved proof must not be empty")
+        require_instance(self.lines, tuple, "improved proof lines must be a tuple")
+        require_texts(self.lines, "improved proof lines must be text", allow_empty=True)
+        require_text(self.source, "improved source must not be empty")
+
+
+def _proof_slice(file_path: Path, theorem_name: str) -> _ProofSlice:
+    """Locate one named multiline tactic proof in a Lean source."""
+    source = read_source(file_path)
+    lines = tuple(source.split("\n"))
+    masked_lines = tuple(_mask_lean_noncode(source).split("\n"))
+    theorem_line = _theorem_line(masked_lines, theorem_name)
+    proof_start = _proof_start(masked_lines, theorem_line, theorem_name)
+    proof_end = _proof_end(lines, proof_start)
+    proof = "\n".join(lines[proof_start:proof_end])
+    if not proof.strip():
+        raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
+    return _ProofSlice(
+        file_path=file_path,
+        source=source,
+        lines=lines,
+        theorem_line=theorem_line,
+        proof_start=proof_start,
+        proof_end=proof_end,
+        declaration="\n".join(lines[theorem_line:proof_start]),
+        proof=proof,
+    )
+
+
+def _theorem_line(lines: tuple[str, ...], theorem_name: str) -> int:
+    """Return the zero-indexed declaration line for one source name."""
+    for index, line in enumerate(lines):
+        declaration = _DECL_RE.match(line)
+        if declaration is None:
+            continue
+        kind, parsed_name = declaration.groups()
+        if kind in {"theorem", "lemma", "def"} and parsed_name == theorem_name:
+            return index
+    raise click.ClickException(f"No theorem named '{theorem_name}' in the selected file.")
+
+
+def _proof_start(lines: tuple[str, ...], theorem_line: int, theorem_name: str) -> int:
+    """Return the first tactic-body line of one declaration."""
+    for index in range(theorem_line, len(lines)):
+        if index > theorem_line and _DECL_RE.match(lines[index]):
+            break
+        marker = re.search(r"\bby\b", lines[index])
+        if marker is None:
+            continue
+        if lines[index][marker.end() :].strip():
+            raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
+        return index + 1
+    raise click.ClickException(f"No tactic proof found for '{theorem_name}'.")
+
+
+def _proof_end(lines: tuple[str, ...], proof_start: int) -> int:
+    """Return the first following unindented declaration line."""
+    for index in range(proof_start, len(lines)):
+        stripped = lines[index].strip()
+        if stripped and not stripped.startswith("--") and not lines[index].startswith((" ", "\t")):
+            return index
+    return len(lines)
+
+
+def _lean_project_root(file_path: Path) -> Path:
+    """Return the nearest ancestor containing a Lake project file."""
+    candidate = file_path.parent
+    while candidate != candidate.parent:
+        if (candidate / "lakefile.lean").exists() or (candidate / "lakefile.toml").exists():
+            return candidate
+        candidate = candidate.parent
+    return file_path.parent
+
+
+def _audit_proof(project: LeanProject, selected: _ProofSlice, theorem_name: str) -> _ProofAudit:
+    """Bind the selected source slice to its kernel statement and environment."""
+    try:
+        environment = project.proof_environment(refresh=True)
+    except (OSError, ProofEnvironmentError) as error:
+        raise click.ClickException(f"Proof environment identification failed: {error}") from error
+
+    local_name, qualified_name, _ = _find_enclosing_decl_details(
+        _mask_lean_noncode(selected.source).split("\n"),
+        selected.theorem_line + 1,
+    )
+    if local_name != theorem_name or not qualified_name:
+        raise click.ClickException(f"Theorem '{theorem_name}' has no auditable source name.")
+    proof_indents = [
+        len(line) - len(line.lstrip())
+        for line in selected.lines[selected.proof_start : selected.proof_end]
+        if line.strip()
+    ]
+    if not proof_indents:
+        raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
+    with ui.status("Auditing the current statement..."):
+        baseline = project.validate_candidate(
+            selected.file_path,
+            selected.source,
+            timeout=120,
+            declaration=qualified_name,
+            declaration_line=selected.theorem_line + 1,
+            expected_environment=environment.sha256,
+        )
+    if not baseline.success or not baseline.statement_sha256:
+        detail = baseline.stderr or (str(baseline.errors[0]) if baseline.errors else "unknown error")
+        raise click.ClickException(f"'{theorem_name}' does not currently compile: {detail[:300]}")
+    return _ProofAudit(environment, qualified_name, baseline, " " * min(proof_indents))
+
+
+_IMPROVEMENT_GOALS = {
+    "shorter": "Make this proof as short as possible. Minimize the tactics and lines.",
+    "elegant": "Make this proof mathematically elegant with idiomatic Lean 4.",
+    "faster": "Make this proof fast for the Lean kernel. Use targeted tactics on large goals.",
+    "readable": "Make this proof readable with clear names and structure.",
+}
+
+
+def _improvement_system(goal: str) -> str:
+    """Return the closed system instruction for one improvement objective."""
+    return (
+        "You are a Lean 4 proof improvement expert. "
+        f"{_IMPROVEMENT_GOALS[goal]} "
+        "Output only the improved tactic block."
+    )
+
+
+def _generate_improvement(
+    llm: LLMBackend,
+    selected: _ProofSlice,
+    theorem_name: str,
+    system: str,
+    indent: str,
+) -> _ImprovementCandidate | None:
+    """Generate and normalize one distinct bounded proof candidate."""
+    from autolean.agent import clean_llm_proof
+    from autolean.generated_code import GeneratedCodeError, validate_generated_proof
+    from autolean.prompts import PROOF_GOLF_USER
+
+    user_prompt = PROOF_GOLF_USER.format(
+        file_context=f"{selected.declaration}\n{selected.proof}",
+        decl_name=theorem_name,
+        line=selected.theorem_line + 1,
+        current_proof=selected.proof,
+    )
+    try:
+        with ui.status("Generating improved proof..."):
+            response = llm.generate(system, user_prompt)
+    except LLMError as error:
+        raise click.ClickException(f"Proof improvement failed: {error}") from error
+    proof = clean_llm_proof(response.text, tactic_mode=True)
+    try:
+        proof = validate_generated_proof(proof)
+    except GeneratedCodeError as error:
+        console.print(f"  [red]Generated proof rejected:[/] {error}")
+        return None
+    if textwrap.dedent(proof).strip() == textwrap.dedent(selected.proof).strip():
+        console.print("  [yellow]No improvement generated.[/]")
+        return None
+    console.print("  [cyan]New proof:[/]")
+    for line in proof.split("\n")[:8]:
+        console.print(f"    [cyan]{line}[/]")
+    normalized = tuple(textwrap.dedent(proof).strip("\n").split("\n"))
+    replacement = tuple(f"{indent}{line}" if line else "" for line in normalized)
+    source_lines = list(selected.lines)
+    source_lines[selected.proof_start : selected.proof_end] = replacement
+    return _ImprovementCandidate(proof, normalized, "\n".join(source_lines))
+
+
+def _validate_improvement(
+    project: LeanProject,
+    selected: _ProofSlice,
+    audit: _ProofAudit,
+    candidate: _ImprovementCandidate,
+) -> BuildResult:
+    """Check one candidate against the exact statement and environment."""
+    assert audit.baseline.statement_sha256 is not None
+    with ui.status("Verifying proof and axioms..."):
+        return project.validate_candidate(
+            selected.file_path,
+            candidate.source,
+            timeout=120,
+            declaration=audit.qualified_name,
+            declaration_line=selected.theorem_line + 1,
+            expected_environment=audit.environment.sha256,
+            expected_statement=audit.baseline.statement_sha256,
+        )
+
+
+def _accept_improvement(
+    project: LeanProject,
+    selected: _ProofSlice,
+    audit: _ProofAudit,
+    candidate: _ImprovementCandidate,
+    build: BuildResult,
+) -> None:
+    """Atomically install and report one kernel-accepted improvement."""
+    try:
+        project.write_file(
+            selected.file_path,
+            candidate.source,
+            expected_content=selected.source,
+        )
+    except OSError as error:
+        raise click.ClickException(f"Source changed during proof improvement: {error}") from error
+    old_length = len(selected.proof.strip().split("\n"))
+    new_length = len(candidate.lines)
+    axioms = ", ".join(build.axioms) if build.axioms else "none"
+    console.print(f"  [bold green]Improved![/] {old_length} lines -> {new_length} lines")
+    console.print(f"  Environment: sha256:{audit.environment.sha256}")
+    console.print(f"  Proof:       sha256:{sha256_text(candidate.proof)}")
+    console.print(f"  Axioms:      {axioms}")
+    if new_length < old_length:
+        reduction = (old_length - new_length) / old_length * 100
+        console.print(f"  [green]Reduced by {old_length - new_length} lines ({reduction:.0f}%)[/]")
+
+
 @extra_commands.command(hidden=True)
 @click.argument("file_path", type=click.Path(exists=True, path_type=Path))
 @click.argument("theorem_name")
@@ -399,7 +531,7 @@ def build_library(
     help="What to optimize for.",
 )
 @model_option
-@backend_option
+@provider_option
 @click.option(
     "--max-attempts",
     type=click.IntRange(min=1),
@@ -428,194 +560,38 @@ def improve(
       autolean improve workspace/AutoLean/Medium.lean medium_add_comm --goal shorter
       autolean improve my_project/Foo.lean my_theorem --goal elegant
     """
-    import re
-
-    from autolean.lean_interface import LeanProject
     from autolean.program import parse_program
-    from autolean.prompts import PROOF_GOLF_USER
 
     cfg = parse_program(program)
     file_path = file_path.resolve()
-
-    # Find the theorem and its proof in the file
-    content = file_path.read_text(encoding="utf-8")
-    lines = content.split("\n")
-
-    # Locate the theorem declaration
-    theorem_line = None
-    for i, line in enumerate(lines):
-        if re.search(rf"\b{re.escape(theorem_name)}\b", line) and re.match(
-            r"\s*(theorem|lemma|def)\s+", line
-        ):
-            theorem_line = i
-            break
-
-    if theorem_line is None:
-        raise click.ClickException(f"Theorem '{theorem_name}' was not found in {file_path}.")
-
-    # The current proof ends at the next declaration.
-    proof_start = None
-    proof_end = None
-    for i in range(theorem_line, len(lines)):
-        if "by" in lines[i] and proof_start is None:
-            proof_start = i + 1
-        elif proof_start is not None and i > proof_start:
-            stripped = lines[i].strip()
-            unindented = not lines[i].startswith((" ", "\t"))
-            if stripped and not stripped.startswith("--") and unindented:
-                proof_end = i
-                break
-    if proof_start is None:
-        raise click.ClickException(f"No tactic proof found for '{theorem_name}'.")
-    if proof_end is None:
-        proof_end = len(lines)
-
-    current_proof = "\n".join(lines[proof_start:proof_end])
-    decl_line = "\n".join(lines[theorem_line:proof_start])
-
+    selected = _proof_slice(file_path, theorem_name)
     console.print(f"[bold]Improving:[/] {theorem_name}")
     console.print(f"[bold]Goal:[/] {goal}")
     console.print("[bold]Current proof:[/]")
-    for line in current_proof.split("\n")[:10]:
+    for line in selected.proof.split("\n")[:10]:
         console.print(f"  [dim]{line}[/]")
     console.print()
-
-    # Find project root
-    lean_root = file_path.parent
-    while lean_root != lean_root.parent:
-        if (lean_root / "lakefile.lean").exists() or (lean_root / "lakefile.toml").exists():
-            break
-        lean_root = lean_root.parent
-    project = LeanProject(lean_root)
-    try:
-        proof_environment = project.proof_environment(refresh=True)
-    except (OSError, ProofEnvironmentError) as e:
-        raise click.ClickException(f"Proof environment identification failed: {e}") from e
-
-    from autolean.scanner import _find_enclosing_decl_details, _mask_lean_noncode
-
-    local_name, qualified_name, _ = _find_enclosing_decl_details(
-        _mask_lean_noncode(content).split("\n"),
-        theorem_line + 1,
-    )
-    if local_name != theorem_name or not qualified_name:
-        raise click.ClickException(f"Theorem '{theorem_name}' has no auditable source name.")
-
-    import textwrap
-
-    proof_indents = [len(line) - len(line.lstrip()) for line in lines[proof_start:proof_end] if line.strip()]
-    if not proof_indents:
-        raise click.ClickException(f"No multiline tactic proof found for '{theorem_name}'.")
-    proof_indent = " " * min(proof_indents)
-
-    # `improve` rewrites a slice of source, and where a signature spans lines
-    # that slice can reach into the statement. Pin what the theorem says now,
-    # so a candidate that proves something weaker is refused.
-    with ui.status("Auditing the current statement..."):
-        baseline = project.validate_candidate(
-            file_path,
-            content,
-            timeout=120,
-            declaration=qualified_name,
-            declaration_line=theorem_line + 1,
-            expected_environment=proof_environment.sha256,
-        )
-    if not baseline.success or not baseline.statement_sha256:
-        detail = baseline.stderr or (str(baseline.errors[0]) if baseline.errors else "unknown error")
-        raise click.ClickException(f"'{theorem_name}' does not currently compile: {detail[:300]}")
-
-    goal_prompts = {
-        "shorter": "Make this proof as SHORT as possible. Minimize the number of tactics and lines.",
-        "elegant": "Make this proof more ELEGANT and mathematically beautiful. Use clean, idiomatic Lean 4.",
-        "faster": "Make this proof FASTER for the Lean kernel to check. "
-        "Avoid slow tactics like simp on large goals.",
-        "readable": "Make this proof more READABLE. Use descriptive names, add comments, structure clearly.",
-    }
-
-    system = (
-        "You are a Lean 4 proof golf expert. "
-        f"{goal_prompts[goal]} "
-        "Output ONLY the improved tactic block. No explanation, no markdown."
-    )
-
-    from autolean.agent import clean_llm_proof
-    from autolean.generated_code import GeneratedCodeError, validate_generated_proof
-    from autolean.provenance import sha256_text
-
+    project = LeanProject(_lean_project_root(file_path))
+    audit = _audit_proof(project, selected, theorem_name)
+    system = _improvement_system(goal)
     with _connected_llm(model, backend, cfg) as llm:
         for attempt in range(1, max_attempts + 1):
             console.print(f"[bold]Attempt {attempt}/{max_attempts}...[/]")
-
-            context = f"{decl_line}\n{current_proof}"
-            user_prompt = PROOF_GOLF_USER.format(
-                file_context=context,
-                decl_name=theorem_name,
-                line=theorem_line + 1,
-                current_proof=current_proof,
+            candidate = _generate_improvement(
+                llm,
+                selected,
+                theorem_name,
+                system,
+                audit.indent,
             )
-
-            try:
-                with ui.status("Generating improved proof..."):
-                    response = llm.generate(system, user_prompt)
-            except LLMError as e:
-                raise click.ClickException(f"Proof improvement failed: {e}") from e
-
-            new_proof = clean_llm_proof(response.text, tactic_mode=True)
-            try:
-                new_proof = validate_generated_proof(new_proof)
-            except GeneratedCodeError as e:
-                console.print(f"  [red]Generated proof rejected:[/] {e}")
+            if candidate is None:
                 continue
-
-            if not new_proof or textwrap.dedent(new_proof).strip() == textwrap.dedent(current_proof).strip():
-                console.print("  [yellow]No improvement generated.[/]")
-                continue
-
-            console.print("  [cyan]New proof:[/]")
-            for line in new_proof.split("\n")[:8]:
-                console.print(f"    [cyan]{line}[/]")
-
-            normalized_lines = textwrap.dedent(new_proof).strip("\n").split("\n")
-            replacement = [f"{proof_indent}{line}" if line else "" for line in normalized_lines]
-            new_lines = lines.copy()
-            new_lines[proof_start:proof_end] = replacement
-            new_content = "\n".join(new_lines)
-
-            with ui.status("Verifying proof and axioms..."):
-                build = project.validate_candidate(
-                    file_path,
-                    new_content,
-                    timeout=120,
-                    declaration=qualified_name,
-                    declaration_line=theorem_line + 1,
-                    expected_environment=proof_environment.sha256,
-                    expected_statement=baseline.statement_sha256,
-                )
-
+            build = _validate_improvement(project, selected, audit, candidate)
             if build.success:
-                try:
-                    project.write_file(
-                        file_path,
-                        new_content,
-                        expected_content=content,
-                    )
-                except OSError as e:
-                    raise click.ClickException(f"Source changed during proof improvement: {e}") from e
-                old_len = len(current_proof.strip().split("\n"))
-                new_len = len(normalized_lines)
-                axioms = ", ".join(build.axioms) if build.axioms else "none"
-                console.print(f"  [bold green]Improved![/] {old_len} lines -> {new_len} lines")
-                console.print(f"  Environment: sha256:{proof_environment.sha256}")
-                console.print(f"  Proof:       sha256:{sha256_text(new_proof)}")
-                console.print(f"  Axioms:      {axioms}")
-                if new_len < old_len:
-                    pct = (old_len - new_len) / old_len * 100
-                    console.print(f"  [green]Reduced by {old_len - new_len} lines ({pct:.0f}%)[/]")
+                _accept_improvement(project, selected, audit, candidate, build)
                 return
-
             detail = build.errors[0].message if build.errors else build.stderr or "unknown error"
             console.print(f"  [red]Build failed:[/] {' '.join(detail.split())[:160]}")
-
     raise click.ClickException(f"Could not improve after {max_attempts} attempts.")
 
 
@@ -710,7 +686,7 @@ def _prepare_research_brief(lean_root: Path, problem: OpenProblem) -> tuple[Path
     help="Cycle budget for this session (0 = unlimited).",
 )
 @model_option
-@backend_option
+@provider_option
 @escalation_options
 @click.option(
     "--guide",
@@ -759,7 +735,6 @@ def challenge(
 
     problem = next((p for p in OPEN_PROBLEMS if p.id == problem_id), None)
     if not problem:
-        # Try partial match
         needle = problem_id.lower()
         matches = [p for p in OPEN_PROBLEMS if needle in p.id.lower() or needle in p.name.lower()]
         if len(matches) == 1:
@@ -771,7 +746,7 @@ def challenge(
             raise click.ClickException(f"Problem ID '{problem_id}' is ambiguous.")
         else:
             raise click.ClickException(
-                f"Problem '{problem_id}' was not found; run `autolean challenge` to list IDs."
+                f"No problem with ID '{problem_id}'; run `autolean challenge` to list IDs."
             )
 
     _show_open_problem(problem)
@@ -790,7 +765,6 @@ def challenge(
         )
         return
 
-    # Generate the challenge file
     filename = f"Challenge_{problem.id.replace('-', '_').title()}.lean"
     path = lean_root / "AutoLean" / filename
     path, continued = _prepare_challenge_source(
@@ -802,7 +776,6 @@ def challenge(
     action = "Continuing" if continued else "Accepted"
     console.print(f"\n[green]{action}:[/] {path}")
 
-    # Count sorry targets
     from autolean.scanner import count_sorries
 
     n_sorry = count_sorries(path.read_text(encoding="utf-8"))
@@ -811,7 +784,6 @@ def challenge(
         console.print("[bold green]Challenge workspace is complete.[/]")
         return
 
-    # Ask if they want to start proving
     console.print(f"\n[bold]Starting proof attempts ({max_cycles} cycles)...[/]\n")
 
     agent = _agent_for(
@@ -834,32 +806,18 @@ def challenge(
 
     store = SessionStore(agent.project.root)
     session = store.find_target(path) if continued else None
+    settings = cli_runtime.session_settings(agent)
     if session is None:
         session = store.create(
             kind=SessionKind.PROBLEM,
             title=problem.name,
-            model=agent.llm.config.model,
-            backend=agent.llm.config.backend,
-            max_cycles=max_cycles,
-            escalation_policy=agent.config.escalation_policy,
-            escalation_model=agent.config.escalation_model or "",
-            escalation_after_failures=agent.config.escalation_after_failures,
             target_file=path,
             guidance=guide,
+            **settings,
         )
     else:
         guidance = tuple(dict.fromkeys([*session.guidance, *guide]))
-        session = store.save(
-            session.update(
-                model=agent.llm.config.model,
-                backend=agent.llm.config.backend,
-                max_cycles=max_cycles,
-                escalation_policy=agent.config.escalation_policy,
-                escalation_model=agent.config.escalation_model or "",
-                escalation_after_failures=agent.config.escalation_after_failures,
-                guidance=guidance,
-            )
-        )
+        session = store.save(session.update(guidance=guidance, **settings))
     _run_session_agent(agent, store, session)
 
 
@@ -915,7 +873,7 @@ def problems_show(problem_id: str) -> None:
 
     problem = next((item for item in OPEN_PROBLEMS if item.id == problem_id), None)
     if problem is None:
-        raise click.ClickException(f"Problem was not found: {problem_id}")
+        raise click.ClickException(f"No problem with ID '{problem_id}'.")
     _show_open_problem(problem)
 
 
@@ -958,7 +916,7 @@ def problems_suggest(field: str | None, difficulty: str | None) -> None:
     help="Cycle budget for this session (0 = unlimited).",
 )
 @model_option
-@backend_option
+@provider_option
 @escalation_options
 @click.option(
     "--guide",

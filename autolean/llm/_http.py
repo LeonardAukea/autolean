@@ -7,18 +7,9 @@ from typing import Any
 
 import httpx
 
-from autolean.llm.base import BaseBackend, LLMError
+from autolean.llm.base import BaseBackend, LLMError, validate_endpoint
 
 CONNECT_TIMEOUT = 10.0
-
-
-def as_int(value: object) -> int:
-    """Coerce a JSON number to int; anything else counts as zero.
-
-    Token counts are optional in several server implementations, and a
-    missing count must not fail a completion that otherwise succeeded.
-    """
-    return value if isinstance(value, int) else 0
 
 
 def as_object(value: object, context: str) -> dict[str, Any]:
@@ -50,6 +41,10 @@ class HttpBackend(BaseBackend):
 
     #: Used when `config.base_url` is unset.
     default_base_url: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        validate_endpoint(self.base_url)
 
     @property
     def base_url(self) -> str:

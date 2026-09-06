@@ -38,6 +38,23 @@ class IndexedCodeContext:
     text: str = ""
     unavailable_reason: str = ""
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.tool, str) or not self.tool.strip():
+            raise ValueError("indexed-code tool identity must not be empty")
+        if (
+            not isinstance(self.queries, tuple)
+            or any(
+                not isinstance(query, str) or not query.strip() or len(query) > _MAX_QUERY_CHARS
+                for query in self.queries
+            )
+            or len(set(self.queries)) != len(self.queries)
+        ):
+            raise ValueError("indexed-code queries must be unique bounded text")
+        if any(not isinstance(value, str) for value in (self.text, self.unavailable_reason)):
+            raise ValueError("indexed-code result fields must be text")
+        if self.text and self.unavailable_reason:
+            raise ValueError("indexed-code context cannot be present and unavailable")
+
     @property
     def sha256(self) -> str:
         """Return the identity of the exact rendered context."""
