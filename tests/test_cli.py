@@ -1499,3 +1499,17 @@ def test_the_paper_commands_describe_shared_flags_identically() -> None:
     for name in shared:
         assert canonical[name].opts == legacy[name].opts, name
         assert getattr(canonical[name], "help", None) == getattr(legacy[name], "help", None), name
+
+
+def test_init_program_resolves_the_default_codex_controls(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autolean.program import parse_program
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main, ["init", "lean"])
+    assert result.exit_code == 0, result.output
+    program = parse_program(tmp_path / "program.md")
+    program.model = "codex"
+    config = program.llm_config()
+    assert (config.model, config.effort) == ("gpt-6-astra", "max")

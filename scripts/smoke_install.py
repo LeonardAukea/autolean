@@ -12,6 +12,7 @@ from pathlib import Path
 
 import autolean
 from autolean.models import resolve_llm_config
+from autolean.program import parse_program
 
 
 def main() -> None:
@@ -38,6 +39,9 @@ def main() -> None:
                 assert json.loads(result.stdout)["schema"] == "autolean-model-catalog-v1"
         assert (Path(directory) / "lean" / "lean-toolchain").is_file()
         assert (Path(directory) / "program.md").is_file()
+        program = parse_program(Path(directory) / "program.md")
+        program.model = "codex"
+        assert program.llm_config().model == "gpt-6-astra"
     print(f"Installed {len(modules)} modules: imports, model selection, CLI, and project creation passed")
 
 

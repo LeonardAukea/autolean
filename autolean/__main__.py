@@ -1424,7 +1424,6 @@ def _create_program(path: Path) -> bool:
         "## LLM Configuration\n\n"
         "model: auto\n"
         "search_scope: auto\n"
-        "max_output_tokens: 32768\n"
         "max_retries_per_sorry: 5\n"
         "escalation_policy: ask\n"
         "escalation_after_failures: 2\n"
