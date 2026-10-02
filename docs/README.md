@@ -7,6 +7,7 @@ Use the section that matches the work in front of you.
 Tutorials teach the system by taking you through a complete result.
 
 - [Prove a first theorem](tutorials/first-proof.md)
+- [Investigate Gromov's open question](tutorials/gromov.md)
 
 ## How-to guides
 
@@ -15,8 +16,8 @@ How-to guides solve a named operational problem.
 - [Choose and switch models](how-to/choose-a-model.md)
 - [Run a research session](how-to/run-a-research-session.md)
 - [Verify a paper](how-to/verify-a-paper.md)
+- [Compare proof workflows](how-to/compare-provers.md)
 - [Profile runtime and memory](how-to/profile.md)
-- [Investigate Gromov's open question](tutorials/gromov.md)
 - [Qualify and publish a release](how-to/release.md)
 - [Maintain public distribution](how-to/open-the-repository.md)
 
@@ -29,6 +30,7 @@ Reference pages state exact interfaces, defaults, and records.
 - [Proof environments and provenance](reference/environment.md)
 - [Python installation and dependencies](reference/dependencies.md)
 - [Research artifact records](reference/research-artifacts.md)
+- [Recorded proof comparison](reference/comparison-results.md)
 
 ## Explanation
 

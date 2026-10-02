@@ -100,10 +100,11 @@ continues with Lean as its semantic authority.
 
 ## Reproducibility boundary
 
-Environment capture and candidate acceptance are deterministic for fixed
-bytes. Hosted aliases may point to changing model weights, and providers may
-return different completions for the same request. Generation is proposal
-search; the recorded proof and environment are the reproducible result.
+The environment identity records the bytes used to check a proof. Rechecking
+also requires a supported host and enough time and memory for Lean to finish.
+Hosted aliases may point to changing model weights, and providers may return
+different completions for the same request. The recorded proof and environment
+can be reused independently of that generation step.
 
 GitHub releases use a commit-derived Hashver identity and include the Python
 artifacts, dependency SBOM, proof environment, and an asset manifest. See

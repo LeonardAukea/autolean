@@ -3,7 +3,7 @@
 The loop is built around small experiments. One attempt should either produce
 an accepted proof or leave evidence that changes the next attempt.
 
-## A plan is an object
+## Review the mathematical plan
 
 Before source generation, AutoLean can record:
 
@@ -21,8 +21,9 @@ Before source generation, AutoLean can record:
 - checkpoints
 - revision triggers
 
-These fields keep mathematical choices reviewable. A long narrative can hide
-a bad quantifier; an explicit formalization field cannot.
+These fields separate the proposed statement from its assumptions and proof
+strategy. Review them together: a misplaced quantifier can change the problem
+even when the proposed proof looks plausible.
 
 ## One experiment
 
@@ -43,10 +44,10 @@ Every cycle then performs the same steps:
 6. Record the candidate, outcome, and provenance.
 7. Install only an accepted candidate, then rescan.
 
-The first cycle on a target also runs its fixed-budget local search and asks
+The first cycle on a target also runs its fixed-budget search and asks
 for a proof strategy. Both are cached for that target and requested again
-only after a model transition, so later cycles vary the candidate rather than
-the plan.
+after a model transition. Later cycles reuse the plan while varying the
+candidate.
 
 The order is stable. Prompt layers are separate: system rules, project
 guidance, and ephemeral target evidence have different ownership and hashes.
@@ -93,13 +94,13 @@ and structural categories. Repeating the same error without new evidence ends
 work on that target. Authentication, quota, network, and project failures stop
 the run because they say nothing about the mathematics.
 
-A smaller model may recommend a stronger profile after eligible proof failures.
-The switch is bounded to one per invocation. It retains the target, attempt
-budget, and recorded evidence, and asks the incoming model to plan the target
-again rather than inheriting a plan it did not make. Model size is a resource
-decision; repairing the formalization is the other one.
+The routing policy may recommend another profile after eligible proof
+failures. It permits at most one switch per invocation, retaining the target,
+attempt budget, and recorded evidence. The incoming model proposes its own
+plan for the target. A model switch tests a different proof search; revising
+the formalization changes the mathematical task itself.
 
-## Success compounds into skills
+## Reuse accepted proof patterns
 
 An accepted proof also changes future questions. The skill memory extracts
 the proof's tactic sequence, names the pattern it instantiates — computation
@@ -110,8 +111,7 @@ same pattern.
 
 Before each attempt, stored skills are ranked against the current goal state
 by keyword relevance, and a pattern reached by more than three accepted proofs
-takes a bounded tie-break. The strongest few enter the prompt as named
-patterns.
+takes a bounded tie-break. The highest-ranked patterns enter the prompt.
 
 ```mermaid
 flowchart LR
@@ -119,32 +119,32 @@ flowchart LR
     extract --> classify["name the<br/>pattern"]
     classify --> store[("skill record:<br/>tactics, condition,<br/>accepted-proof count")]
     store --> rank["rank against the<br/>next goal state"]
-    rank --> inject["strongest patterns<br/>enter the prompt"]
+    rank --> inject["highest-ranked patterns<br/>enter the prompt"]
     inject --> validate["candidate validated by<br/>policy, sandbox, Lean"]
     validate -- "accepted" --> store
 ```
 
-The count measures reuse, not a success rate. Only accepted proofs reach the
-store, and a prompt carries several patterns at once, so a rejected candidate
-names no pattern to charge it to. Ranking uses the applicability condition,
-tactic names, and the latest accepted example, including its hypotheses and
-conclusion.
+The count records accepted proofs with the same pattern. A prompt can carry
+several patterns, and the store has no count of failed uses, so this number
+cannot estimate a pattern's success rate. Ranking uses the applicability
+condition, tactic names, and latest accepted example, including its hypotheses
+and conclusion.
 
-Skills are evidence, not authority. An injected pattern can only shape a
-proposal; the candidate it shapes passes the same source policy, sandbox,
-elaboration, and audit as any other ([trust boundary](trust-boundary.md)).
+Skills guide proposals. Every candidate still passes the source policy,
+sandbox, elaboration, and audit described in the
+[trust boundary](trust-boundary.md).
 
 ## Sessions outlive commands
 
-Every mutating workflow writes an atomic session record in the Lean project;
+Each proof workflow writes an atomic session record in the Lean project;
 the [artifact reference](../reference/research-artifacts.md) states its
 location and shape. `resume` continues the latest active session or an
 explicit ID. Guidance and model choice can change without losing the evidence
 already gathered.
 
 A run is bounded by default; unbounded work requires `--overnight` or an
-explicit zero budget ([`max_cycles`](../reference/program.md)). This makes a
-normal command cheap to stop, inspect, and continue.
+explicit zero budget ([`max_cycles`](../reference/program.md)). This lets a
+normal command stop at a known limit, ready for inspection and continuation.
 
 ## Mathematical discipline
 
@@ -167,9 +167,9 @@ and durable-state model in
 done conditions described in
 [Loop Engineering](https://addyosmani.com/blog/loop-engineering/).
 
-The kernel settles the formal theorem. A distinguished mathematical workflow
-also asks whether the theorem is the right one. Plans, source citations,
-counterexamples, and human review own that question.
+The kernel checks the formal theorem. Whether that theorem answers the
+original question requires mathematical judgment, informed by plans, source
+citations, counterexamples, and human review.
 
 [examples]: https://terrytao.wordpress.com/career-advice/solving-mathematical-problems/
 [skepticism]: https://terrytao.wordpress.com/career-advice/be-sceptical-of-your-own-work/

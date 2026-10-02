@@ -154,11 +154,11 @@ became public.
 Three signatures cover the path from a commit to a downloaded file, and each
 answers a different question.
 
-| Signature | Key | Answers |
+| Signature | Signing identity | Establishes |
 | --- | --- | --- |
-| Commit | the maintainer's SSH key, or GitHub's key on a squash merge | who wrote this source |
-| Release attestation | Sigstore, keyed to the repository | GitHub bound this digest to this tag and commit |
-| Build provenance | Sigstore, keyed to the workflow identity | this workflow run built these bytes from that commit |
+| Commit | Maintainer or GitHub | Signer of the source commit |
+| Release | Sigstore repository identity | Asset digest, tag, and commit |
+| Build | Sigstore workflow identity | Workflow, source commit, and bytes |
 
 Commits are signed before they reach the repository. The maintainer signs
 locally with an SSH key; a squash merge is signed by GitHub, which reports
@@ -175,12 +175,11 @@ identity, signs the asset digests, and records the signature in a public
 transparency log. `gh attestation verify --signer-workflow` fails unless the
 bytes came from that workflow in this repository.
 
-A stored signing key would weaken this. It would have to live in a repository
-secret, so anyone who could read that secret could sign anything, forever, and
-nothing outside the repository would record that it happened. The keyless
-certificate expires in minutes, names the workflow that requested it, and
-leaves a public log entry. The key that does belong to a person — the
-maintainer's — signs the commits a person actually wrote.
+The certificate names the requesting workflow and expires after a short
+period; the transparency log preserves the signing record. This ties the
+attestation to a workflow identity. Trust in the release also depends on
+reviewing that workflow and protecting the source and repository controls
+that it uses.
 
 Do not move or reuse a release tag. Correct a failed release with a new pull
 request; the resulting commit receives its own identity and evidence.

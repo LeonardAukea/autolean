@@ -24,8 +24,8 @@ them. The maintainer may stop publication when a boundary is uncertain; the
 next qualified commit receives a new identity.
 
 Repository visibility follows the
-[public launch gate](docs/how-to/open-the-repository.md). A visibility change
-is an explicit maintainer decision and is never part of routine release
+[public distribution policy](docs/how-to/open-the-repository.md). A visibility
+change is an explicit maintainer decision and is never part of routine release
 automation.
 
 ## Security and conduct

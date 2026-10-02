@@ -33,7 +33,7 @@ installed AutoLean version.
 `model: auto` selects an authenticated subscription CLI first, followed by a
 configured hosted API. Subscription priority is Codex, Claude, then Grok;
 hosted API priority is OpenAI, then Anthropic. Codex selects GPT-6 Astra at
-`max` reasoning effort. Each provider selects its tuned default profile:
+`max` reasoning effort. Each provider selects its configured default profile:
 
 - Claude CLI: `fable` at `max`
 - Codex CLI: `gpt-6-astra` at `max`
@@ -49,7 +49,7 @@ and OpenAI's
 [GPT-6 Astra contract](https://developers.openai.com/api/docs/models/gpt-6-astra).
 `grok models` lists the Grok CLI's live catalog.
 
-Choose a provider while retaining its strongest model with `--provider`:
+Choose a provider's default model with `--provider`:
 
 ```bash
 autolean doctor --provider grok

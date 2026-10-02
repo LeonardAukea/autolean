@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Clarify tutorials, proof and paper evidence, operating guidance, and the
+  documentation's four Diátaxis homes.
+
 - Bind paper plans, coverage, and exports to exact Markdown bytes; preserve
   full source statements and all recorded strategy fields in companions.
 - Validate staged export evidence and resolve local imports through comments,

@@ -138,8 +138,6 @@ workspace
 
 model: auto
 search_scope: auto
-temperature: 0.4
-max_output_tokens: 32768
 max_retries_per_sorry: 5
 escalation_policy: ask
 escalation_after_failures: 2

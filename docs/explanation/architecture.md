@@ -58,8 +58,12 @@ The research loop is represented by small records and services:
 - `paper_workflow` composes paper evidence through explicit service protocols;
 - `export` owns standalone Lean and LaTeX artifacts.
 
-These modules exchange typed values. A model name, proof plan, paper identity,
-session, and accepted source remain distinct values across the pipeline.
+A target is a Lean declaration with a selected `sorry` placeholder. An
+attempt proposes one replacement and records its validation result. A session
+retains the target scope, model choices, and budget across command invocations.
+An export packages selected source and evidence for use outside the research
+workspace. The [artifact reference](../reference/research-artifacts.md)
+defines the stored records.
 
 Provider selection and data placement are separate decisions. A model profile
 binds one provider model and its controls. Effective inference placement comes

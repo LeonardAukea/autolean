@@ -32,4 +32,5 @@ observed measurement.
 Measure native Lean independently with the host's `time` utility, using one
 exported proof and its pinned dependency cache. Provider latency and token
 accounting belong to live session records. A local Python speedup establishes
-only the workload named in its receipt.
+only the workload named in its receipt. To compare proof acceptance and model
+usage, [run the paired proof comparison](compare-provers.md).

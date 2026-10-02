@@ -9,8 +9,10 @@ session ID, observed output, and these diagnostics:
 
 ```console
 autolean doctor
-autolean environment --project workspace --json
+autolean environment --project PATH_TO_LEAN_PROJECT --json
 ```
+
+Use the Lean project path from your `program.md`.
 
 Attach source only when it is safe to share. Paper text, model responses,
 generated proofs, logs, and environment records can contain private material.
