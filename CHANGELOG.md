@@ -1,13 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Refresh the Python lock and pinned Lean, Mathlib, CSLib, Nix packages,
+  document parsers, CodeDB, and Lightpanda releases.
+
 This file records Python API compatibility and the product narrative. Exact
 build chronology, commit-derived Hashver identities, assets, and generated
 notes live in [GitHub Releases].
-
-## Unreleased
-
-- Scan comment and string spans while preserving source positions and target
-  identities.
 
 ## 0.5.0
 
