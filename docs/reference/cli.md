@@ -46,8 +46,10 @@ autolean COMMAND --help
 `verify SOURCE`
 
 : Acquire a paper, extract claims, formalize them, and start a proof session.
-  `--extract-only` stops after acquisition. `--formalize-only` writes reviewed
-  Lean candidates and stops before proof search.
+  `--extract-only` stops after acquisition. `--formalize-only` writes Lean
+  candidates for review and stops before proof search. A reviewed paper
+  profile checks its mappings to existing declarations; see
+  [paper coverage](research-artifacts.md#paper-coverage).
 
 `problems`
 
@@ -128,8 +130,8 @@ Model-aware commands accept a profile or raw model string through `--model`.
 - `compatible`
 - `muse`
 
-Providers with tuned defaults select their strongest model. Local and
-self-hosted providers require an explicit `--model`.
+Providers with configured defaults select that profile. Local and self-hosted
+providers require an explicit `--model`.
 
 `--backend` addresses the same setting and accepts the canonical backend IDs
 used in stored configuration:
@@ -151,9 +153,9 @@ Add `--json` to either form for the stable `autolean-model-catalog-v1`
 representation, including readiness, inference placement, and request
 capabilities.
 
-The CLI value wins over `program.md`. A named profile is one tuned
-model-provider binding. An explicit provider must agree with it; raw provider
-model IDs remain freely composable with `--provider`.
+The CLI value wins over `program.md`. A named profile specifies a provider,
+model, and generation controls. An explicit provider must agree with it; raw
+provider model IDs can be combined with `--provider`.
 
 `--provider` and `--model` may appear before the subcommand:
 

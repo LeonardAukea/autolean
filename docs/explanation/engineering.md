@@ -1,10 +1,5 @@
 # Engineering discipline
 
-AutoLean is maintained as a living system. Engineering integrates code over
-time and people: users depend on its behaviour, operators depend on its
-failures being visible, and future maintainers depend on its structure being
-clear.
-
 A change is ready when its contract is explicit, its implementation is
 readable, its failures are actionable, and its evidence covers the boundary it
 claims.
@@ -41,8 +36,19 @@ values, and one owner for each decision. An abstraction earns its name by
 removing a concept from its callers. A comment carries a constraint or reason
 that the code cannot express.
 
-Readability enables correction, performance work, portability, and safe
-change. Clever code consumes the understanding needed to debug it later.
+The same care applies to prose. State the reader's answer early, introduce
+each concept through its role and a concrete example, and use one name for
+it. Give each paragraph one purpose. Keep a condition beside the claim it
+limits, and preserve numbers, units, uncertainty, and attribution when editing.
+
+[Strunk's composition principles][strunk],
+[Pinker on style and cognition][pinker], and the
+[Plain English Campaign's guides][plain] inform this approach. Apply their
+advice to the reader and subject: rhythm, a useful image, or a precise
+technical term can carry meaning that a shorter sentence loses. Read the
+result aloud for fluency, then check it against its source for accuracy.
+Readability scores and phrase searches can flag passages for review; reader
+understanding is the test.
 
 ## Debug from facts
 
@@ -91,4 +97,6 @@ Each change follows the same loop:
 5. review readability, diagnostics, compatibility, and documentation;
 6. publish only the exact qualified revision and retain its evidence.
 
-The loop ends with a result another person can inspect, repeat, and maintain.
+[strunk]: https://daoyuan14.github.io/elos.pdf
+[pinker]: https://edge.org/conversation/writing-in-the-21st-century
+[plain]: https://www.plainenglish.co.uk/free-guides

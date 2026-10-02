@@ -1,18 +1,30 @@
 # Changelog
 
-## Unreleased
+This file records Python API compatibility and the product narrative. Exact
+build chronology, commit-derived Hashver identities, assets, and generated
+notes live in [GitHub Releases].
 
+## 0.6.0
+
+- Stop workbench progress refreshes when their view is removed.
+- Clarify tutorials, proof and paper evidence, operating guidance, and the
+  documentation's four Diátaxis homes.
+- Bind paper plans, coverage, and exports to exact Markdown bytes; preserve
+  full source statements and all recorded strategy fields in companions.
+- Validate staged export evidence and resolve local imports through comments,
+  multiline directives, and module modifiers.
+- Compare AutoLean and plain prompting under recorded case, model, and call
+  budgets; account for planning and repair usage in attempt totals.
+- Preserve configured sampling temperatures and pin Ollama preflight checks
+  to the requested model tag and optional digest.
+- Refresh the Python lock and pinned Lean, Mathlib, CSLib, Nix packages,
+  document parsers, CodeDB, and Lightpanda releases.
 - Audit declaration types and axioms through trusted code with candidate
   initializers disabled; bind validation to one deadline and stable artifacts.
 - Restrict macOS candidate execution, host signals, and file reads to the
   sandbox's explicit capabilities.
-
-- Refresh the Python lock and pinned Lean, Mathlib, CSLib, Nix packages,
-  document parsers, CodeDB, and Lightpanda releases.
-
-This file records Python API compatibility and the product narrative. Exact
-build chronology, commit-derived Hashver identities, assets, and generated
-notes live in [GitHub Releases].
+- Respect quoted identifiers, raw strings, and character literals while
+  preserving proof-target positions and scanning plain spans efficiently.
 
 ## 0.5.0
 

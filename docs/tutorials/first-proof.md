@@ -77,8 +77,9 @@ autolean prove "the Pythagorean theorem" --review-plan \
   --guide "Use the distance form in a Euclidean affine space"
 ```
 
-The recorded demonstration passes a guide of exactly this shape, which is why
-it reaches the same statement on every run.
+The recorded demonstration also names the Mathlib lemma to use. These hints
+narrow the task; inspect the generated statement because model responses can
+vary between runs.
 
 The formalization phase compiles the proposed declaration in isolation. Proof
 search begins only after the statement compiles. A successful proof then
@@ -95,8 +96,10 @@ git -C lean log -1 --stat
 ```
 
 The accepted source is under `lean/AutoLean/Generated/`. It contains the exact
-declaration and proof checked by Lean. The session record binds that proof to
-its model, prompt, environment, and axiom report.
+declaration and proof checked by Lean. The session identifies the target and
+result record. The
+[accepted-proof record](../reference/environment.md#accepted-proof-record)
+binds the proof to its model, prompt, environment, and axiom report.
 
 ## 6. Export the artifact
 

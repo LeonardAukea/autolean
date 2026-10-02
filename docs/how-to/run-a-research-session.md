@@ -87,9 +87,9 @@ autolean solve --overnight
 ```
 
 An overnight run increases retry limits, resets epochs, and resumes until it
-is stopped. Use it only after a bounded run has shown that failures are useful
-proof evidence rather than authentication, environment, or formalization
-errors.
+is stopped. First use a bounded run to check that each failure supplies useful
+proof evidence. Resolve authentication, environment, and formalization errors
+before increasing the budget.
 
 Export a finished session with `autolean export`. The export is the shareable
 artifact; runtime logs and learned context remain local project state.
