@@ -2,16 +2,6 @@
 
 ## Unreleased
 
-- Bind paper plans, coverage, and exports to exact Markdown bytes; preserve
-  full source statements and all recorded strategy fields in companions.
-- Validate staged export evidence and resolve local imports through comments,
-  multiline directives, and module modifiers.
-
-- Compare AutoLean and plain prompting under recorded case, model, and call
-  budgets; account for planning and repair usage in attempt totals.
-- Preserve configured sampling temperatures and pin Ollama preflight checks
-  to the requested model tag and optional digest.
-
 - Audit declaration types and axioms through trusted code with candidate
   initializers disabled; bind validation to one deadline and stable artifacts.
 - Restrict macOS candidate execution, host signals, and file reads to the
