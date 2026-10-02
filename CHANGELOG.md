@@ -22,8 +22,8 @@ notes live in [GitHub Releases].
   initializers disabled; bind validation to one deadline and stable artifacts.
 - Restrict macOS candidate execution, host signals, and file reads to the
   sandbox's explicit capabilities.
-- Scan comment and string spans while preserving source positions and target
-  identities.
+- Respect quoted identifiers, raw strings, and character literals while
+  preserving proof-target positions and scanning plain spans efficiently.
 
 ## 0.5.0
 
