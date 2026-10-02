@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve comment and string offsets with a scanner that skips plain spans.
+
 - Refresh the Python lock and pinned Lean, Mathlib, CSLib, Nix packages,
   document parsers, CodeDB, and Lightpanda releases.
 
