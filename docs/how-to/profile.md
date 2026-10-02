@@ -29,6 +29,10 @@ comparing latency or memory. Keep the machine otherwise idle and use several
 repetitions. CI checks behaviour and bounds; machine-dependent latency is an
 observed measurement.
 
+The [paired scanner receipt](../../benchmarks/results/2026-10-02-scanner.json)
+records source hashes, alternating timings, and exact output comparisons for
+one local workspace. Its timings apply to that recorded workload.
+
 Measure native Lean independently with the host's `time` utility, using one
 exported proof and its pinned dependency cache. Provider latency and token
 accounting belong to live session records. A local Python speedup establishes

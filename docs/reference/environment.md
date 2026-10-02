@@ -102,6 +102,17 @@ continues with Lean as its semantic authority.
 
 The environment identity records the bytes used to check a proof. Rechecking
 also requires a supported host and enough time and memory for Lean to finish.
+Large import closures also consume host file and filesystem metadata capacity.
+On macOS, inspect both pools when Lean reports `Too many open files in system`:
+
+```bash
+sysctl kern.maxfiles kern.num_files kern.maxvnodes kern.num_vnodes
+```
+
+The shell's `ulimit -n` controls a separate per-process file limit. A host pool
+at capacity requires resources to be released or its limit to be adjusted by
+the host administrator.
+
 Hosted aliases may point to changing model weights, and providers may return
 different completions for the same request. The recorded proof and environment
 can be reused independently of that generation step.
