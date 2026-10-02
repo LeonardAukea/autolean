@@ -203,6 +203,33 @@ def ollama() -> OllamaClient:
 
 
 class TestOllamaPing:
+    @pytest.mark.parametrize(
+        ("requested", "installed", "expected"),
+        [
+            ("gemma4", "gemma4:latest", True),
+            ("gemma4:latest", "gemma4", True),
+            ("gemma4", "gemma4:26b", False),
+            ("gemma4:26b-missing", "gemma4:26b", False),
+            ("localhost:5000/gemma4", "localhost:5000/gemma4:latest", True),
+        ],
+    )
+    @respx.mock
+    def test_checks_the_exact_tag(self, requested: str, installed: str, expected: bool) -> None:
+        respx.get(f"{DEFAULT_OLLAMA_URL}/api/tags").mock(
+            return_value=httpx.Response(200, json={"models": [{"name": installed}]})
+        )
+        with OllamaClient(config=LLMConfig(model=requested)) as client:
+            assert client.ping() is expected
+
+    @pytest.mark.parametrize("digest", [None, "b" * 64, "a" * 64])
+    @respx.mock
+    def test_pinned_revision_requires_the_matching_digest(self, digest: str | None) -> None:
+        respx.get(f"{DEFAULT_OLLAMA_URL}/api/tags").mock(
+            return_value=httpx.Response(200, json={"models": [{"name": "test", "digest": digest}]})
+        )
+        with OllamaClient(config=LLMConfig(model="test", model_revision="a" * 64)) as client:
+            assert client.ping() is (digest == "a" * 64)
+
     @respx.mock
     def test_ping_true_when_model_is_pulled(self, ollama: OllamaClient) -> None:
         respx.get(f"{DEFAULT_OLLAMA_URL}/api/tags").mock(
@@ -229,6 +256,16 @@ class TestOllamaPing:
 
 
 class TestOllamaGenerate:
+    @pytest.mark.parametrize("seed", [0, 42])
+    @respx.mock
+    def test_transmits_the_configured_seed(self, seed: int) -> None:
+        route = respx.post(f"{DEFAULT_OLLAMA_URL}/api/chat").mock(
+            return_value=httpx.Response(200, json={"message": {"content": "rfl"}})
+        )
+        with OllamaClient(config=LLMConfig(model="test", seed=seed)) as client:
+            client.generate("system", "user")
+        assert json.loads(route.calls.last.request.read())["options"]["seed"] == seed
+
     @respx.mock
     def test_parses_text_and_token_counts(self, ollama: OllamaClient) -> None:
         respx.post(f"{DEFAULT_OLLAMA_URL}/api/chat").mock(

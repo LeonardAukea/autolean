@@ -43,6 +43,7 @@ from autolean.library import (
 from autolean.llm import (
     LLMAuthenticationError,
     LLMBackend,
+    LLMConfig,
     LLMError,
     LLMRateLimitError,
     LLMResponse,
@@ -87,9 +88,9 @@ from autolean.validation import require_instance, require_int, require_number, r
 
 log = logging.getLogger("autolean")
 
-# Temperature escalation per retry attempt (capped at 1.0)
+# Retries raise temperatures below 1.0 toward that ceiling.
 TEMP_ESCALATION_STEP = 0.1
-TEMP_MAX = 1.0
+RETRY_TEMP_CEILING = 1.0
 
 # Skip a target after this many consecutive failures in one error category.
 MAX_REPEATED_ERRORS = 3
@@ -268,8 +269,9 @@ def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
     peeled = [_peel_trailing_tactic(line) for line in text.split("\n")]
     lines = _trim_explanatory_prose(_strip_blank_edges(peeled))
 
-    if tactic_mode and lines and lines[0].strip() == "by":
-        lines = _strip_blank_edges(lines[1:])
+    if tactic_mode and lines:
+        lines[0] = re.sub(r"^[ \t]*by(?:[ \t]+|$)", "", lines[0])
+        lines = _strip_blank_edges(lines)
 
     return "\n".join(lines)
 
@@ -281,13 +283,12 @@ def clean_llm_proof(raw: str, *, tactic_mode: bool = True) -> str:
 
 @dataclass
 class AttemptEvidence:
-    """Content identities produced by one proof attempt.
-
-    An attempt that returns before reaching the model leaves these empty,
-    which is what its record must say.
-    """
+    """Content identities and provider usage collected during one attempt."""
 
     input_tokens: int = 0
+    attempt_input_tokens: int = 0
+    attempt_output_tokens: int = 0
+    attempt_model_calls: int = 0
     prompt_sha256: str = ""
     structural_context_sha256: str = ""
     indexed_context_sha256: str = ""
@@ -392,6 +393,7 @@ class AutoLeanAgent:
         target_filter: str | None = None,
         target_file: Path | None = None,
         confirm_escalation: Callable[[EscalationDecision], bool] | None = None,
+        backend_factory: Callable[[LLMConfig], LLMBackend] | None = None,
     ):
         self.program_path = program_path.resolve()
         self.dry_run = dry_run
@@ -463,7 +465,7 @@ class AutoLeanAgent:
             skills_dir=self.project.root / "skills",
             persist=not self.dry_run,
         )
-        self.llm: LLMBackend = create_llm_client(llm_config)
+        self.llm: LLMBackend = (backend_factory or create_llm_client)(llm_config)
 
     def close(self) -> None:
         """Release the backend owned by this agent."""
@@ -907,6 +909,7 @@ class AutoLeanAgent:
         tactics: list[str],
     ) -> tuple[bool, AgentRunResult | None]:
         """Attempt and accept one deterministic tactic proof."""
+        started = time.monotonic()
         self._progress_target = target.decl_name
         self._progress_cycle = 0
         self._progress_attempt = 0
@@ -953,7 +956,7 @@ class AutoLeanAgent:
         )
         if goal_state:
             self._progress(ProgressKind.GOAL, "Lean goal", goal_state)
-        record = self._tactic_record(target, tactic, audit)
+        record = self._tactic_record(target, tactic, audit, time.monotonic() - started)
         record = record.bind_source(original, new_content)
         failure = self._accept_source(target.file, new_content, original, record)
         if failure is not None:
@@ -993,6 +996,7 @@ class AutoLeanAgent:
         target: SorryTarget,
         tactic: str,
         audit: BuildResult,
+        duration_seconds: float,
     ) -> ExperimentRecord:
         """Build the canonical record for one deterministic proof."""
         return ExperimentRecord(
@@ -1004,9 +1008,12 @@ class AutoLeanAgent:
             line=target.line,
             outcome=Outcome.SUCCESS,
             attempt=0,
-            duration_seconds=0.0,
+            duration_seconds=duration_seconds,
             llm_tokens=0,
             llm_tok_per_sec=0.0,
+            attempt_input_tokens=0,
+            attempt_output_tokens=0,
+            attempt_model_calls=0,
             proof_length=len(tactic.splitlines()),
             environment_sha256=self._environment_sha256,
             proof_sha256=sha256_text(tactic),
@@ -1157,7 +1164,8 @@ class AutoLeanAgent:
         console.print(
             f"  [{style}]{icon} {record.outcome.value}[/{style}]"
             f"{f' [dim]({record.error_category})[/dim]' if record.error_category else ''}"
-            f" [dim]({record.duration_seconds:.1f}s, {record.llm_tokens} tok)[/dim]"
+            f" [dim]({record.duration_seconds:.1f}s, "
+            f"{record.total_input_tokens + record.total_output_tokens} tok)[/dim]"
         )
         self._show_record_error(record)
         summary = self.tracker.summary()
@@ -1197,6 +1205,7 @@ class AutoLeanAgent:
 
     def _run(self) -> AgentRunResult:
         """Main entry point — the autonomous loop."""
+        session_start = time.monotonic()
         failure = self._initialize_run()
         if failure is not None:
             return failure
@@ -1216,13 +1225,12 @@ class AutoLeanAgent:
             return failure
         if not targets:
             console.print("[green]All targets solved by tactic pre-search![/]")
-            self._print_final_report(targets, time.monotonic())
+            self._print_final_report(targets, session_start)
             self._progress(ProgressKind.FINISHED, "Run finished · 0 selected proof targets remain open")
             return AgentRunResult(True)
 
         # -- Main loop ------------------------------------------------------
         ui.phase("Autonomous loop")
-        session_start = time.monotonic()
         targets = self._autonomous_loop(targets, session_start)
         # -- Session complete — full report -----------------------------------
         self._print_final_report(targets, session_start)
@@ -1485,7 +1493,7 @@ class AutoLeanAgent:
                     declaration.qualified_name for declaration in structural.referenced_declarations
                 ),
                 strategy_hints=tuple(self.config.strategy_hints),
-                llm_generate=self.llm.generate,
+                llm_generate=self._generate,
                 attempt=attempt,
                 remote_search=remote_search,
             )
@@ -1538,7 +1546,7 @@ class AutoLeanAgent:
         self._step(f"Querying {model}{knob}")
         try:
             with ui.status(f"Waiting for {model}..."):
-                response = self.llm.generate(
+                response = self._generate(
                     system=SYSTEM_PROMPT,
                     user=prompt.user,
                     temperature=temperature,
@@ -1555,6 +1563,26 @@ class AutoLeanAgent:
         self._consecutive_llm_errors = 0
         return response, None
 
+    def _generate(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
+    ) -> LLMResponse:
+        """Account for every planning, proof, and definition request."""
+        self._evidence.attempt_model_calls += 1
+        response = self.llm.generate(
+            system,
+            user,
+            temperature=temperature,
+            stop=stop,
+        )
+        self._evidence.attempt_input_tokens += response.input_tokens
+        self._evidence.attempt_output_tokens += response.output_tokens
+        return response
+
     def _retry_temperature(self, attempt: int) -> float | None:
         """Return the bounded sampling temperature for one retry."""
         require_int(attempt, "proof attempt must be positive", minimum=1)
@@ -1562,7 +1590,7 @@ class AutoLeanAgent:
         if not self.llm.capabilities.temperature or configured is None:
             return None
         delta = (attempt - 1) * TEMP_ESCALATION_STEP if self.llm.capabilities.retry_temperature else 0.0
-        return min(configured + delta, TEMP_MAX)
+        return min(configured + delta, max(configured, RETRY_TEMP_CEILING))
 
     def _provider_failure(
         self,
@@ -2088,7 +2116,7 @@ class AutoLeanAgent:
             "yellow",
         )
         try:
-            generated = fill_gap(gap, self.llm.generate)
+            generated = fill_gap(gap, self._generate)
         except (LLMError, GeneratedCodeError) as error:
             self._step(f"Gap generation rejected: {error}", "red")
             return None
@@ -2363,6 +2391,9 @@ class AutoLeanAgent:
             backend=self.llm.config.backend,
             inference_location=inference_location(self.llm.config),
             llm_input_tokens=(self._evidence.input_tokens if llm_input_tokens is None else llm_input_tokens),
+            attempt_input_tokens=self._evidence.attempt_input_tokens,
+            attempt_output_tokens=self._evidence.attempt_output_tokens,
+            attempt_model_calls=self._evidence.attempt_model_calls,
             prompt_sha256=(self._evidence.prompt_sha256 if prompt_sha256 is None else prompt_sha256),
             structural_context_sha256=self._evidence.structural_context_sha256,
             indexed_context_sha256=self._evidence.indexed_context_sha256,
@@ -2416,7 +2447,7 @@ class AutoLeanAgent:
                 for target in targets
                 if self._attempts.get(target.id, 0) >= self.config.max_retries_per_sorry
             ),
-            total_tokens=sum(record.llm_tokens for record in records),
+            total_tokens=sum(record.total_input_tokens + record.total_output_tokens for record in records),
         )
 
     def _print_report_header(self, report: SessionReport) -> None:
@@ -2460,14 +2491,14 @@ class AutoLeanAgent:
         table.add_column("File", style="dim", min_width=20)
         table.add_column("Att", justify="right", min_width=4)
         table.add_column("Time", justify="right", min_width=8)
-        table.add_column("Tokens", justify="right", min_width=8)
+        table.add_column("Attempt tokens", justify="right", min_width=8)
         for record in report.proved:
             table.add_row(
                 record.decl_name,
                 f"{record.file}:{record.line}",
                 str(record.attempt),
                 f"{record.duration_seconds:.1f}s",
-                f"{record.llm_tokens:,}",
+                f"{record.total_input_tokens + record.total_output_tokens:,}",
             )
         console.print(table)
 

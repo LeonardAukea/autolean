@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -230,6 +231,63 @@ def test_cycle_budget_is_fresh_when_an_experiment_resumes(
     assert agent.tracker.cycle == 11
 
 
+def test_session_clock_includes_deterministic_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    clock = [10.0]
+    elapsed: list[float] = []
+    monkeypatch.setattr("autolean.agent.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent, "_initialize_run", lambda: None)
+
+    def searched(targets: object) -> tuple[list[SorryTarget], None]:
+        clock[0] += 9.0
+        return [], None
+
+    monkeypatch.setattr(agent, "_tactic_presearch", searched)
+    monkeypatch.setattr(agent, "_print_final_report", lambda targets, start: elapsed.append(clock[0] - start))
+
+    assert agent.run().successful
+    assert elapsed == [9.0]
+
+
+def test_tactic_record_retains_measured_search_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, _ = _prepare_agent(tmp_path, monkeypatch)
+    target = scan_file(agent.project.root / "AutoLean" / "Target.lean")[0]
+    record = agent._tactic_record(target, "trivial", BuildResult(success=True), 3.5)
+    assert record.duration_seconds == 3.5
+    assert record.attempt_model_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("configured", "retry", "attempt", "expected"),
+    [
+        (0.4, True, 1, 0.4),
+        (0.4, True, 10, 1.0),
+        (1.5, True, 1, 1.5),
+        (1.5, True, 3, 1.5),
+        (0.4, False, 3, 0.4),
+        (1.5, False, 3, 1.5),
+    ],
+)
+def test_retry_temperature_preserves_the_configured_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: float,
+    retry: bool,
+    attempt: int,
+    expected: float,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    backend.config = replace(backend.config, temperature=configured)
+    backend.capabilities = replace(backend.capabilities, retry_temperature=retry)
+    assert agent._retry_temperature(attempt) == pytest.approx(expected)
+
+
 def test_terminal_provider_error_stops_after_one_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -373,6 +431,9 @@ def test_structural_context_and_prompt_identity_reach_the_experiment(
     assert "syntax_path: declaration > theorem > by > sorry" in backend.last_user
     record = agent.tracker.records[-1]
     assert record.llm_input_tokens == 42
+    assert record.attempt_input_tokens == 102
+    assert record.attempt_output_tokens == 121
+    assert record.attempt_model_calls == 2
     assert len(record.prompt_sha256) == 64
     assert len(record.structural_context_sha256) == 64
 
@@ -460,11 +521,69 @@ def test_gap_record_is_bound_to_the_definition_request(
     assert record.model == "gap-model"
     assert record.llm_input_tokens == 77
     assert record.llm_tokens == 9
+    assert record.attempt_input_tokens == 148
+    assert record.attempt_output_tokens == 131
+    assert record.attempt_model_calls == 3
     assert record.llm_tok_per_sec == 3.0
     assert record.proof_length == 1
     assert record.prompt_sha256 == sha256_text(f"{gap_request['system']}\0{gap_request['user']}")
     assert record.proof_sha256 == sha256_text("def Missing : True := True.intro")
     assert committed == [record]
+
+
+def test_attempt_accounting_includes_rejected_strategy_and_cached_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    generate = backend.generate
+    calls = 0
+
+    def repaired(system: str, user: str, **kwargs: object) -> LLMResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMResponse("invalid strategy", "test", input_tokens=7, output_tokens=8)
+        return generate(system, user)
+
+    monkeypatch.setattr(backend, "generate", repaired)
+    target = scan_file(agent.project.root / "AutoLean" / "Target.lean")[0]
+    first = agent._try_fill_sorry(1, target, 1)
+    second = agent._try_fill_sorry(2, target, 2)
+
+    assert first.attempt_model_calls == 3
+    assert first.attempt_input_tokens == 109
+    assert first.attempt_output_tokens == 129
+    assert first.llm_input_tokens == 42
+    assert second.attempt_model_calls == 1
+    assert second.attempt_input_tokens == 42
+    assert second.attempt_output_tokens == 1
+
+
+def test_failed_strategy_repair_retains_returned_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, backend = _prepare_agent(tmp_path, monkeypatch)
+    calls = 0
+
+    def unavailable(system: str, user: str, **kwargs: object) -> LLMResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMResponse("invalid strategy", "test", input_tokens=7, output_tokens=8)
+        raise LLMTransientError("offline")
+
+    monkeypatch.setattr(backend, "generate", unavailable)
+    target = scan_file(agent.project.root / "AutoLean" / "Target.lean")[0]
+    record = agent._try_fill_sorry(1, target, 1)
+
+    assert record.outcome is Outcome.FAIL_PROVIDER
+    assert record.attempt_model_calls == 2
+    assert record.attempt_input_tokens == 7
+    assert record.attempt_output_tokens == 8
+    assert record.llm_tokens == 0
+    assert record.llm_input_tokens == 0
 
 
 def test_gap_declaration_is_inserted_at_the_module_root() -> None:

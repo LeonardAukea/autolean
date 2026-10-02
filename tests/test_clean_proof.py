@@ -7,6 +7,12 @@ import pytest
 from autolean.agent import clean_llm_proof
 
 
+@pytest.mark.parametrize("proof", ["by trivial", "by\texact True.intro", "  by rfl"])
+def test_inline_by_wrapper_is_removed_only_in_tactic_mode(proof: str) -> None:
+    assert clean_llm_proof(proof, tactic_mode=True) == proof.strip().split(maxsplit=1)[1]
+    assert clean_llm_proof(proof, tactic_mode=False) == proof.strip()
+
+
 class TestCleanLlmProof:
     """Tests for stripping markdown fences and LLM artifacts."""
 
@@ -96,12 +102,11 @@ class TestCleanLlmProof:
         # Defaults to tactic_mode=True, strips `by`, keeps indented body
         assert result == "  omega"
 
-    def test_by_on_same_line_as_tactic_not_stripped(self) -> None:
-        """An inline `by simp` remains intact."""
+    def test_inline_by_has_a_tactic_body(self) -> None:
+        """A tactic slot receives the body of an inline `by` term."""
         raw = "by simp"
         result = clean_llm_proof(raw, tactic_mode=True)
-        # `by simp` is a single line where strip() != "by", so it stays
-        assert result == "by simp"
+        assert result == "simp"
 
     def test_complete_theorem_wrapper_is_stripped(self) -> None:
         """A model may echo the requested declaration around its proof."""
