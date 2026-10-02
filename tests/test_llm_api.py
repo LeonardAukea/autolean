@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -11,6 +12,11 @@ import httpx
 import pytest
 
 from autolean.llm import DocumentInput, LLMConfig, LLMError, anthropic_api, openai_api
+
+
+def _sdk_transport(sdk: Any) -> Any:
+    """Build mocks from the HTTP package used by the SDK's default client."""
+    return httpx if issubclass(sdk.DefaultHttpxClient, httpx.Client) else importlib.import_module("httpx2")
 
 
 class FakeBadRequestError(Exception):
@@ -176,7 +182,8 @@ class TestAnthropicClient:
 
     def test_official_sdk_serializes_the_messages_contract(self) -> None:
         anthropic = pytest.importorskip("anthropic")
-        requests: list[httpx.Request] = []
+        transport_api = _sdk_transport(anthropic)
+        requests: list[Any] = []
         events = (
             "\n\n".join(
                 [
@@ -201,15 +208,15 @@ class TestAnthropicClient:
             + "\n\n"
         )
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: Any) -> Any:
             requests.append(request)
-            return httpx.Response(
+            return transport_api.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
                 text=events,
             )
 
-        http_client = httpx.Client(transport=httpx.MockTransport(handler))
+        http_client = anthropic.DefaultHttpxClient(transport=transport_api.MockTransport(handler))
         sdk = anthropic.Anthropic(
             api_key="test",
             base_url="https://api.anthropic.test",
@@ -361,11 +368,12 @@ class TestOpenAIClient:
 
     def test_official_sdk_serializes_the_responses_contract(self) -> None:
         openai = pytest.importorskip("openai")
-        requests: list[httpx.Request] = []
+        transport_api = _sdk_transport(openai)
+        requests: list[Any] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: Any) -> Any:
             requests.append(request)
-            return httpx.Response(
+            return transport_api.Response(
                 200,
                 json={
                     "id": "resp_test",
@@ -400,7 +408,7 @@ class TestOpenAIClient:
                 },
             )
 
-        http_client = httpx.Client(transport=httpx.MockTransport(handler))
+        http_client = openai.DefaultHttpxClient(transport=transport_api.MockTransport(handler))
         sdk = openai.OpenAI(
             api_key="test",
             base_url="https://api.openai.test/v1",

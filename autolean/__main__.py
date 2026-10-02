@@ -58,8 +58,8 @@ AUTOLEAN_BANNER = r"""
   \/_/\/_/   \/_____/     \/_/   \/_____/   \/_____/   \/_____/   \/_/\/_/   \/_/ \/_/
 """.strip("\n")
 
-DEFAULT_LEAN_TOOLCHAIN = "leanprover/lean4:v4.33.0"
-LEAN_LIBRARY_RELEASE = "v4.33.0"
+DEFAULT_LEAN_TOOLCHAIN = "leanprover/lean4:v4.34.1"
+LEAN_LIBRARY_RELEASE = "v4.34.1"
 
 #: Difficulty score → label, and label → display colour.
 DIFFICULTY_LABELS = {

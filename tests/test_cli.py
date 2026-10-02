@@ -787,7 +787,7 @@ class TestInitCommand:
         assert result.exit_code == 0
         lakefile = (target / "lakefile.lean").read_text()
         assert "mathlib" in lakefile
-        assert "v4.33.0" in lakefile
+        assert "v4.34.1" in lakefile
 
     def test_init_with_cslib(self, runner: CliRunner, tmp_path: Path) -> None:
         target = tmp_path / "cs_project"
@@ -795,7 +795,7 @@ class TestInitCommand:
         assert result.exit_code == 0
         lakefile = (target / "lakefile.lean").read_text()
         assert "leanprover/cslib" in lakefile
-        assert "v4.33.0" in lakefile
+        assert "v4.34.1" in lakefile
 
     def test_init_can_select_lean_core_only(self, runner: CliRunner, tmp_path: Path) -> None:
         target = tmp_path / "core_project"
