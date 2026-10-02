@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,17 @@ def test_fingerprint_tracks_artifact_and_configuration_changes(tmp_path: Path) -
 
     assert before != after_artifact
     assert after_artifact != after_config
+
+
+def test_fingerprint_detects_content_changes_with_preserved_size_and_mtime(tmp_path: Path) -> None:
+    project, lean = _environment(tmp_path)
+    artifact = provenance.compiled_module_paths(project)[0] / "Mathlib.olean"
+    before = provenance.environment_fingerprint(project, lean)
+    metadata = artifact.stat()
+
+    artifact.write_bytes(b"MATHLIB-OLEAN")
+    os.utime(artifact, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+    assert artifact.stat().st_size == metadata.st_size
+    assert artifact.stat().st_mtime_ns == metadata.st_mtime_ns
+    assert provenance.environment_fingerprint(project, lean) != before

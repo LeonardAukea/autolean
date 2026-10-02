@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from autolean.files import walk_files
 
-#: Digest of each artifact's path, size, and modification time.
+#: Digest of each artifact's path, size, inode, and filesystem timestamps.
 EnvironmentFingerprint = str
 
 _ENVIRONMENT_DOMAIN = b"autolean-proof-environment-v1\0"
@@ -135,10 +135,10 @@ def environment_fingerprint(project_root: Path, lean: Path) -> EnvironmentFinger
     """Stream a stat identity for the artifact set captured by provenance.
 
     A holder of a captured ProofEnvironment may reuse it while the
-    fingerprint is unchanged: every change an on-disk build or editor can
-    make moves a size or mtime. Content changes that forge both are outside
-    the trust model, which treats the local project and toolchain as trusted
-    inputs; the recorded identity itself stays a pure content hash.
+    fingerprint is unchanged. Size, inode, modification time, and change
+    time detect ordinary writes and replacements, including copies that
+    preserve modification times. The local filesystem and toolchain are
+    trusted inputs; the recorded identity stays a pure content hash.
     """
     project_root = project_root.resolve()
     lean = lean.resolve()
@@ -150,10 +150,11 @@ def environment_fingerprint(project_root: Path, lean: Path) -> EnvironmentFinger
         (path for path in configurations if path.is_file()),
         chain.from_iterable(_artifact_files(root) for root in roots),
     )
-    digest = hashlib.sha256(b"autolean-environment-stat-v1\0")
+    digest = hashlib.sha256(b"autolean-environment-stat-v2\0")
     for path in files:
         stat = path.stat()
-        _hash_value(digest, str(path), f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        identity = f"{stat.st_size}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+        _hash_value(digest, str(path), identity.encode())
     return digest.hexdigest()
 
 

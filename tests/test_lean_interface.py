@@ -136,11 +136,41 @@ class TestAxiomAudit:
     def test_audit_source_checks_module_and_target_line(self) -> None:
         source = _declaration_audit_source("Example", "Outer.target", 17, "token")
 
-        assert "import Example" in source
+        assert 'let moduleName := "Example".toName' in source
+        assert "withEnv candidateEnv do" in source
         assert 'let declarationName := "Outer.target".toName' in source
         assert "let targetLine : Nat := 17" in source
         assert "env.getModuleIdxFor? declarationName" in source
         assert "targetLine <= ranges.range.endPos.line" in source
+
+
+@pytest.mark.parametrize("candidate_seconds", [8, 10])
+def test_compilation_and_declaration_audit_share_one_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_seconds: int
+) -> None:
+    from autolean import lean_interface
+
+    (tmp_path / "lakefile.lean").write_text("import Lake\n")
+    project = LeanProject(tmp_path)
+    clock = [0.0]
+    budgets: list[float] = []
+
+    def compile_source(command: list[str], *, cwd: Path, timeout: float, env: dict[str, str]) -> BuildResult:
+        budgets.append(timeout)
+        if len(budgets) == 1:
+            clock[0] += candidate_seconds
+        return BuildResult(success=True, duration_seconds=candidate_seconds)
+
+    monkeypatch.setattr(lean_interface.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(lean_interface, "_run_lean_check", compile_source)
+    monkeypatch.setattr(project, "_sandboxed_lean_command", lambda *args, **kwargs: (["lean"], {}))
+
+    result = project._check_untrusted_declaration(
+        tmp_path / "Target.lean", "theorem target : True := by trivial", 10, "target", 1
+    )
+
+    assert budgets == ([10, 2] if candidate_seconds == 8 else [10])
+    assert result.timed_out is (candidate_seconds == 10)
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +734,39 @@ class TestProofEnvironmentCaching:
             project.proof_environment()
 
 
+def test_validation_rejects_an_environment_restored_during_elaboration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from autolean import provenance
+    from tests.test_provenance import _environment
+
+    root, lean = _environment(tmp_path)
+    monkeypatch.setattr(provenance, "_read_lean_version", lambda path: "Lean 4.33.0")
+    project = LeanProject(root)
+    project._lean_binary = lean
+    expected = project.proof_environment().sha256
+    artifact = provenance.compiled_module_paths(root)[0] / "Mathlib.olean"
+    content = artifact.read_bytes()
+    metadata = artifact.stat()
+
+    def check_with_transient_environment(source: str, timeout: int) -> BuildResult:
+        artifact.write_bytes(b"transient-closure")
+        artifact.write_bytes(content)
+        os.utime(artifact, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1))
+        return BuildResult(success=True)
+
+    monkeypatch.setattr(project, "_check_untrusted_content", check_with_transient_environment)
+    result = project.validate_candidate(
+        root / "Target.lean", "theorem target : True := by trivial", expected_environment=expected
+    )
+
+    assert project.proof_environment().sha256 == expected
+    assert not result.success
+    assert "artifact fingerprint differs" in result.stderr
+
+
 class TestEnvironmentIdentityGate:
     """A closure that moves during validation must not yield an accepted proof."""
 
@@ -895,9 +958,9 @@ def test_tactic_search_yields_after_a_timeout_and_preserves_source(
 class TestStatementPolicy:
     """An audited candidate proves the statement it was asked about."""
 
-    def test_layout_does_not_change_a_statement_identity(self) -> None:
-        assert statement_digest("∀ (a b : Nat),\n  a + b ≤ 2 * a") == statement_digest(
-            "∀ (a b : Nat), a + b ≤ 2 * a"
+    def test_statement_identity_preserves_literal_spacing(self) -> None:
+        assert statement_digest('Lean.Expr.lit (Lean.Literal.strVal "a b")') != statement_digest(
+            'Lean.Expr.lit (Lean.Literal.strVal "a  b")'
         )
 
     def test_a_different_statement_is_rejected(self) -> None:
