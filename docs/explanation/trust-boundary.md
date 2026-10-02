@@ -84,10 +84,11 @@ looks like. The layers above the sandbox cannot carry this responsibility:
 - The kernel guarantees logical soundness. It says nothing about what the
   elaborator did to the host while producing the term it checks.
 
-The sandbox is the one layer whose guarantee does not depend on the
-candidate's content: no network, a minimal environment, and a filesystem view
-enforced by the operating system. The sandbox permits reads of the pinned
-toolchain and compiled dependencies and confines writes to scratch outputs.
+The operating system enforces the sandbox's network and filesystem rules.
+The sandbox permits reads of the pinned toolchain and compiled dependencies,
+confines writes to scratch outputs, and gives Lean a minimal environment.
+On macOS, it permits execution of the resolved Lean binary and denies child
+process creation. Linux contains the process tree in a PID namespace.
 
 Native compiler and sandbox costs require host-specific measurements. The
 [profiling guide](../how-to/profile.md) separates those subprocesses from
@@ -95,14 +96,18 @@ Python runtime measurements.
 
 ## Declaration binding
 
-A fresh Lean process imports the compiled candidate and asks Lean for the
-requested declaration. Acceptance requires its recorded source range to
-contain the exact selected target line. The same process walks the
-declaration's transitive axioms.
+A fresh Lean process compiles the audit against Lean alone, using trusted
+syntax and formatting instances. The compiled audit loads the candidate's
+declarations and source ranges as data; candidate initializers stay disabled.
+Acceptance requires the requested declaration to belong to the candidate
+module and its recorded source range to contain the exact selected target
+line. The audit records the declaration's type, universe parameters, and
+transitive axioms.
 
 The source edit replaces one expected `sorry` and must reduce the file's
 placeholder count by one. Git verifies the prepared branch and commits only
-the accepted file. The [source installation contract](../reference/environment.md#accepted-proof-record)
+the accepted file. The
+[source installation contract](../reference/environment.md#accepted-proof-record)
 defines the comparison and writer requirements.
 
 ## Structural context

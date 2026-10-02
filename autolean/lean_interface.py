@@ -256,43 +256,54 @@ def _declaration_audit_source(
     target_line: int,
     nonce: str,
 ) -> str:
-    """Build a trusted Lean command that binds an audit to one source range."""
+    """Bind one source range to an audit elaborated against Lean alone.
+
+    The candidate environment loads when the compiled command runs. Its
+    instances and syntax therefore cannot alter the audit's construction.
+    Imported declarations and ranges remain data: initializers stay disabled,
+    and module regions live until the isolated process exits.
+    """
     if not _DECLARATION_NAME_RE.fullmatch(declaration):
         raise LeanSandboxError(f"declaration cannot be audited safely: {declaration!r}")
     if target_line < 1:
         raise LeanSandboxError("declaration audit line must be positive")
     return textwrap.dedent(
         f"""\
-        import {module}
         import Lean
 
         open Lean
         open Lean.Elab Command
 
         run_cmd do
-          let env ← getEnv
           let moduleName := {_lean_string(module)}.toName
-          let declarationName := {_lean_string(declaration)}.toName
-          let targetLine : Nat := {target_line}
-          let some moduleIdx := env.getModuleIdx? moduleName
-            | throwError m!"candidate module {{moduleName}} is unavailable"
-          unless env.getModuleIdxFor? declarationName == some moduleIdx do
-            throwError m!"{{declarationName}} is not declared by {{moduleName}}"
-          let ranges? ← findDeclarationRangesCore? declarationName
-          let some ranges := ranges?
-            | throwError m!"source range unavailable for {{declarationName}}"
-          unless ranges.range.pos.line <= targetLine &&
-              targetLine <= ranges.range.endPos.line do
-            throwError m!"line {{targetLine}} is outside {{declarationName}}"
-          logInfo "AUTOLEAN_AUDIT_{nonce}_DECLARATION_OK"
-          let statement ← liftTermElabM do
-            let info ← getConstInfo declarationName
-            return toString (← Lean.Meta.ppExpr info.type)
-          logInfo m!"AUTOLEAN_AUDIT_{nonce}_STATEMENT:{{statement.replace "\n" " "}}"
-          let axioms ← collectAxioms declarationName
-          for axiomName in axioms do
-            logInfo m!"AUTOLEAN_AUDIT_{nonce}_AXIOM:{{axiomName}}"
-          logInfo "AUTOLEAN_AUDIT_{nonce}_COMPLETE"
+          let candidateEnv ← liftIO <| importModules
+            #[{{ module := moduleName }}] {{}} (leakEnv := true) (loadExts := false)
+          withEnv candidateEnv do
+            let env ← getEnv
+            let declarationName := {_lean_string(declaration)}.toName
+            let targetLine : Nat := {target_line}
+            let some moduleIdx := env.getModuleIdx? moduleName
+              | throwError m!"candidate module {{moduleName}} is unavailable"
+            unless env.getModuleIdxFor? declarationName == some moduleIdx do
+              throwError m!"{{declarationName}} is not declared by {{moduleName}}"
+            let ranges? ← findDeclarationRangesCore? declarationName
+            let some ranges := ranges?
+              | throwError m!"source range unavailable for {{declarationName}}"
+            unless ranges.range.pos.line <= targetLine &&
+                targetLine <= ranges.range.endPos.line do
+              throwError m!"line {{targetLine}} is outside {{declarationName}}"
+            logInfo "AUTOLEAN_AUDIT_{nonce}_DECLARATION_OK"
+            let statement ← liftTermElabM do
+              let info ← getConstInfo declarationName
+              let type := @reprStr Expr instReprExpr info.type
+              let levels := info.levelParams.map fun level =>
+                Json.str (Std.Format.pretty (Name.reprPrec level 0))
+              return (Json.arr #[Json.arr levels.toArray, Json.str type]).compress
+            logInfo m!"AUTOLEAN_AUDIT_{nonce}_STATEMENT:{{statement}}"
+            let axioms ← collectAxioms declarationName
+            for axiomName in axioms do
+              logInfo m!"AUTOLEAN_AUDIT_{nonce}_AXIOM:{{axiomName}}"
+            logInfo "AUTOLEAN_AUDIT_{nonce}_COMPLETE"
         """
     )
 
@@ -319,12 +330,13 @@ def _parse_declaration_audit(output: str, nonce: str) -> tuple[tuple[str, ...], 
 
 
 def statement_digest(statement: str) -> str:
-    """Identify one elaborated statement independently of its layout.
+    """Hash the exact structural encoding of a declaration's type.
 
-    The pretty-printer chooses where to break lines, so the digest is taken
-    over the text with its spacing collapsed.
+    The encoding includes universe parameters, implicit arguments, and
+    literal contents. Its constructor representation uses Lean's explicit
+    core instance, so imported notation and instances cannot hide detail.
     """
-    return hashlib.sha256(" ".join(statement.split()).encode()).hexdigest()
+    return hashlib.sha256(b"autolean-statement-v2\0" + statement.encode()).hexdigest()
 
 
 def _apply_statement_policy(
@@ -482,7 +494,7 @@ def _run_lean_check(
     cmd: list[str],
     *,
     cwd: Path,
-    timeout: int,
+    timeout: float,
     env: dict[str, str] | None = None,
 ) -> BuildResult:
     """Run one Lean check and normalize process and diagnostic failures."""
@@ -704,6 +716,7 @@ class LeanProject:
                 )
             except LeanSandboxError as error:
                 return BuildResult(success=False, stderr=str(error))
+            deadline = time.monotonic() + timeout
             candidate = _run_lean_check(
                 candidate_cmd,
                 cwd=scratch,
@@ -722,10 +735,18 @@ class LeanProject:
                 )
             except LeanSandboxError as error:
                 return BuildResult(success=False, stderr=str(error))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return replace(
+                    candidate,
+                    success=False,
+                    timed_out=True,
+                    stderr=f"Build timed out after {timeout}s",
+                )
             audit = _run_lean_check(
                 audit_cmd,
                 cwd=scratch,
-                timeout=timeout,
+                timeout=remaining,
                 env=audit_env,
             )
             audit = replace(
@@ -762,10 +783,11 @@ class LeanProject:
     ) -> BuildResult:
         """Validate generated source without changing the project tree.
 
+        Candidate compilation and declaration auditing share one timeout.
         A declaration name and source line bind the axiom audit to the exact
         declaration accepted by Lean. Supplying an environment identity
-        compares the proof closure after elaboration with the expected value,
-        so a closure change before or during elaboration fails closed.
+        pins the closure before elaboration and requires its artifact
+        fingerprint to remain unchanged until validation finishes.
 
         A caller that rewrites source around a proof supplies the statement
         digest it started from; a candidate proving anything else is
@@ -778,6 +800,12 @@ class LeanProject:
                 success=False,
                 stderr="declaration audits require both a name and source line",
             )
+        fingerprint = None
+        if expected_environment is not None:
+            mismatch = self._environment_mismatch(expected_environment)
+            if mismatch is not None:
+                return mismatch
+            fingerprint = self._environment_fingerprint
         if declaration is None:
             result = self._check_untrusted_content(content, timeout)
         else:
@@ -797,6 +825,11 @@ class LeanProject:
             mismatch = self._environment_mismatch(expected_environment)
             if mismatch is not None:
                 return mismatch
+            if self._environment_fingerprint != fingerprint:
+                return BuildResult(
+                    success=False,
+                    stderr="proof environment changed during validation: artifact fingerprint differs",
+                )
         return result
 
     def accept_candidate(
@@ -979,24 +1012,17 @@ class LeanProject:
         subpath_rules = "\n".join(
             f"    (subpath {_sandbox_quote(path.resolve())})" for path in read_subpaths if path.exists()
         )
+        # Process startup requires the root directory itself to be readable.
         return (
             "(version 1)\n"
             "(deny default)\n"
-            "(allow process*)\n"
-            "(allow signal)\n"
+            f"(allow process-exec (literal {_sandbox_quote(lean)}))\n"
+            "(allow signal (target self))\n"
             "(allow sysctl-read)\n"
             "(allow mach-lookup)\n"
             "(allow file-read-metadata)\n"
-            "(allow file-read*)\n"
-            "(deny file-read*\n"
-            '    (subpath "/Users")\n'
-            '    (subpath "/home")\n'
-            '    (subpath "/root")\n'
-            '    (subpath "/Volumes")\n'
-            '    (subpath "/tmp")\n'
-            '    (subpath "/private/tmp")\n'
-            '    (subpath "/private/var/folders"))\n'
             "(allow file-read*\n"
+            '    (literal "/")\n'
             f"{subpath_rules})\n"
             "(allow file-write*\n"
             f"    (subpath {_sandbox_quote(scratch)}))\n"

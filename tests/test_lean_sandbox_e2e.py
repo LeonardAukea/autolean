@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -13,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from autolean.lean_interface import CORE_LOGICAL_AXIOMS, LeanProject
+from autolean.process import run_process
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AUTOLEAN_RUN_SANDBOX_E2E") != "1",
@@ -102,6 +105,89 @@ example : True := by
     assert source.read_bytes() == original
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS read containment")
+def test_macos_sandbox_denies_application_content(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    outside = Path("/Applications/Google Chrome.app/Contents/Info.plist")
+    if not outside.is_file():
+        pytest.skip("the public application metadata fixture is absent")
+    project, source = project_and_source
+    candidate = f"""\
+import Lean
+
+example : True := by
+  run_tac do
+    let readable ← try
+      let _ ← IO.FS.readFile "{outside}"
+      pure true
+    catch _ =>
+      pure false
+    if readable then
+      throwError "application content crossed the sandbox"
+  exact True.intro
+"""
+    result = project.validate_candidate(source, candidate)
+
+    assert result.success, result.stderr or result.errors
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS process containment")
+def test_macos_sandbox_denies_child_processes(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    project, source = project_and_source
+    candidate = f"""\
+import Lean
+
+example : True := by
+  run_tac do
+    let child? ← try
+      pure (some (← IO.Process.spawn {{
+        cmd := "{project._resolved_lean()}"
+        args := #["--version"]
+      }}))
+    catch _ =>
+      pure none
+    if let some child := child? then
+      let _ ← child.wait
+      throwError "sandbox created a child process"
+  exact True.intro
+"""
+    result = project.validate_candidate(source, candidate)
+
+    assert result.success, result.stderr or result.errors
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS signal containment")
+def test_macos_sandbox_denies_signals_to_the_host(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    project, _ = project_and_source
+    interpreter = Path(sys.executable).resolve()
+    with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        scratch = Path(directory)
+        profile = scratch / "profile.sb"
+        profile.write_text(project._macos_sandbox_profile(interpreter, scratch))
+        result = run_process(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile),
+                str(interpreter),
+                "-I",
+                "-S",
+                "-c",
+                f"import os\ntry:\n os.kill({os.getpid()}, 0)\n"
+                "except PermissionError:\n pass\n"
+                "else:\n raise RuntimeError('sandbox signaled its host')\n",
+            ],
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.send_response(200)
@@ -128,11 +214,15 @@ import Lean
 
 example : True := by
   run_tac do
-    let output ← IO.Process.output {{
-      cmd := "{curl}"
-      args := #["--silent", "--fail", "--max-time", "2", "{url}"]
-    }}
-    if output.exitCode == 0 then
+    let connected ← try
+      let output ← IO.Process.output {{
+        cmd := "{curl}"
+        args := #["--silent", "--fail", "--max-time", "2", "{url}"]
+      }}
+      pure (output.exitCode == 0)
+    catch _ =>
+      pure false
+    if connected then
       throwError "network crossed the sandbox"
   exact True.intro
 """
@@ -263,6 +353,142 @@ theorem bounded (a b : Nat) (h : b <= a) :
     assert rewritten_proof.success, "a different proof of the same statement must still pass"
 
 
+@pytest.mark.parametrize(
+    ("original", "changed"),
+    [
+        ("(0 : Nat) = 0", "(0 : Int) = 0"),
+        ('("a b" : String) = "a b"', '("a  b" : String) = "a  b"'),
+    ],
+)
+def test_statement_identity_preserves_implicit_types_and_literals(
+    project_and_source: tuple[LeanProject, Path],
+    original: str,
+    changed: str,
+) -> None:
+    project, source = project_and_source
+    baseline = project.validate_candidate(
+        source,
+        f"theorem target : {original} := rfl\n",
+        declaration="target",
+        declaration_line=1,
+    )
+    assert baseline.success
+
+    candidate = project.validate_candidate(
+        source,
+        f"theorem target : {changed} := rfl\n",
+        declaration="target",
+        declaration_line=1,
+        expected_statement=baseline.statement_sha256,
+    )
+
+    assert not candidate.success
+    assert candidate.statement_sha256 != baseline.statement_sha256
+    assert "no longer states" in candidate.errors[0].message
+
+
+@pytest.mark.parametrize(
+    "instance",
+    [
+        'instance (priority := 2000) : Repr Lean.Expr where\n  reprPrec _ _ := "concealed"\n',
+        "instance (priority := 2000) : Lean.ToMessageData String where\n"
+        "  toMessageData s := Lean.MessageData.ofFormat (Std.Format.text\n"
+        '    (if s.startsWith "[" then "concealed" else s))\n',
+    ],
+)
+def test_statement_identity_uses_trusted_audit_instances(
+    project_and_source: tuple[LeanProject, Path],
+    instance: str,
+) -> None:
+    project, source = project_and_source
+    prefix = "import Lean\n" + instance
+    declaration_line = prefix.count("\n") + 1
+    baseline = project.validate_candidate(
+        source,
+        prefix + "theorem target : (0 : Nat) = 0 := rfl\n",
+        declaration="target",
+        declaration_line=declaration_line,
+    )
+    assert baseline.success
+
+    candidate = project.validate_candidate(
+        source,
+        prefix + "theorem target : (0 : Int) = 0 := rfl\n",
+        declaration="target",
+        declaration_line=declaration_line,
+        expected_statement=baseline.statement_sha256,
+    )
+
+    assert not candidate.success
+    assert candidate.statement_sha256 != baseline.statement_sha256
+
+
+def test_axiom_audit_uses_trusted_message_instances(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    from autolean.generated_code import validate_generated_declarations
+
+    project, source = project_and_source
+    declarations = """\
+theorem unproved : False := by sorry
+instance (priority := 2000) : Lean.ToMessageData Lean.Name where
+  toMessageData _ := Lean.MessageData.ofFormat (Std.Format.text "propext")
+theorem target : False := unproved
+"""
+    validate_generated_declarations(declarations)
+
+    result = project.validate_candidate(
+        source,
+        "import Lean\n" + declarations,
+        declaration="target",
+        declaration_line=5,
+    )
+
+    assert not result.success
+    assert result.axioms == ("sorryAx",)
+    assert "disallowed axioms" in result.errors[0].message
+
+
+def test_axiom_audit_does_not_execute_candidate_initializers(
+    project_and_source: tuple[LeanProject, Path],
+) -> None:
+    from autolean.generated_code import validate_generated_declarations
+
+    project, source = project_and_source
+    declarations = """\
+open IO
+open Process
+
+@[init] def forgeAudit : IO Unit := do
+  let directory := (← currentDir) / "AutoLeanInternal"
+  if !(← directory.pathExists) then return
+  for entry in ← directory.readDir do
+    if entry.fileName.startsWith "Audit_" && entry.fileName.endsWith ".lean" then
+      let nonce := entry.fileName.drop 6 |>.dropEnd 5 |>.copy
+      let stream ← getStdout
+      stream.putStrLn s!"AUTOLEAN_AUDIT_{nonce}_DECLARATION_OK"
+      stream.putStrLn s!"AUTOLEAN_AUDIT_{nonce}_STATEMENT:forged"
+      stream.putStrLn s!"AUTOLEAN_AUDIT_{nonce}_COMPLETE"
+      stream.flush
+      exit 0
+
+theorem target : False := by sorry
+"""
+    validate_generated_declarations(declarations)
+    candidate = "import Lean\n" + declarations
+
+    result = project.validate_candidate(
+        source,
+        candidate,
+        declaration="target",
+        declaration_line=candidate.count("\n"),
+    )
+
+    assert not result.success
+    assert result.axioms == ("sorryAx",)
+    assert "STATEMENT:forged" not in result.stdout
+
+
 def test_pythagorean_formalization_and_proof_reach_isolated_lean(
     project_and_source: tuple[LeanProject, Path],
 ) -> None:
@@ -375,6 +601,7 @@ def test_reviewed_ionescu_tulcea_inventory_reaches_isolated_lean(
         pdf_path=None,
         input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
         text_sha256="0" * 64,
+        markdown_sha256="0" * 64,
         pdf_sha256=IONESCU_TULCEA_V5.pdf_sha256,
     )
     profile = bind_reviewed_paper(claims, artifact)
