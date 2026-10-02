@@ -13,6 +13,7 @@ from autolean.export import (
     PaperBundle,
     _latex_escape,
     _latex_identifier,
+    _plan_latex,
     _plan_record,
     export_project,
     paper_bundle_from_artifacts,
@@ -43,6 +44,7 @@ def _write_plan(
     source_sha256: str,
     text_sha256: str,
     pdf_sha256: str,
+    markdown_sha256: str = "",
 ) -> tuple[ProofPlan, str]:
     payload: dict[str, object] = {
         "objective": "Audit every reviewed mapping.",
@@ -89,6 +91,7 @@ def _write_plan(
                 "inference_location": "remote",
                 "model": "opus",
                 "pdf_sha256": pdf_sha256,
+                "markdown_sha256": markdown_sha256,
                 "plan": plan.as_dict(),
                 "plan_sha256": plan.sha256,
                 "responses": responses,
@@ -213,8 +216,55 @@ def test_session_export_contains_only_the_target_import_closure(tmp_path: Path) 
     assert not (project / "AutoLean" / "Generated" / "Stale.lean").exists()
 
 
-def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path) -> None:
+def test_session_export_preserves_an_imported_library_root(tmp_path: Path) -> None:
     root = _project(tmp_path)
+    library_source = "def library_value := 7\n"
+    (root / "AutoLean.lean").write_text(library_source)
+    (root / "AutoLean" / "Proof.lean").write_text(
+        "import AutoLean\ntheorem proof : library_value = 7 := rfl\n"
+    )
+    destination = tmp_path / "artifact"
+
+    with pytest.raises(ExportError, match=r"imported AutoLean\.lean root"):
+        export_project(
+            root,
+            destination,
+            title="Proof",
+            session={"target_file": "AutoLean/Proof.lean"},
+        )
+
+    assert (root / "AutoLean.lean").read_text() == library_source
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "import AutoLean.Helper -- AutoLean.Secret\n",
+        "/- import AutoLean.Secret -/\nimport /- note -/\n  AutoLean.Helper\n",
+        "module\npublic import AutoLean.Helper\n",
+        "module\nmeta import AutoLean.Helper\n",
+        "module\nimport all AutoLean.Helper\n",
+    ],
+)
+def test_session_import_closure_uses_only_module_directives(tmp_path: Path, directive: str) -> None:
+    root = _project(tmp_path)
+    (root / "AutoLean" / "Helper.lean").write_text("def helper := 1\n")
+    (root / "AutoLean" / "Secret.lean").write_text("def private_data := 7\n")
+    (root / "AutoLean" / "Proof.lean").write_text(directive + "theorem proof : True := by trivial\n")
+
+    result = export_project(
+        root,
+        tmp_path / "artifact",
+        title="Scoped proof",
+        session={"target_file": "AutoLean/Proof.lean"},
+    )
+
+    assert (result.path / "project" / "AutoLean" / "Helper.lean").is_file()
+    assert not (result.path / "project" / "AutoLean" / "Secret.lean").exists()
+
+
+def _paper_bundle(root: Path) -> PaperBundle:
     source = root / "AutoLean" / "Papers" / "paper.md"
     source.parent.mkdir()
     source.write_text("# Ionescu-Tulcea\n", encoding="utf-8")
@@ -229,12 +279,14 @@ def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path)
     source_sha256 = "a" * 64
     text_sha256 = "d" * 64
     pdf_sha256 = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    markdown_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
     plan = source.with_name("plan.json")
     parsed_plan, trace_sha256 = _write_plan(
         plan,
         source_sha256=source_sha256,
         text_sha256=text_sha256,
         pdf_sha256=pdf_sha256,
+        markdown_sha256=markdown_sha256,
     )
     coverage = source.with_name("coverage.json")
     coverage.write_text(
@@ -258,6 +310,7 @@ def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path)
                     "success": True,
                 },
                 "pdf_sha256": pdf_sha256,
+                "markdown_sha256": markdown_sha256,
                 "plan_artifact_sha256": hashlib.sha256(plan.read_bytes()).hexdigest(),
                 "plan_sha256": parsed_plan.sha256,
                 "plan_trace_sha256": trace_sha256,
@@ -277,6 +330,12 @@ def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path)
     )
     bundle = paper_bundle_from_artifacts((coverage, pdf, source, plan))
     assert bundle == PaperBundle(source, coverage, pdf, plan)
+    return bundle
+
+
+def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    bundle = _paper_bundle(root)
 
     destination = tmp_path / "paper-artifact"
     export_project(
@@ -287,10 +346,11 @@ def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path)
         paper_bundle=bundle,
     )
 
-    assert (destination / "source" / "paper.md").read_bytes() == source.read_bytes()
-    assert (destination / "source" / "paper.pdf").read_bytes() == pdf.read_bytes()
-    assert (destination / "source" / "coverage.json").read_bytes() == coverage.read_bytes()
-    assert (destination / "source" / "plan.json").read_bytes() == plan.read_bytes()
+    assert (destination / "source" / "paper.md").read_bytes() == bundle.markdown_path.read_bytes()
+    assert bundle.pdf_path is not None
+    assert (destination / "source" / "paper.pdf").read_bytes() == bundle.pdf_path.read_bytes()
+    assert (destination / "source" / "coverage.json").read_bytes() == bundle.coverage_path.read_bytes()
+    assert (destination / "source" / "plan.json").read_bytes() == bundle.plan_path.read_bytes()
     latex = (destination / "paper" / "main.tex").read_text(encoding="utf-8")
     assert "2506.18616v5" in latex
     assert "Theorem 2.11" in latex
@@ -298,6 +358,54 @@ def test_paper_export_preserves_inputs_and_renders_item_coverage(tmp_path: Path)
     assert "Compile closed aliases" in latex
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["paper_profile"]["arxiv_id"] == "2506.18616v5"
+
+
+def test_paper_export_rejects_changed_markdown(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    bundle = _paper_bundle(root)
+    bundle.markdown_path.write_text("# Different source\n")
+    destination = tmp_path / "artifact"
+
+    with pytest.raises(ExportError, match="Markdown SHA-256"):
+        export_project(root, destination, title="Proof", paper_bundle=bundle)
+
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_paper_export_checks_the_copied_lean_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autolean import export
+
+    root = _project(tmp_path)
+    bundle = _paper_bundle(root)
+    evidence = root / "AutoLean" / "PaperEvidence.lean"
+    copyfile = export.shutil.copyfile
+
+    def copy_after_source_change(source: Path, destination: Path) -> Path:
+        if source == evidence:
+            source.write_text(source.read_text() + "-- concurrent editor save\n")
+        return copyfile(source, destination)
+
+    monkeypatch.setattr(export.shutil, "copyfile", copy_after_source_change)
+    destination = tmp_path / "artifact"
+
+    with pytest.raises(ExportError, match="module SHA-256"):
+        export_project(root, destination, title="Proof", paper_bundle=bundle)
+
+    assert not destination.exists()
+
+
+def test_an_export_without_lean_sources_leaves_no_artifact(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / "AutoLean" / "Proof.lean").unlink()
+    destination = tmp_path / "artifact"
+
+    with pytest.raises(ExportError):
+        export_project(root, destination, title="Empty")
+
+    assert not destination.exists()
 
 
 def test_paper_plan_rejects_a_normalized_plan_that_differs_from_raw_response(
@@ -316,6 +424,39 @@ def test_paper_plan_rejects_a_normalized_plan_that_differs_from_raw_response(
 
     with pytest.raises(ExportError, match="differs from its accepted response"):
         _plan_record(plan_path)
+
+
+def test_companion_paper_retains_formalization_premises_and_reductions(tmp_path: Path) -> None:
+    from autolean.llm import InferenceLocation
+    from autolean.paper import PaperDocument, materialize_paper
+    from autolean.paper_evidence import write_paper_plan
+    from autolean.strategy import PlanAttempt
+
+    artifact = materialize_paper(PaperDocument(title="Fixture", text="A theorem."), tmp_path)
+    plan = ProofPlan(
+        objective="Check the selected statement.",
+        formalization=("Quantify over every finite group G.",),
+        premises=("Assume the action is faithful.",),
+        reductions=("Reduce to the kernel of the action.",),
+        revision_triggers=("Revise the statement if the action has a nontrivial kernel.",),
+    )
+    response = PlanAttempt(1, (), plan.to_json(), "fixture", 10, 20, 0.5)
+    path = write_paper_plan(
+        artifact,
+        plan,
+        model="fixture",
+        backend="openai",
+        location=InferenceLocation.REMOTE,
+        responses=(response,),
+    )
+
+    latex = _plan_latex(path)
+
+    assert "Quantify over every finite group G." in latex
+    assert "Assume the action is faithful." in latex
+    assert "Reduce to the kernel of the action." in latex
+    assert "Revise the statement if the action has a nontrivial kernel." in latex
+    assert latex.index("Formalization") < latex.index("Reductions") < latex.index("Premises")
 
 
 def test_latex_escape_handles_control_characters_without_reprocessing() -> None:
