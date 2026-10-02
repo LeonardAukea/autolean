@@ -22,6 +22,14 @@ Each row identifies a target attempt, candidate, outcome, Lean diagnostic,
 model, prompt context, proof environment, and strategy-response hash. Rows are
 append-only evidence for `autolean results`, resume logic, and training export.
 
+`llm_input_tokens` and `llm_tokens` record the final candidate or definition
+response. `attempt_input_tokens`, `attempt_output_tokens`, and
+`attempt_model_calls` cover every planning, repair, proof, and definition call
+within that attempt. Failed calls count toward the call total but contribute
+no unreported token usage. Empty attempt fields mean accounting is unavailable
+for that record. Session token totals sum input and output usage across all
+returned responses.
+
 ## Activity journal
 
 Schema: `autolean.progress.v1`

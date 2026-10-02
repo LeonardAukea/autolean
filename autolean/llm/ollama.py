@@ -35,16 +35,22 @@ class OllamaClient(HttpBackend):
             resp.raise_for_status()
             body = as_object(resp.json(), "Ollama model-list response")
             models = as_list(body.get("models"), "Ollama models")
-            installed = [
-                as_text(as_object(model, "Ollama model").get("name"), "Ollama model name") for model in models
-            ]
+            entries = [as_object(model, "Ollama model") for model in models]
+            installed = [as_text(model.get("name"), "Ollama model name") for model in entries]
         except (httpx.HTTPError, ValueError, LLMError) as e:
             console.print(f"[red]Ollama unreachable:[/] {e}")
             return False
 
         target = self.config.model
-        if any(m == target or m.startswith(f"{target}:") or target.startswith(m) for m in installed):
-            return True
+        for entry, name in zip(entries, installed, strict=True):
+            if _canonical_model_name(name) == _canonical_model_name(target):
+                if (
+                    self.config.model_revision is not None
+                    and entry.get("digest") != self.config.model_revision
+                ):
+                    console.print("[red]Ollama model digest differs from the configured revision.[/]")
+                    return False
+                return True
         console.print(
             f"[yellow]Warning:[/] model '{target}' not pulled. Available: {', '.join(installed) or '(none)'}"
         )
@@ -64,6 +70,8 @@ class OllamaClient(HttpBackend):
             options["temperature"] = temp
         if stop:
             options["stop"] = stop
+        if self.config.seed is not None:
+            options["seed"] = self.config.seed
 
         payload: dict[str, object] = {
             "model": self.config.model,
@@ -91,6 +99,11 @@ class OllamaClient(HttpBackend):
             output_tokens=token_count(data.get("eval_count")),
             duration_seconds=elapsed,
         )
+
+
+def _canonical_model_name(name: str) -> str:
+    """Resolve Ollama's implicit latest tag while preserving explicit tags."""
+    return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
 
 
 def probe_installed_models(base_url: str = DEFAULT_OLLAMA_URL) -> set[str]:

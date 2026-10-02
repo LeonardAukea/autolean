@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Compare AutoLean and plain prompting under recorded case, model, and call
+  budgets; account for planning and repair usage in attempt totals.
+- Preserve configured sampling temperatures and pin Ollama preflight checks
+  to the requested model tag and optional digest.
+
 - Audit declaration types and axioms through trusted code with candidate
   initializers disabled; bind validation to one deadline and stable artifacts.
 - Restrict macOS candidate execution, host signals, and file reads to the

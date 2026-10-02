@@ -90,6 +90,11 @@ class ExperimentRecord:
     backend: str = ""
     inference_location: InferenceLocation | None = None
     llm_input_tokens: int = 0
+    # Attempt totals include planning, repairs, and generated definitions.
+    # None marks a record whose complete request accounting is unavailable.
+    attempt_input_tokens: int | None = None
+    attempt_output_tokens: int | None = None
+    attempt_model_calls: int | None = None
     prompt_sha256: str = ""
     structural_context_sha256: str = ""
     search_context_sha256: str = ""
@@ -162,6 +167,12 @@ class ExperimentRecord:
             "experiment counts must be non-negative integers",
             minimum=0,
         )
+        for count in (self.attempt_input_tokens, self.attempt_output_tokens, self.attempt_model_calls):
+            require_optional_int(
+                count,
+                "experiment attempt counts must be non-negative integers",
+                minimum=0,
+            )
         require_numbers(
             (
                 self.duration_seconds,
@@ -211,6 +222,16 @@ class ExperimentRecord:
             source_after_sha256=sha256_text(after),
         )
 
+    @property
+    def total_input_tokens(self) -> int:
+        """Return reported input usage; legacy records cover one response."""
+        return self.llm_input_tokens if self.attempt_input_tokens is None else self.attempt_input_tokens
+
+    @property
+    def total_output_tokens(self) -> int:
+        """Return reported output usage; legacy records cover one response."""
+        return self.llm_tokens if self.attempt_output_tokens is None else self.attempt_output_tokens
+
     def as_dict(self) -> dict[str, str | int | float]:
         return {
             "cycle": self.cycle,
@@ -224,6 +245,9 @@ class ExperimentRecord:
             "duration_s": round(self.duration_seconds, 1),
             "llm_tokens": self.llm_tokens,
             "llm_input_tokens": self.llm_input_tokens,
+            "attempt_input_tokens": "" if self.attempt_input_tokens is None else self.attempt_input_tokens,
+            "attempt_output_tokens": "" if self.attempt_output_tokens is None else self.attempt_output_tokens,
+            "attempt_model_calls": "" if self.attempt_model_calls is None else self.attempt_model_calls,
             "llm_tok_s": round(self.llm_tok_per_sec, 1),
             "proof_lines": self.proof_length,
             "error_category": self.error_category,
@@ -262,6 +286,9 @@ TSV_FIELDS = [
     "duration_s",
     "llm_tokens",
     "llm_input_tokens",
+    "attempt_input_tokens",
+    "attempt_output_tokens",
+    "attempt_model_calls",
     "llm_tok_s",
     "proof_lines",
     "error_category",
@@ -692,8 +719,8 @@ class ExperimentTracker:
 
     def _add_token_metrics(self, metrics: Table, successes: int) -> None:
         """Add provider token accounting for the session."""
-        input_tokens = sum(record.llm_input_tokens for record in self.records)
-        output_tokens = sum(record.llm_tokens for record in self.records)
+        input_tokens = sum(record.total_input_tokens for record in self.records)
+        output_tokens = sum(record.total_output_tokens for record in self.records)
         if input_tokens:
             metrics.add_row("Input tokens", f"{input_tokens:,}")
         if output_tokens:

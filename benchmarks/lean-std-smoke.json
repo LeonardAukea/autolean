@@ -1,0 +1,40 @@
+{
+  "schema": "autolean-comparison-suite-v1",
+  "cases": [
+    {
+      "id": "nat-add-zero",
+      "declaration": "Comparison.nat_add_zero",
+      "source": "import Std\n\nnamespace Comparison\ntheorem nat_add_zero (n : Nat) : n + 0 = n := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "nat-lt-succ",
+      "declaration": "Comparison.nat_lt_succ",
+      "source": "import Std\n\nnamespace Comparison\ntheorem nat_lt_succ (n : Nat) : n < n + 1 := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "list-append-nil",
+      "declaration": "Comparison.list_append_nil",
+      "source": "import Std\n\nnamespace Comparison\ntheorem list_append_nil {α : Type} (xs : List α) : xs ++ [] = xs := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "list-reverse-reverse",
+      "declaration": "Comparison.list_reverse_reverse",
+      "source": "import Std\n\nnamespace Comparison\ntheorem list_reverse_reverse {α : Type} (xs : List α) : xs.reverse.reverse = xs := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "and-elim",
+      "declaration": "Comparison.and_elim",
+      "source": "import Std\n\nnamespace Comparison\ntheorem and_elim {P Q : Prop} (h : P ∧ Q) : Q := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "tally-induction",
+      "declaration": "Comparison.tally_eq",
+      "source": "import Std\n\nnamespace Comparison\ndef tally : Nat → Nat\n  | 0 => 0\n  | n + 1 => tally n + 1\n\ntheorem tally_eq (n : Nat) : tally n = n := by\n  sorry\nend Comparison\n"
+    },
+    {
+      "id": "false-control",
+      "declaration": "Comparison.false_goal",
+      "source": "import Std\n\nnamespace Comparison\ntheorem false_goal : False := by\n  sorry\nend Comparison\n"
+    }
+  ]
+}

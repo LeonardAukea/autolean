@@ -192,6 +192,9 @@ class TestTrackerTsvLogging:
             "axioms",
             "model",
             "backend",
+            "attempt_input_tokens",
+            "attempt_output_tokens",
+            "attempt_model_calls",
         }
         old_fields = [field for field in TSV_FIELDS if field not in new_fields]
         old_row = {field: "" for field in old_fields}
@@ -210,6 +213,9 @@ class TestTrackerTsvLogging:
         assert rows[0]["decl_name"] == "old"
         assert rows[0]["environment_sha256"] == ""
         assert rows[0]["model"] == ""
+        assert rows[0]["attempt_input_tokens"] == ""
+        assert rows[0]["attempt_output_tokens"] == ""
+        assert rows[0]["attempt_model_calls"] == ""
         assert rows[1]["proof_sha256"] == ""
 
 
