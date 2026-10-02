@@ -601,7 +601,6 @@ def test_reviewed_ionescu_tulcea_inventory_reaches_isolated_lean(
         pdf_path=None,
         input_sha256=IONESCU_TULCEA_V5.pdf_sha256,
         text_sha256="0" * 64,
-        markdown_sha256="0" * 64,
         pdf_sha256=IONESCU_TULCEA_V5.pdf_sha256,
     )
     profile = bind_reviewed_paper(claims, artifact)
