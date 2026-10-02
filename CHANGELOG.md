@@ -6,6 +6,7 @@ notes live in [GitHub Releases].
 
 ## 0.6.0
 
+- Stop workbench progress refreshes when their view is removed.
 - Clarify tutorials, proof and paper evidence, operating guidance, and the
   documentation's four Diátaxis homes.
 - Bind paper plans, coverage, and exports to exact Markdown bytes; preserve
