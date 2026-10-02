@@ -81,6 +81,34 @@ def test_workbench_preserves_automatic_machine_selection(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
+def test_progress_refresh_ends_when_its_view_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        app = AutoLeanWorkbench(WorkbenchSession.load(_program(tmp_path)))
+        refreshed = asyncio.Event()
+        updates = 0
+        refresh = app._update_run_progress
+
+        def observe_refresh() -> None:
+            nonlocal updates
+            updates += 1
+            refreshed.set()
+            refresh()
+
+        monkeypatch.setattr(app, "_update_run_progress", observe_refresh)
+        async with app.run_test():
+            await asyncio.wait_for(refreshed.wait(), 10)
+            await app.query_one("#run-progress", Static).remove()
+            stopped_at = updates
+            elapsed = asyncio.Event()
+            app.set_timer(1.1, elapsed.set)
+            await asyncio.wait_for(elapsed.wait(), 10)
+            assert updates == stopped_at
+
+    asyncio.run(exercise())
+
+
 def test_session_program_and_commands_share_the_cli_contract(tmp_path: Path) -> None:
     session = WorkbenchSession.load(_program(tmp_path))
     settings = WorkbenchSettings(

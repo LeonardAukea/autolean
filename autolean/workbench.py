@@ -722,7 +722,8 @@ class AutoLeanWorkbench(App[None]):
     def on_mount(self) -> None:
         self._show_targets(self.session.targets)
         self._update_model_details()
-        self.set_interval(1, self._update_run_progress)
+        # Refreshes end before the progress view leaves the DOM.
+        self.query_one("#run-progress", Static).set_interval(1, self._update_run_progress)
 
     def on_unmount(self) -> None:
         self._temporary_directory.cleanup()
