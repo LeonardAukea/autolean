@@ -20,7 +20,7 @@ class PaperScope(StrEnum):
 
 
 class PaperDeclarationKind(StrEnum):
-    """The Lean command used to bind a reviewed declaration."""
+    """The mathematical role assigned to a reviewed Lean declaration."""
 
     DEFINITION = "definition"
     THEOREM = "theorem"
@@ -64,7 +64,7 @@ class PaperItem:
 
 @dataclass(frozen=True)
 class PaperProfile:
-    """A provenance-bound inventory for one reviewed paper revision."""
+    """Reviewed item-to-declaration mappings for one exact paper revision."""
 
     id: str
     arxiv_id: str

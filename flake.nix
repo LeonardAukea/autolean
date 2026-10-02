@@ -375,7 +375,7 @@
           ++ lib.optionals pkgs.stdenv.isLinux [pkgs.bubblewrap];
         autolean = pythonPackages.buildPythonApplication {
           pname = "autolean";
-          version = "0.5.0";
+          version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
           pyproject = true;
           src = source;
 

@@ -1,7 +1,11 @@
 # Verify a paper
 
-`autolean verify` separates acquisition, formalization, and proof. Stop after
-each boundary when a human needs to review the result.
+`autolean verify` acquires a paper, extracts its mathematical items, and
+prepares Lean source. For ordinary papers it asks a model to formalize proof
+obligations. For an exact paper revision with a reviewed profile, it checks
+the profile's mappings to existing Lean declarations. The
+[coverage reference](../reference/research-artifacts.md#paper-coverage)
+defines what each result establishes.
 
 ## Extract the source
 
@@ -57,20 +61,23 @@ autolean verify paper.pdf --formalize-only
 
 Compare every generated declaration with the source. Check definitions,
 quantifiers, hypotheses, coercions, conventions, and the claimed conclusion.
-Edit the Lean statement until it is source-faithful.
+Edit the Lean statement until it expresses the source faithfully.
 
-Lean can prove a false rendition of the author's claim. Kernel acceptance
-settles the formal statement only; source fidelity is a separate review
-obligation.
+For example, omitting a hypothesis or reversing a quantifier can change the
+claim. A valid proof settles the resulting Lean statement; correspondence to
+the author's claim remains a mathematical review obligation.
 
 ## Attempt the reviewed claims
 
 ```bash
-autolean verify paper.pdf --max-cycles 5
+autolean solve --target DECLARATION_NAME --max-cycles 5
 ```
 
-Use `--output` to choose the Lean module. Use `--model` and `--provider` exactly
-as with `prove` and `solve`.
+Use the declaration name from the Lean source you reviewed. To run acquisition,
+formalization, and proof search together, use
+`autolean verify paper.pdf --max-cycles 5`. Use `--output` during verification
+to choose the Lean module. Model selection uses the shared `--model` and
+`--provider` options.
 
 Hosted Anthropic and OpenAI providers receive a native PDF containing only the
 selected pages and bounded, page-addressed Markdown. The coverage ledger

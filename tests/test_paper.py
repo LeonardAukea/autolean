@@ -72,6 +72,7 @@ def test_materialized_paper_preserves_exact_text_and_pdf(
 
     assert repeated == artifact
     assert artifact.text_sha256 == hashlib.sha256(text.encode()).hexdigest()
+    assert artifact.markdown_sha256 == hashlib.sha256(artifact.markdown_path.read_bytes()).hexdigest()
     assert artifact.pdf_path is not None
     assert artifact.pdf_path.read_bytes() == source.read_bytes()
     markdown = artifact.markdown_path.read_bytes().decode("utf-8")
@@ -124,11 +125,38 @@ def test_paper_plan_preserves_the_exact_model_response(tmp_path: Path) -> None:
     record = json.loads(path.read_text(encoding="utf-8"))
 
     assert record["schema"] == "autolean.paper-plan.v2"
+    assert record["markdown_sha256"] == artifact.markdown_sha256
     assert record["responses"][0]["response"] == raw_response
     assert record["responses"][0]["response_sha256"] == response.response_sha256
     assert record["inference_location"] == "remote"
     assert record["accepted_response_sha256"] == response.response_sha256
     assert len(record["trace_sha256"]) == 64
+
+    artifact.markdown_path.write_text("Altered paper text.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Markdown artifact differs"):
+        write_paper_plan(
+            artifact,
+            plan,
+            model="opus",
+            backend="claude_cli",
+            location=InferenceLocation.REMOTE,
+            responses=(response,),
+        )
+
+
+@pytest.mark.parametrize("replaced", ["Fixture", "A theorem."])
+def test_paper_coverage_rejects_changed_markdown(tmp_path: Path, replaced: str) -> None:
+    artifact = materialize_paper(
+        PaperDocument(title="Fixture", text="A theorem.", input_sha256="a" * 64),
+        tmp_path,
+    )
+    original = artifact.markdown_path.read_text(encoding="utf-8")
+    artifact.markdown_path.write_text(original.replace(replaced, "Altered"), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Markdown artifact differs"):
+        write_paper_coverage(artifact, [])
+
+    assert not list(artifact.markdown_path.parent.glob("*_coverage_*.json"))
 
 
 def test_paper_document_rejects_non_digest_identity() -> None:
@@ -276,6 +304,19 @@ def test_verification_renderer_revalidates_claim_source() -> None:
 
     with pytest.raises(GeneratedCodeError):
         render_verification_source([claim])
+
+
+def test_verification_comments_preserve_full_statement_and_sketch() -> None:
+    statement = "For every element " + "x in the selected finite set, " * 8 + "the bound holds only if P x."
+    sketch = "Apply the bound " + "with the stated hypotheses, " * 8 + "then use the final condition."
+    source = render_verification_source(
+        [Claim("Theorem 1", statement, proof_sketch=sketch)],
+    )
+
+    comments = " ".join(line.removeprefix("-- ") for line in source.splitlines() if line.startswith("-- "))
+    assert statement in comments
+    assert sketch in comments
+    assert all(len(line) <= 80 for line in source.splitlines() if line.startswith("-- "))
 
 
 def test_arxiv_identifier_preserves_explicit_version() -> None:
@@ -517,6 +558,7 @@ def test_reviewed_paper_binds_all_items_to_closed_lean_aliases(tmp_path: Path) -
         artifact.pdf_path,
         artifact.input_sha256,
         artifact.text_sha256,
+        artifact.markdown_sha256,
         IONESCU_TULCEA_V5.pdf_sha256,
     )
 
@@ -549,6 +591,7 @@ def test_reviewed_paper_coverage_records_elaborated_item_mappings(tmp_path: Path
         artifact.pdf_path,
         artifact.input_sha256,
         artifact.text_sha256,
+        artifact.markdown_sha256,
         IONESCU_TULCEA_V5.pdf_sha256,
     )
     profile = bind_reviewed_paper(claims, artifact)
@@ -569,6 +612,7 @@ def test_reviewed_paper_coverage_records_elaborated_item_mappings(tmp_path: Path
     record = json.loads(coverage.read_text(encoding="utf-8"))
 
     assert record["schema"] == "autolean.paper-coverage.v2"
+    assert record["markdown_sha256"] == artifact.markdown_sha256
     assert record["profile"]["id"] == IONESCU_TULCEA_V5.id
     assert record["total_items"] == 25
     assert record["elaborated_items"] == 25
@@ -594,6 +638,7 @@ def test_elaborated_paper_coverage_requires_lean_evidence(tmp_path: Path) -> Non
         artifact.pdf_path,
         artifact.input_sha256,
         artifact.text_sha256,
+        artifact.markdown_sha256,
         IONESCU_TULCEA_V5.pdf_sha256,
     )
     profile = bind_reviewed_paper(claims, artifact)
@@ -615,6 +660,7 @@ def test_reviewed_paper_rejects_an_incomplete_inventory(tmp_path: Path) -> None:
         artifact.pdf_path,
         artifact.input_sha256,
         artifact.text_sha256,
+        artifact.markdown_sha256,
         IONESCU_TULCEA_V5.pdf_sha256,
     )
 
@@ -789,7 +835,7 @@ def test_verification_source_records_extractor_input_identity() -> None:
     source = render_verification_source([claim])
 
     assert "Extractor input: https://arxiv.org/html/2604.07408v1" in source
-    assert f"Extractor input SHA-256: {'a' * 64}" in source
+    assert f"Extractor input SHA-256:\n{'a' * 64}" in source
 
 
 def test_html_claims_are_read_from_the_revision_the_pdf_pins(

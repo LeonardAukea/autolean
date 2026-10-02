@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from autolean.files import walk_files
+from autolean.scanner import _mask_lean_noncode
 
 EXPORT_SCHEMA = "autolean.project-export.v1"
 _PROJECT_FILES = {"lake-manifest.json", "lakefile.lean", "lakefile.toml", "lean-toolchain"}
@@ -134,11 +135,13 @@ def _lean_module(relative: Path) -> str:
 
 def _local_imports(root: Path, source: Path) -> tuple[Path, ...]:
     imports: list[Path] = []
-    for match in re.finditer(r"(?m)^[ \t]*import[ \t]+([^\n]+)", source.read_text(encoding="utf-8")):
-        for module in re.findall(r"[A-Za-z_][A-Za-z0-9_'.]*", match.group(1)):
-            candidate = root.joinpath(*module.split(".")).with_suffix(".lean")
-            if candidate.is_file():
-                imports.append(candidate)
+    code = _mask_lean_noncode(source.read_text(encoding="utf-8"))
+    module_name = r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*"
+    directive = rf"(?m)^[ \t]*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?({module_name})(?![\w'.])"
+    for match in re.finditer(directive, code):
+        candidate = root.joinpath(*match.group(1).split(".")).with_suffix(".lean")
+        if candidate.is_file():
+            imports.append(candidate)
     return tuple(imports)
 
 
@@ -196,6 +199,8 @@ def _write_session_root(project_output: Path, root: Path, source_roots: tuple[Pa
     relative_roots = tuple(source.resolve().relative_to(root) for source in source_roots)
     if Path("AutoLean.lean") in relative_roots:
         return
+    if (project_output / "AutoLean.lean").exists():
+        raise ExportError("session export cannot replace an imported AutoLean.lean root")
     imports = "".join(f"import {_lean_module(relative)}\n" for relative in relative_roots)
     (project_output / "AutoLean.lean").write_text(imports, encoding="utf-8")
 
@@ -335,6 +340,8 @@ def _validate_paper_bundle(
     """Check the links between source, model trace, ledger, and Lean result."""
     if not bundle.plan_path.is_file():
         raise ExportError("paper export requires its model plan")
+    if coverage.get("markdown_sha256") != _sha256(bundle.markdown_path):
+        raise ExportError("paper coverage Markdown SHA-256 does not match; regenerate the paper records")
     plan = _plan_record(bundle.plan_path)
     _validate_plan_links(bundle.plan_path, coverage, plan)
     _validate_paper_pdf(bundle.pdf_path, coverage)
@@ -353,7 +360,7 @@ def _validate_plan_links(
         raise ExportError("paper coverage plan SHA-256 does not match")
     if coverage.get("plan_trace_sha256") != plan.get("trace_sha256"):
         raise ExportError("paper coverage response trace SHA-256 does not match")
-    for field in ("source_sha256", "text_sha256", "pdf_sha256"):
+    for field in ("source_sha256", "text_sha256", "pdf_sha256", "markdown_sha256"):
         if coverage.get(field) != plan.get(field):
             raise ExportError(f"paper coverage {field.replace('_', ' ')} does not match its plan")
 
@@ -400,6 +407,8 @@ def _validate_lean_evidence(root: Path, coverage: dict[str, Any]) -> None:
 
 
 def _plan_latex(plan_path: Path | None) -> str:
+    from autolean.strategy import parse_proof_plan
+
     if plan_path is None:
         return ""
     if not plan_path.is_file():
@@ -409,7 +418,10 @@ def _plan_latex(plan_path: Path | None) -> str:
     if not isinstance(plan, dict):
         raise ExportError("paper plan has no strategy object")
     lines = [
-        "\\section*{Model-reviewed strategy}",
+        "\\section*{Recorded strategy}",
+        "The model proposed this plan. Its claims and completion criteria "
+        "describe intended work; the coverage ledger records completed "
+        "checks.\\par",
         f"\\noindent Plan SHA-256: \\texttt{{{_latex_escape(str(record.get('plan_sha256', '')))}}}\\par",
         f"\\noindent Response trace SHA-256: "
         f"\\texttt{{{_latex_escape(str(record.get('trace_sha256', '')))}}}\\par",
@@ -417,8 +429,7 @@ def _plan_latex(plan_path: Path | None) -> str:
         f"{_latex_escape(str(record.get('backend', '')))}\\par",
         f"\\paragraph{{Objective}} {_latex_escape(str(plan.get('objective', '')))}",
     ]
-    for field in ("methods", "completion_criteria", "risks", "checkpoints"):
-        items = plan.get(field, [])
+    for field, items in parse_proof_plan(json.dumps(plan)).as_dict().items():
         if not isinstance(items, list) or not items:
             continue
         heading = field.replace("_", " ").title()
@@ -449,7 +460,7 @@ def _coverage_latex(coverage: dict[str, Any] | None) -> str:
             )
         )
         rows.append(row + " \\\\")
-    title = _latex_escape(str(profile.get("title", "Reviewed paper")))
+    title = _latex_escape(str(profile.get("title", "Source paper")))
     arxiv_id = _latex_escape(str(profile.get("arxiv_id", "not recorded")))
     source_sha = _latex_escape(str(coverage.get("source_sha256", "not recorded")))
     pdf_sha = _latex_escape(str(coverage.get("pdf_sha256", "not recorded")))
@@ -464,6 +475,12 @@ def _coverage_latex(coverage: dict[str, Any] | None) -> str:
         f"\\noindent PDF SHA-256: \\texttt{{{pdf_sha}}}\\par\n"
         f"\\noindent Source archive SHA-256: \\texttt{{{archive_sha}}}\\par\n"
         f"\\noindent Coverage: {elaborated} of {total} numbered items elaborated.\\par\n"
+        "Elaborated items are aliases of declarations in the pinned Lean "
+        "environment. Their paper-to-Lean mappings are reviewed inputs; "
+        "compilation checks that the aliases resolve. Mathematical review "
+        "establishes whether each Lean type expresses its paper statement. "
+        "This coverage count records alias compilation; each declaration's "
+        "axiom dependencies require a separate audit.\\par\n"
         "\\section*{Item coverage}\n"
         "\\small\n"
         "\\begin{longtable}{"
@@ -472,7 +489,9 @@ def _coverage_latex(coverage: dict[str, Any] | None) -> str:
         ">{\\raggedright\\arraybackslash}p{0.10\\linewidth}"
         ">{\\raggedright\\arraybackslash}p{0.54\\linewidth}}\n"
         "\\textbf{Item} & \\textbf{Scope} & \\textbf{Status} & "
-        "\\textbf{Lean declarations} \\\\ \\hline\n" + "\n".join(rows) + "\n\\end{longtable}\n\\normalsize\n"
+        "\\textbf{Lean declarations} \\\\ \\hline\\endhead\n"
+        + "\n".join(rows)
+        + "\n\\end{longtable}\n\\normalsize\n"
     )
 
 
@@ -491,7 +510,7 @@ def _paper_source(
             + path
             + "}\n"
         )
-    environment = environment_sha256 or "not recorded"
+    environment = _latex_escape(environment_sha256 or "not recorded")
     return (
         "\\documentclass[11pt]{article}\n"
         "\\usepackage{fontspec}\n"
@@ -515,10 +534,14 @@ def _paper_source(
         "\\begin{document}\n"
         "\\maketitle\n"
         "\\section*{Verification contract}\n"
-        "This artifact contains a Lean source snapshot and pinned project "
-        "configuration. Build the project to check these exact source files. "
-        "The accompanying manifest binds every source file to its SHA-256 "
-        "digest.\\par\n"
+        "This document lists the Lean sources and recorded evidence in an "
+        "AutoLean export. Rebuild the project to check the listed sources "
+        "in its pinned configuration. A successful build may contain "
+        "\\texttt{sorry} placeholders; accepted-proof records and axiom "
+        "audits establish which declarations passed the proof policy. "
+        "The manifest records each included file's SHA-256 digest. "
+        "Agreement between an informal claim and its Lean statement "
+        "requires mathematical review.\\par\n"
         f"\\noindent Environment SHA-256: \\texttt{{{environment}}}\n"
         + _coverage_latex(coverage)
         + _plan_latex(plan_path)
@@ -535,18 +558,16 @@ def _readme(title: str, environment_sha256: str) -> str:
         "This directory is a standalone Lean project exported by AutoLean.\n\n"
         "Build the formal artifact with:\n\n"
         "```console\n"
-        "cd project\n"
-        "lake build\n"
+        "(cd project && lake build)\n"
         "```\n\n"
-        "Build the companion paper with a TeX distribution that provides "
-        "`fvextra`:\n\n"
+        "Build the companion paper with XeLaTeX, `latexmk`, `fvextra`, and\n"
+        "the DejaVu Sans and DejaVu Sans Mono fonts:\n\n"
         "```console\n"
-        "cd paper\n"
-        "latexmk -xelatex main.tex\n"
+        "(cd paper && latexmk -xelatex main.tex)\n"
         "```\n\n"
-        f"Proof environment SHA-256: `{environment}`.\n"
-        "Paper inputs and item-level coverage are under `source/` when the "
-        "export comes from a paper session. See `manifest.json` for exact "
+        f"Proof environment SHA-256:\n\n`{environment}`.\n\n"
+        "Paper inputs and item-level coverage are under `source/` when the\n"
+        "export comes from a paper session. See `manifest.json` for exact\n"
         "source identities.\n"
     )
 
@@ -651,8 +672,6 @@ def _write_export_documents(
         ),
         encoding="utf-8",
     )
-    if paper_bundle is not None:
-        _copy_paper_sources(staging, paper_bundle)
     (staging / "README.md").write_text(
         _readme(title, environment_sha256),
         encoding="utf-8",
@@ -712,10 +731,20 @@ def export_project(
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
     try:
+        if paper_bundle is not None:
+            _copy_paper_sources(staging, paper_bundle)
+            paper_bundle = PaperBundle(
+                staging / "source" / "paper.md",
+                staging / "source" / "coverage.json",
+                staging / "source" / "paper.pdf" if paper_bundle.pdf_path is not None else None,
+                staging / "source" / "plan.json",
+            )
         coverage = _coverage_record(paper_bundle)
-        if paper_bundle is not None and coverage is not None:
-            _validate_paper_bundle(root, paper_bundle, coverage)
         lean_files = _copy_project(root, staging / "project", session, coverage)
+        if not lean_files:
+            raise ExportError("project export contains no Lean source")
+        if paper_bundle is not None and coverage is not None:
+            _validate_paper_bundle(staging / "project", paper_bundle, coverage)
         _write_export_documents(
             staging,
             title=title,
