@@ -6,9 +6,9 @@ Proof acceptance is bound to source bytes and a complete Lean environment.
 
 The repository pins:
 
-- Lean 4.33.0
-- Mathlib 4.33.0
-- CSLib 4.33.0
+- Lean 4.34.1
+- Mathlib 4.34.1
+- CSLib 4.34.1
 - every transitive Lake dependency by Git commit
 - Tree-sitter runtime and Lean grammar artifacts by package version and hash
 
