@@ -135,6 +135,25 @@ class TestScanFile:
         assert target.decl_name == "«name with spaces»"
         assert target.qualified_decl_name == "Outer.«name with spaces»"
 
+    def test_masked_spans_preserve_the_original_target_position(self, tmp_path: Path) -> None:
+        source = tmp_path / "Positions.lean"
+        content = (
+            'def note := "sorry \\" /- --"\n'
+            "/- outer\n /- sorry -/ -/\n"
+            "theorem actual : True := by\n"
+            "  /- α🙂 -/ sorry\n"
+        )
+        source.write_text(content, encoding="utf-8")
+
+        (target,) = scan_file(source)
+
+        assert (target.decl_name, target.line, target.col) == ("actual", 5, 11)
+        assert content.splitlines()[target.line - 1][target.col :] == "sorry"
+
+    @pytest.mark.parametrize("prefix", ['"escaped \\" ', "/- outer /- inner -/ ", "-- "])
+    def test_unclosed_noncode_masks_the_remainder(self, prefix: str) -> None:
+        assert count_sorries(prefix + "sorry") == 0
+
     def test_attribute_prefixed_declaration_is_the_audit_target(self, tmp_path: Path) -> None:
         source = tmp_path / "Attributed.lean"
         source.write_text(

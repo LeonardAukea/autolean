@@ -187,6 +187,10 @@ def _find_enclosing_decl_details(
 
 # Match a sorry token in masked Lean source.
 _SORRY_RE = re.compile(r"\bsorry\b")
+_NONCODE_START_RE = re.compile(r'--|/-|"')
+_BLOCK_DELIMITER_RE = re.compile(r"/-|-/")
+_STRING_DELIMITER_RE = re.compile(r'\\[\s\S]|"')
+_NON_NEWLINE_RE = re.compile(r"[^\n]+")
 
 
 def _mask_lean_noncode(source: str) -> str:
@@ -195,84 +199,32 @@ def _mask_lean_noncode(source: str) -> str:
     Lean block comments nest. Keeping every source offset stable lets the
     scanner use positions from the masked text to edit the original bytes.
     """
-    result = list(source)
-    i = 0
-    block_depth = 0
-    in_string = False
-    line_comment = False
-
-    while i < len(source):
-        if line_comment:
-            i, line_comment = _mask_line_comment(source, result, i)
-            continue
-        if block_depth:
-            i, block_depth = _mask_block_comment(source, result, i, block_depth)
-            continue
-        if in_string:
-            i, in_string = _mask_string(source, result, i)
-            continue
-        i, block_depth, in_string, line_comment = _mask_code(source, result, i)
-
-    return "".join(result)
-
-
-def _mask_line_comment(source: str, result: list[str], index: int) -> tuple[int, bool]:
-    """Mask one character inside a line comment."""
-    if source[index] == "\n":
-        return index + 1, False
-    result[index] = " "
-    return index + 1, True
-
-
-def _mask_block_comment(
-    source: str,
-    result: list[str],
-    index: int,
-    depth: int,
-) -> tuple[int, int]:
-    """Mask one token inside a nested block comment."""
-    pair = source[index : index + 2]
-    if pair == "/-":
-        result[index] = result[index + 1] = " "
-        return index + 2, depth + 1
-    if pair == "-/":
-        result[index] = result[index + 1] = " "
-        return index + 2, depth - 1
-    if source[index] != "\n":
-        result[index] = " "
-    return index + 1, depth
-
-
-def _mask_string(source: str, result: list[str], index: int) -> tuple[int, bool]:
-    """Mask one token inside a Lean string literal."""
-    char = source[index]
-    if char == "\\" and index + 1 < len(source):
-        result[index] = " "
-        if source[index + 1] != "\n":
-            result[index + 1] = " "
-        return index + 2, True
-    if char != "\n":
-        result[index] = " "
-    return index + 1, char != '"'
-
-
-def _mask_code(
-    source: str,
-    result: list[str],
-    index: int,
-) -> tuple[int, int, bool, bool]:
-    """Advance through code or enter one non-code state."""
-    pair = source[index : index + 2]
-    if pair == "--":
-        result[index] = result[index + 1] = " "
-        return index + 2, 0, False, True
-    if pair == "/-":
-        result[index] = result[index + 1] = " "
-        return index + 2, 1, False, False
-    if source[index] == '"':
-        result[index] = " "
-        return index + 1, 0, True, False
-    return index + 1, 0, False, False
+    spans: list[str] = []
+    cursor = 0
+    while match := _NONCODE_START_RE.search(source, cursor):
+        start = match.start()
+        end = len(source)
+        if match.group() == "--":
+            newline = source.find("\n", match.end())
+            if newline >= 0:
+                end = newline
+        elif match.group() == "/-":
+            depth = 1
+            for delimiter in _BLOCK_DELIMITER_RE.finditer(source, match.end()):
+                depth += 1 if delimiter.group() == "/-" else -1
+                if depth == 0:
+                    end = delimiter.end()
+                    break
+        else:
+            for delimiter in _STRING_DELIMITER_RE.finditer(source, match.end()):
+                if delimiter.group() == '"':
+                    end = delimiter.end()
+                    break
+        spans.append(source[cursor:start])
+        spans.append(_NON_NEWLINE_RE.sub(lambda part: " " * len(part.group()), source[start:end]))
+        cursor = end
+    spans.append(source[cursor:])
+    return "".join(spans)
 
 
 def count_sorries(source: str) -> int:
