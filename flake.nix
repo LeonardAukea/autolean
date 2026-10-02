@@ -20,19 +20,19 @@
         pkgs = import nixpkgs {inherit system;};
         lib = pkgs.lib;
         pythonPackages = pkgs.python312Packages;
-        leanVersion = "4.33.0";
+        leanVersion = "4.34.1";
         leanAsset = builtins.getAttr system {
           aarch64-darwin = {
             platform = "darwin_aarch64";
-            hash = "sha256-21J0tmm+JwrwSLXk8eDOVx32dQ5BGVaz4eb8wgEkEMI=";
+            hash = "sha256-ZfIqTwR3OOx0JmezJH6Daobr8G6rwSZVw97gBjfjeGY=";
           };
           aarch64-linux = {
             platform = "linux_aarch64";
-            hash = "sha256-+WGkF8uhC26gqdE2cS1ZUoE4F//WaABB8JojNSb4A6k=";
+            hash = "sha256-/bl0ws20Yn4JDV1AB7kT4J0TxIaHIPtVlOIoCLPenjc=";
           };
           x86_64-linux = {
             platform = "linux";
-            hash = "sha256-Sz+wPCmh4KJT+x0R+brjcl8ZoNxvwJs+oW0snfM0niw=";
+            hash = "sha256-R79LvXj3DC6WcFmKtxJNkrbvtzMP8z5fu0Aw9v1y5OQ=";
           };
         };
         leanArchive = "lean-${leanVersion}-${leanAsset.platform}.tar.zst";
@@ -68,19 +68,19 @@
             mainProgram = "lean";
           };
         };
-        lightpandaVersion = "0.3.6";
+        lightpandaVersion = "0.4.1";
         lightpandaAsset = builtins.getAttr system {
           aarch64-darwin = {
             name = "lightpanda-aarch64-macos";
-            hash = "sha256-M1aJNNN02vkBK5vghH/YKpndnxyy8vk7t4PMeKlsmaw=";
+            hash = "sha256-meZ3Oe2M9bmFr3y/p8drK6slexcbLa0hEJvXS087tRA=";
           };
           aarch64-linux = {
             name = "lightpanda-aarch64-linux";
-            hash = "sha256-KcBZzQdVoZU1DMedvPfulYD9V17D6qMdt1XbraQX5hY=";
+            hash = "sha256-Zkd1x/WracwxiZVMf5NF4lwWfLTazgFhc+Yp+aXoLEI=";
           };
           x86_64-linux = {
             name = "lightpanda-x86_64-linux";
-            hash = "sha256-5DjArUTg9pFsFM8TvrADUSxgQ42P0gBzjS5ZbnP2UtY=";
+            hash = "sha256-HUCAHnLAvGGyy9PzVivPxG3nt54FaPM/aGtk8uWHYQo=";
           };
         };
         lightpanda = pkgs.stdenv.mkDerivation {
@@ -110,19 +110,19 @@
             mainProgram = "lightpanda";
           };
         };
-        codedbVersion = "0.2.5838";
+        codedbVersion = "0.2.5860";
         codedbAsset = builtins.getAttr system {
           aarch64-darwin = {
             name = "codedb-darwin-arm64";
-            hash = "sha256-W6BULl8rsdUBZaM/giSFlEuj+cCZR0IwtX5xOQT7mEc=";
+            hash = "sha256-/YVooL2ctzWDzyC28KgXzvRHlbJQqYORQZ73yASfdRg=";
           };
           aarch64-linux = {
             name = "codedb-linux-arm64";
-            hash = "sha256-tp4n3Pxqm3mmdD7wfR4uOjHNcR1qa6MceJOij5lIdek=";
+            hash = "sha256-6UrFJ01VRWUuy4iZ7yeXp8Kibe1jbKOnMCA0JqsZTG8=";
           };
           x86_64-linux = {
             name = "codedb-linux-x86_64";
-            hash = "sha256-2/Lk9MBhyRCh/yIo6ZMXAV2GqU52tLDya28vGfgfPYE=";
+            hash = "sha256-r0TV8CpsmiiQNomT1H/3p/pyUN3SJ4Xk6csvvKo6fQ4=";
           };
         };
         codedb = pkgs.stdenv.mkDerivation {
@@ -148,13 +148,22 @@
           };
         };
         click = pythonPackages.click.overridePythonAttrs {
-          version = "8.4.2";
+          version = "8.5.0";
           src = pkgs.fetchPypi {
             pname = "click";
-            version = "8.4.2";
-            hash = "sha256-mmzqbmCxfr4KRMXMY22U8JvWYULBzX2LTNcxxJF6FfY=";
+            version = "8.5.0";
+            hash = "sha256-ug0gid516gMQ4t3gMWDmyhAAmUf7laGC+bVAIbsnLjQ=";
           };
         };
+        hatchling = pythonPackages.hatchling.overridePythonAttrs (old: {
+          version = "1.32.4";
+          src = pkgs.fetchPypi {
+            pname = "hatchling";
+            version = "1.32.4";
+            hash = "sha256-xEaPcxRMBU0qq07w8DeMQ7mHi/B/j/1reWkOlw03Xwc=";
+          };
+          dependencies = old.dependencies ++ [pythonPackages.tomlkit];
+        });
         treeSitterAsset = builtins.getAttr system {
           aarch64-darwin = {
             path = "54/6f/8bb61957f16ec1b1d92410a006cdc84a952b6352a7313b2ad299f2d21484/tree_sitter-0.26.0-cp312-cp312-macosx_11_0_arm64.whl";
@@ -183,21 +192,21 @@
         };
         languagePackAsset = builtins.getAttr system {
           aarch64-darwin = {
-            path = "48/bc/ff15c101fb874f8c80f0f722420915884a1233ddae3eff920f56a5b16b76/tree_sitter_language_pack-1.14.3-cp310-abi3-macosx_11_0_arm64.whl";
-            hash = "sha256-O1YCi7pHK3dM3QDu3SdEoeZjoAPFIsGAcWQvJQEBYhI=";
+            path = "fe/a7/7efe38f71d6487a533c45090e8df684d98f9ce817f86506bdc6a412fcafe/tree_sitter_language_pack-1.20.0-cp310-abi3-macosx_11_0_arm64.whl";
+            hash = "sha256-TwsBVQRtkCfCyoai5nsPdAQL11IOqqZAuUvsuN8EL3I=";
           };
           aarch64-linux = {
-            path = "fa/93/fe18a7da47f9189c75584c6996568d6052f0c9b5b29831cc49f213c8b7e0/tree_sitter_language_pack-1.14.3-cp310-abi3-manylinux_2_34_aarch64.whl";
-            hash = "sha256-sTcm7SxAIDXtG2AQgKNZejNG3Ul2T0uS0JxvWh19EhQ=";
+            path = "e2/91/b89308f744e35d414a02efe2d122d051b74e275edb852fdcdd58238f1ab3/tree_sitter_language_pack-1.20.0-cp310-abi3-manylinux_2_34_aarch64.whl";
+            hash = "sha256-NVw1BCmJ7Bdtyd7XCC0zV7ZoQp6oc/928rmmp9dTcxs=";
           };
           x86_64-linux = {
-            path = "bf/5c/70fa8a6d2bcc2578d38e1853382591134584eea8fa9556477c533d793f0c/tree_sitter_language_pack-1.14.3-cp310-abi3-manylinux_2_34_x86_64.whl";
-            hash = "sha256-yd+FRd9I7hF0T5+9HcyXKicN+epIUyHOKeNS3WTLGkw=";
+            path = "89/72/02da1179165c74930c489565d00388201c9d26533fdd3b61a5eae4cc347e/tree_sitter_language_pack-1.20.0-cp310-abi3-manylinux_2_34_x86_64.whl";
+            hash = "sha256-5T+p4bKBwh8diFrmowgowq8rDEPyIbe8PDgfvexLFAk=";
           };
         };
         treeSitterLanguagePack = pythonPackages.buildPythonPackage {
           pname = "tree-sitter-language-pack";
-          version = "1.14.3";
+          version = "1.20.0";
           format = "wheel";
           src = pkgs.fetchurl {
             url = "https://files.pythonhosted.org/packages/${languagePackAsset.path}";
@@ -237,21 +246,21 @@
         };
         onnxruntimeAsset = builtins.getAttr system {
           aarch64-darwin = {
-            url = "https://files.pythonhosted.org/packages/98/f8/dcbe7700dca82fa540035abd3c868fe5ad0f86af00b9a3db7c2e27d15c7d/onnxruntime-1.28.0-cp312-cp312-macosx_14_0_arm64.whl";
-            hash = "sha256-Jv8P3QbvtsFVuulTh6CdsaK+icegPk0L/9WhccwoJto=";
+            url = "https://files.pythonhosted.org/packages/31/6f/48169f2e62b405bff5053cbd1d73fb5ce41ef7ecd13bb3bfcc191e689b8a/onnxruntime-1.30.0-cp312-cp312-macosx_14_0_arm64.whl";
+            hash = "sha256-AB7XJsm9XivJL6refTfYielgajULfVUp8CJ98uO7V/0=";
           };
           aarch64-linux = {
-            url = "https://files.pythonhosted.org/packages/28/5b/1d77e62097fdbe07e2dc827f389b1c4c0c275f6fab0369a8f46d2461af27/onnxruntime-1.28.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl";
-            hash = "sha256-ToGiPfFuesudUbBtMMwJjkkxXvkYD5e8IiHRZ7SwTZw=";
+            url = "https://files.pythonhosted.org/packages/16/bd/cbc5b8f91963689fdd622f463508c01d0aa95d3f944747b1e0b1eb2160b8/onnxruntime-1.30.0-cp312-cp312-manylinux_2_28_aarch64.whl";
+            hash = "sha256-bDKgANUTmji6k0kDCwAy4zMay1WdWWsic42dKzQ6K4M=";
           };
           x86_64-linux = {
-            url = "https://files.pythonhosted.org/packages/95/df/5486ab03e9be288d5268867054c8b04bebcf95bfd12e801c05cc67703dab/onnxruntime-1.28.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-            hash = "sha256-CoO9tw0UPO3nYrZ3eJvyp6zKVLP7glZWAdXDBpWqkzw=";
+            url = "https://files.pythonhosted.org/packages/34/35/e7f862dbacbc99fadd9b14a614e49c99bf0f35fd9927a82f096e3de33531/onnxruntime-1.30.0-cp312-cp312-manylinux_2_28_x86_64.whl";
+            hash = "sha256-+miOeJGmqiBmNv5zcuJ+51/RdxMon2tPx7GQ4Kfekyg=";
           };
         };
         onnxruntime = pythonPackages.buildPythonPackage {
           pname = "onnxruntime";
-          version = "1.28.0";
+          version = "1.30.0";
           format = "wheel";
           src = pkgs.fetchurl onnxruntimeAsset;
           dependencies = with pythonPackages; [
@@ -326,25 +335,25 @@
           aarch64-darwin = {
             platform = "macos-arm64";
             extension = "dylib";
-            hash = "sha256-cJf3FdB2iObBJ0CQjHEuZ9VnKusFlx3sO2XRnPcIAVk=";
+            hash = "sha256-NPktnPTzrULZUUsw/rovyu3coNSvBkVDgP2eBjQnoJw=";
           };
           aarch64-linux = {
             platform = "linux-aarch64";
             extension = "so";
-            hash = "sha256-DsYUy02sElUc175Cc7bFYaNC+s5ptQ4bSG2wuvcmDqI=";
+            hash = "sha256-Fq47yc4FlHCzPAv7foUXZ4VW8NXtpS/npjDBzuaAdTE=";
           };
           x86_64-linux = {
             platform = "linux-x86_64";
             extension = "so";
-            hash = "sha256-k1wJkPCM3p9B/1UZ3lEptrc6zrzICm22R6Gq31yhmnc=";
+            hash = "sha256-9ypswG79xweF69KD7PriPmUPEiEYhzSYmFlMeHV9D1s=";
           };
         };
         grammarBundle = pkgs.fetchurl {
-          url = "https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.14.3/parsers-${grammarBundleAsset.platform}.tar.zst";
+          url = "https://github.com/xberg-io/tree-sitter-language-pack/releases/download/v1.20.0/parsers-${grammarBundleAsset.platform}.tar.zst";
           inherit (grammarBundleAsset) hash;
         };
         leanGrammar =
-          pkgs.runCommand "tree-sitter-lean-1.14.3" {
+          pkgs.runCommand "tree-sitter-lean-1.20.0" {
             nativeBuildInputs = [pkgs.gnutar pkgs.zstd];
           } ''
             mkdir -p "$out"
@@ -370,7 +379,7 @@
           pyproject = true;
           src = source;
 
-          build-system = [pythonPackages.hatchling];
+          build-system = [hatchling];
           dependencies =
             (with pythonPackages; [
               beautifulsoup4
