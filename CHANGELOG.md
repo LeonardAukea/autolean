@@ -4,7 +4,7 @@ This file records Python API compatibility and the product narrative. Exact
 build chronology, commit-derived Hashver identities, assets, and generated
 notes live in [GitHub Releases].
 
-## Unreleased
+## 0.6.0
 
 - Clarify tutorials, proof and paper evidence, operating guidance, and the
   documentation's four Diátaxis homes.
