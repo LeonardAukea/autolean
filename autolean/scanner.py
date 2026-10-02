@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -88,7 +90,7 @@ class SorryTarget:
 # ---------------------------------------------------------------------------
 
 
-def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
+def _is_tactic_mode(lines: list[str], sorry_line: int, sorry_col: int | None = None) -> bool:
     """Determine if a sorry at `sorry_line` (1-indexed) is in tactic mode.
 
     Walk backward from the sorry line looking for `by` keyword.
@@ -112,7 +114,9 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
                 return False
         return True  # default to tactic mode (most common)
 
-    sorry_idx = target.find("sorry")
+    sorry_idx = (
+        next((match.start() for match in _sorry_matches(target)), -1) if sorry_col is None else sorry_col
+    )
     before_sorry = target[:sorry_idx] if sorry_idx >= 0 else ""
     if re.search(r"\bby\b", before_sorry):
         return True
@@ -128,15 +132,24 @@ def _is_tactic_mode(lines: list[str], sorry_line: int) -> bool:
 
 # This bounded scanner discovers common source targets. Lean's parser validates
 # the declaration name and source range before any generated proof is accepted.
+# Character classes follow Lean's Init.Meta.Defs identifier predicates.
+_IDENT_FIRST = (
+    r"A-Za-z_\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u017f"
+    r"\u0391-\u039f\u03a1\u03a4-\u03a9\u03b1-\u03ba\u03bc-\u03fb"
+    r"\u1f00-\u1ffe\u2100-\u214f\U0001d49c-\U0001d59f"
+)
+_IDENT_REST = _IDENT_FIRST + r"0-9'!?\u2080-\u2089\u2090-\u209c\u1d62-\u1d6a\u2c7c"
+_IDENT_PART = rf"(?:«[^»]*»|[{_IDENT_FIRST}][{_IDENT_REST}]*)"
+_IDENT = rf"{_IDENT_PART}(?:\.{_IDENT_PART})*"
 _DECL_RE = re.compile(
     r"^\s*(?:@\[[^\]\r\n]*\]\s*)*"
     r"(?:(?:private|protected|noncomputable|unsafe|partial|local)\s+)*"
     r"(theorem|lemma|def|instance|example|abbrev|opaque)\b"
-    r"(?:\s+(«[^»]+»|[^\s:({\[]+))?"
+    rf"(?:\s+({_IDENT}))?"
 )
-_NAMESPACE_RE = re.compile(r"^\s*namespace(?:\s+([^\s]+))?\s*$")
-_SECTION_RE = re.compile(r"^\s*section(?:\s+[^\s]+)?\s*$")
-_END_RE = re.compile(r"^\s*end(?:\s+[^\s]+)?\s*$")
+_NAMESPACE_RE = re.compile(rf"^\s*namespace(?:\s+({_IDENT}))?\s*$")
+_SECTION_RE = re.compile(rf"^\s*section(?:\s+{_IDENT})?\s*$")
+_END_RE = re.compile(rf"^\s*end(?:\s+{_IDENT})?\s*$")
 
 
 def _find_enclosing_decl_details(
@@ -185,16 +198,16 @@ def _find_enclosing_decl_details(
 # Scanner
 # ---------------------------------------------------------------------------
 
-# Match a sorry token in masked Lean source.
-_SORRY_RE = re.compile(r"\bsorry\b")
-_NONCODE_START_RE = re.compile(r'--|/-|"')
+_SORRY_RE = re.compile(rf"«[^»]*(?:»|$)|(?<![{_IDENT_REST}.`])sorry(?![{_IDENT_REST}.])")
+_CHAR_LITERAL = r"'(?:[^'\\]|\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|[\\\"'rnt]))'"
+_NONCODE_START_RE = re.compile(rf'«|--|/-|(?<![{_IDENT_REST}.`])(?:r#*"|{_CHAR_LITERAL})|"')
 _BLOCK_DELIMITER_RE = re.compile(r"/-|-/")
 _STRING_DELIMITER_RE = re.compile(r'\\[\s\S]|"')
 _NON_NEWLINE_RE = re.compile(r"[^\n]+")
 
 
 def _mask_lean_noncode(source: str) -> str:
-    """Blank comments and strings while preserving offsets and newlines.
+    """Blank comments and value literals; preserve identifiers and positions.
 
     Lean block comments nest. Keeping every source offset stable lets the
     scanner use positions from the masked text to edit the original bytes.
@@ -204,11 +217,23 @@ def _mask_lean_noncode(source: str) -> str:
     while match := _NONCODE_START_RE.search(source, cursor):
         start = match.start()
         end = len(source)
-        if match.group() == "--":
+        token = match.group()
+        if token == "«":
+            closing = source.find("»", match.end())
+            if closing >= 0:
+                end = closing + 1
+        elif token.startswith("r"):
+            closing_marker = '"' + "#" * (len(token) - 2)
+            closing = source.find(closing_marker, match.end())
+            if closing >= 0:
+                end = closing + len(closing_marker)
+        elif token.startswith("'"):
+            end = match.end()
+        elif token == "--":
             newline = source.find("\n", match.end())
             if newline >= 0:
                 end = newline
-        elif match.group() == "/-":
+        elif token == "/-":
             depth = 1
             for delimiter in _BLOCK_DELIMITER_RE.finditer(source, match.end()):
                 depth += 1 if delimiter.group() == "/-" else -1
@@ -221,15 +246,22 @@ def _mask_lean_noncode(source: str) -> str:
                     end = delimiter.end()
                     break
         spans.append(source[cursor:start])
-        spans.append(_NON_NEWLINE_RE.sub(lambda part: " " * len(part.group()), source[start:end]))
+        span = source[start:end]
+        spans.append(
+            span if token == "«" else _NON_NEWLINE_RE.sub(lambda part: " " * len(part.group()), span)
+        )
         cursor = end
     spans.append(source[cursor:])
     return "".join(spans)
 
 
+def _sorry_matches(masked: str) -> Iterator[re.Match[str]]:
+    return (match for match in _SORRY_RE.finditer(masked) if match.group() == "sorry")
+
+
 def count_sorries(source: str) -> int:
-    """Count actual placeholders outside Lean comments and strings."""
-    return len(_SORRY_RE.findall(_mask_lean_noncode(source)))
+    """Count bare placeholders outside Lean comments and value literals."""
+    return sum(1 for _ in _sorry_matches(_mask_lean_noncode(source)))
 
 
 CONTEXT_WINDOW = 40  # lines of context above/below sorry
@@ -248,7 +280,9 @@ def scan_file(
     content = read_source(path)
     source_sha256 = hashlib.sha256(content.encode()).hexdigest()
     lines = content.split("\n")
-    masked_lines = _mask_lean_noncode(content).split("\n")
+    masked = _mask_lean_noncode(content)
+    masked_lines = masked.split("\n")
+    line_starts = [0, *(match.end() for match in re.finditer("\n", masked))]
     targets: list[SorryTarget] = []
 
     rel_path = ""
@@ -258,39 +292,29 @@ def scan_file(
         except ValueError:
             rel_path = path.name
 
-    for i, masked_line in enumerate(masked_lines):
-        for m in _SORRY_RE.finditer(masked_line):
-            col = m.start()
+    for match in _sorry_matches(masked):
+        line_num = bisect_right(line_starts, match.start())
+        col = match.start() - line_starts[line_num - 1]
+        decl_name, qualified_name, decl_line = _find_enclosing_decl_details(masked_lines, line_num)
+        tactic = _is_tactic_mode(masked_lines, line_num, col)
+        ctx_start = max(0, decl_line - 1)
+        ctx_end = min(len(lines), line_num + context_lines)
 
-            line_num = i + 1  # 1-indexed
-            decl_name, qualified_name, decl_line = _find_enclosing_decl_details(
-                masked_lines,
-                line_num,
+        targets.append(
+            SorryTarget(
+                file=path,
+                line=line_num,
+                col=col,
+                decl_name=decl_name,
+                decl_line=decl_line,
+                context_before="\n".join(lines[ctx_start : line_num - 1]),
+                context_after="\n".join(lines[line_num:ctx_end]),
+                tactic_mode=tactic,
+                rel_path=rel_path,
+                qualified_decl_name=qualified_name,
+                source_sha256=source_sha256,
             )
-
-            tactic = _is_tactic_mode(masked_lines, line_num)
-
-            ctx_start = max(0, decl_line - 1)  # from declaration start
-            ctx_end = min(len(lines), i + context_lines + 1)
-
-            context_before = "\n".join(lines[ctx_start:i])
-            context_after = "\n".join(lines[i + 1 : ctx_end])
-
-            targets.append(
-                SorryTarget(
-                    file=path,
-                    line=line_num,
-                    col=col,
-                    decl_name=decl_name,
-                    decl_line=decl_line,
-                    context_before=context_before,
-                    context_after=context_after,
-                    tactic_mode=tactic,
-                    rel_path=rel_path,
-                    qualified_decl_name=qualified_name,
-                    source_sha256=source_sha256,
-                )
-            )
+        )
 
     return targets
 

@@ -135,6 +135,54 @@ class TestScanFile:
         assert target.decl_name == "«name with spaces»"
         assert target.qualified_decl_name == "Outer.«name with spaces»"
 
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "def «sorry» : Nat := 0\n",
+            "def sorry' : Nat := 0\n",
+            "def sorry? : Nat := 0\n",
+            "def sorry! : Nat := 0\n",
+            "def sorry℉ : Nat := 0\n",
+            "def Outer.sorry : Nat := 0\n",
+            "def name : Lean.Name := `sorry\n",
+            """def quote : Char := '"'\n""",
+            r"def quote : Char := '\x22'" + "\n",
+            r"def quote : Char := '\u0022'" + "\n",
+            'def raw : String := r##"inside " sorry "# still raw"##\n',
+            'def raw : String := r"trailing \\"\n',
+            "def «multiline\nsorry» : Nat := 0\n",
+        ],
+    )
+    def test_identifiers_and_literals_preserve_the_real_target(self, tmp_path: Path, prefix: str) -> None:
+        source = tmp_path / "Literals.lean"
+        content = prefix + "theorem target : True := by sorry\n"
+        source.write_text(content, encoding="utf-8")
+
+        (target,) = scan_file(source)
+
+        assert count_sorries(content) == 1
+        assert target.decl_name == "target"
+        assert target.line == prefix.count("\n") + 1
+        assert target.col == len("theorem target : True := by ")
+        assert target.tactic_mode
+
+    def test_quoted_names_preserve_comment_markers_and_spaces(self, tmp_path: Path) -> None:
+        source = tmp_path / "Quoted.lean"
+        content = (
+            "namespace «sorry -- namespace»\n"
+            'theorem Inner.«sorry /- name -/ "» : True := by sorry\n'
+            "end «sorry -- namespace»\n"
+        )
+        source.write_text(content, encoding="utf-8")
+
+        (target,) = scan_file(source)
+
+        assert count_sorries(content) == 1
+        assert target.decl_name == 'Inner.«sorry /- name -/ "»'
+        assert target.qualified_decl_name == '«sorry -- namespace».Inner.«sorry /- name -/ "»'
+        assert target.col == content.splitlines()[1].rfind("sorry")
+        assert target.tactic_mode
+
     def test_masked_spans_preserve_the_original_target_position(self, tmp_path: Path) -> None:
         source = tmp_path / "Positions.lean"
         content = (
