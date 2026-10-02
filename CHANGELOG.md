@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Audit declaration types and axioms through trusted code with candidate
+  initializers disabled; bind validation to one deadline and stable artifacts.
+- Restrict macOS candidate execution, host signals, and file reads to the
+  sandbox's explicit capabilities.
+
 - Refresh the Python lock and pinned Lean, Mathlib, CSLib, Nix packages,
   document parsers, CodeDB, and Lightpanda releases.
 
