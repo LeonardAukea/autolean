@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeVar
@@ -133,7 +134,7 @@ def escalation_options(function: CommandFunction) -> CommandFunction:
 
 def _confirm_model_escalation(decision: EscalationDecision) -> bool:
     """Ask for a model switch when the command owns an interactive terminal."""
-    if not click.get_text_stream("stdin").isatty():
+    if sys.stdin is None or not sys.stdin.isatty():
         return False
     return click.confirm(
         f"Switch {decision.from_model} to {decision.to_model}?",
