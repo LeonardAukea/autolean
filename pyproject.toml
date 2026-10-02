@@ -1,6 +1,6 @@
 [project]
 name = "autolean-proof"
-version = "0.5.0"
+version = "0.6.0"
 description = "Autonomous Lean 4 proof agent with sandboxed, content-addressed verification."
 readme = "README.md"
 license = "MIT"

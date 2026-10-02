@@ -149,9 +149,9 @@ def project_dir(tmp_path: Path) -> Path:
 
 class TestCLIBasics:
     def test_version(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["--version"])
+        result = runner.invoke(main, ["--version"], prog_name="autolean")
         assert result.exit_code == 0
-        assert "0.5.0" in result.output or "autolean" in result.output
+        assert result.output == "autolean, version 0.6.0\n"
 
     def test_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["--help"])
