@@ -8,17 +8,19 @@
 
 <p align="center">
   <a href="https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml"><img src="https://github.com/LeonardAukea/autolean/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/leanprover/lean4/releases/tag/v4.34.1">
-    <img src="https://img.shields.io/badge/Lean-4.34.1-0d9488"
-         alt="Lean 4.34.1">
-  </a>
+  <a href="https://github.com/leanprover/lean4/releases/tag/v4.34.1"><img src="https://img.shields.io/badge/Lean-4.34.1-0d9488" alt="Lean 4.34.1"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2563eb.svg" alt="License: MIT"></a>
 </p>
 
-AutoLean helps turn a mathematical goal into a Lean 4 proof. It proposes a
-plan and a formal statement, tests candidate proofs with Lean, and records
-each attempt. Accepted proofs carry their exact source, proof environment,
-and axiom report so another researcher can inspect and re-check them.
+AutoLean turns a mathematical goal into a reviewable research plan, a Lean 4
+declaration, and a kernel-checked proof. Every accepted result is an auditable
+derivation. Its proof commit binds the source to the exact Lean, Mathlib, and
+dependency closure that checked it, to the proof hash, and to the transitive
+axiom report, so the theorem can be re-checked in the same pinned environment.
+Every attempt records the model and identities of its prompt and search
+context. Exports bind the selected source and session to a manifest.
+Acceptance requires a source policy, an operating-system sandbox,
+elaboration by the pinned toolchain, and a declaration and axiom audit.
 
 AutoLean is alpha research software. A successful run proves the exact Lean
 statement shown in the result. It does not prove that a generated statement
@@ -40,14 +42,14 @@ faithfully expresses an informal claim.
   <a href="docs/demos/pythagorean.json">Run manifest</a>
 </p>
 
-The recording shows a live subscription model proposing a mathematical plan,
-compiling a formal statement, and finding a proof within a bounded session.
-The accepted proof is committed and exported as a standalone Lean project.
-A `--guide` specifies the geometric statement and the Mathlib lemma to use;
-the VHS source holds the exact command. Model responses can vary between
-runs. The recording pauses during provider and compiler latency, then shows
-every review, acceptance, artifact, and independent Lean check at 1.25 times
-speed. A second recording
+The recording runs the front-page workflow live with a configured subscription
+provider: a reviewed mathematical plan, an isolated formalization compiled
+before proof search, a bounded proof session, and a kernel-checked commit
+exported as a standalone Lean project. It adds one `--guide` fixing the
+geometric statement and the Mathlib lemma that closes it, so the run is
+reproducible; the VHS source holds the exact command. The recording pauses
+during provider and compiler latency, then shows every review, acceptance,
+artifact, and independent Lean check at 1.25 times speed. A second recording
 [audits a real formalization paper](docs/assets/autolean-ionescu-tulcea.gif)
 (arXiv:2506.18616v5) —
 [MP4](docs/assets/autolean-ionescu-tulcea.mp4) ·
@@ -116,9 +118,10 @@ stays the working path.
 - `autolean export OUTPUT` writes a standalone Lean project, provenance
   manifest, and companion LaTeX paper.
 
-Proof search records a resumable session and runs under an explicit cycle
-budget. Lean diagnostics inform later attempts, and accepted tactic patterns
-can enter later prompts as learned skills. The
+Every mutating workflow records a resumable session and runs under an explicit
+cycle budget. The loop learns from both outcomes: classified failure evidence
+redirects the next attempt, and each accepted proof becomes a ranked skill
+offered to later prompts. The
 [research loop](docs/explanation/research-loop.md) explains the full cycle.
 
 ## How a proof gets accepted
